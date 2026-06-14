@@ -1,0 +1,72 @@
+groups:
+  - name: autohand-router
+    rules:
+      - alert: AutohandRouterUpstreamErrorsHigh
+        expr: sum(rate(autohand_router_events_total{event="upstream_errors",job="autohand-router"}[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Autohand Router upstream errors are elevated
+          description: More than 0.05 upstream errors per second for 10 minutes.
+
+      - alert: AutohandRouterFailoverPressureHigh
+        expr: |
+          (
+            sum(rate(autohand_router_events_total{event="failover_attempts",job="autohand-router"}[10m]))
+            /
+            clamp_min(sum(rate(autohand_router_requests_total{endpoint=~"chat|responses",job="autohand-router"}[10m])), 0.001)
+          ) > 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Autohand Router failover pressure is high
+          description: More than 10% of chat/Responses requests are attempting failover.
+
+      - alert: AutohandRouterSemanticCacheHitRateLow
+        expr: |
+          (
+            sum(rate(autohand_router_events_total{event="semantic_cache_hits",job="autohand-router"}[30m]))
+            /
+            clamp_min(sum(rate(autohand_router_events_total{event=~"semantic_cache_hits|semantic_cache_misses",job="autohand-router"}[30m])), 0.001)
+          ) < 0.05
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: Autohand Router semantic cache hit rate is low
+          description: Semantic cache is enabled but hit rate is below 5% over 30 minutes.
+
+      - alert: AutohandRouterClassifierFallbackHigh
+        expr: |
+          (
+            sum(rate(autohand_router_judge_events_total{event="fallbacks",job="autohand-router"}[15m]))
+            /
+            clamp_min(sum(rate(autohand_router_judge_events_total{event="requests",job="autohand-router"}[15m])), 0.001)
+          ) > 0.20
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Autohand Router classifier adapter fallback rate is high
+          description: More than 20% of classifier adapter requests are falling back to heuristic routing.
+
+      - alert: AutohandRouterBudgetRejections
+        expr: sum(rate(autohand_router_events_total{event="budget_rejections",job="autohand-router"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Autohand Router is rejecting requests due to budget limits
+          description: Budget limits are actively rejecting traffic.
+
+      - alert: AutohandRouterAuthFailuresHigh
+        expr: sum(rate(autohand_router_events_total{event="auth_failures",job="autohand-router"}[5m])) > 0.20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Autohand Router auth failures are elevated
+          description: Auth failures are above 0.20 per second for 10 minutes.
+

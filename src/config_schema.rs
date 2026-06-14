@@ -295,7 +295,19 @@ fn defs() -> Value {
                 "provider_health_penalties": number_map(),
                 "priority_weight": number_min_default(0.0, 0.08),
                 "latency_weight": number_min_default(0.0, 0.05),
-                "health_weight": number_min_default(0.0, 1.0)
+                "health_weight": number_min_default(0.0, 1.0),
+                "learned": ref_schema("LearnedScoringConfig")
+            }
+        },
+        "LearnedScoringConfig": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "enabled": bool_default(false),
+                "weight": number_min_default(0.0, 0.0),
+                "bias": { "type": "number", "default": 0.0 },
+                "feature_weights": number_map(),
+                "model_biases": number_map()
             }
         },
         "PolicyWeights": {
@@ -444,9 +456,14 @@ mod tests {
         assert!(schema["$defs"]["SemanticCacheConfig"].is_object());
         assert!(schema["$defs"]["StickyRoutingConfig"].is_object());
         assert!(schema["$defs"]["ShadowEvalJudgeConfig"].is_object());
+        assert!(schema["$defs"]["LearnedScoringConfig"].is_object());
         assert_eq!(
             schema["$defs"]["SemanticCacheConfig"]["properties"]["backend"]["$ref"],
             "#/$defs/StorageBackend"
+        );
+        assert_eq!(
+            schema["$defs"]["ScoringConfig"]["properties"]["learned"]["$ref"],
+            "#/$defs/LearnedScoringConfig"
         );
         assert_eq!(
             schema["$defs"]["ModelCapabilities"]["properties"]["supports_web_apps"]["type"],

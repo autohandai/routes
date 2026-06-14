@@ -286,6 +286,8 @@ pub struct ScoringConfig {
     pub latency_weight: f32,
     #[serde(default = "default_health_weight")]
     pub health_weight: f32,
+    #[serde(default)]
+    pub learned: LearnedScoringConfig,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -300,6 +302,20 @@ pub struct PolicyWeights {
     pub latency: f32,
     #[serde(default)]
     pub health: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearnedScoringConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub weight: f32,
+    #[serde(default)]
+    pub bias: f32,
+    #[serde(default)]
+    pub feature_weights: HashMap<String, f32>,
+    #[serde(default)]
+    pub model_biases: HashMap<String, f32>,
 }
 
 impl Default for ScoringConfig {
@@ -319,6 +335,19 @@ impl Default for ScoringConfig {
             priority_weight: default_priority_weight(),
             latency_weight: default_latency_weight(),
             health_weight: default_health_weight(),
+            learned: LearnedScoringConfig::default(),
+        }
+    }
+}
+
+impl Default for LearnedScoringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            weight: 0.0,
+            bias: 0.0,
+            feature_weights: HashMap::new(),
+            model_biases: HashMap::new(),
         }
     }
 }
@@ -719,6 +748,7 @@ impl RouterConfig {
         self.shadow_eval.validate(self)?;
         self.safety.validate(self)?;
         self.sticky_routing.validate()?;
+        self.scoring.validate_model_references(self)?;
         Ok(())
     }
 
@@ -1338,6 +1368,48 @@ impl ScoringConfig {
                 "scoring.provider_health_penalties.{provider} must be between 0.0 and 1.0"
             );
         }
+        self.learned.validate()?;
+        Ok(())
+    }
+
+    fn validate_model_references(&self, config: &RouterConfig) -> Result<()> {
+        for model in self.learned.model_biases.keys() {
+            anyhow::ensure!(
+                config.find_model(model).is_some(),
+                "scoring.learned.model_biases references unknown model or alias {model}"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl LearnedScoringConfig {
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.weight.is_finite() && self.weight >= 0.0,
+            "scoring.learned.weight must be a non-negative finite number"
+        );
+        anyhow::ensure!(self.bias.is_finite(), "scoring.learned.bias must be finite");
+        for (feature, weight) in &self.feature_weights {
+            anyhow::ensure!(
+                !feature.trim().is_empty(),
+                "scoring.learned.feature_weights cannot contain empty feature names"
+            );
+            anyhow::ensure!(
+                weight.is_finite(),
+                "scoring.learned.feature_weights.{feature} must be finite"
+            );
+        }
+        for (model, bias) in &self.model_biases {
+            anyhow::ensure!(
+                !model.trim().is_empty(),
+                "scoring.learned.model_biases cannot contain empty model names"
+            );
+            anyhow::ensure!(
+                bias.is_finite(),
+                "scoring.learned.model_biases.{model} must be finite"
+            );
+        }
         Ok(())
     }
 }
@@ -1465,6 +1537,42 @@ mod tests {
             .insert("provider-a".to_string(), 0.1);
 
         config.validate().expect("valid scoring hints accepted");
+    }
+
+    #[test]
+    fn accepts_learned_scoring_for_known_model_alias() {
+        let mut config = valid_config();
+        config.scoring.learned.enabled = true;
+        config.scoring.learned.weight = 0.4;
+        config
+            .scoring
+            .learned
+            .feature_weights
+            .insert("domain.coding".to_string(), 0.3);
+        config
+            .scoring
+            .learned
+            .model_biases
+            .insert("alias-a".to_string(), 0.2);
+
+        config.validate().expect("valid learned scoring accepted");
+    }
+
+    #[test]
+    fn rejects_learned_scoring_unknown_model_bias() {
+        let mut config = valid_config();
+        config.scoring.learned.enabled = true;
+        config.scoring.learned.weight = 0.4;
+        config
+            .scoring
+            .learned
+            .model_biases
+            .insert("missing-model".to_string(), 0.2);
+
+        let error = config
+            .validate()
+            .expect_err("unknown learned model bias rejected");
+        assert!(error.to_string().contains("scoring.learned.model_biases"));
     }
 
     #[test]

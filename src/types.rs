@@ -522,6 +522,7 @@ pub struct RouteScoreComponents {
     pub cost_penalty: f32,
     pub overkill_penalty: f32,
     pub routing_priority_boost: f32,
+    pub learned_score_boost: f32,
     pub latency_penalty: f32,
     pub health_penalty: f32,
     pub capability_exclusion_penalty: f32,

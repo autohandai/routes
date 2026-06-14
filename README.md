@@ -71,6 +71,7 @@ It also includes estimated input tokens, requested output tokens, per-candidate 
 `decision_trace` includes the classifier labels, selected policy weights, required capabilities, selected score, rejected candidates, and per-candidate score components for debugging routing decisions.
 Reasoning depth raises or lowers the capability target, and latency sensitivity changes how strongly observed/static provider latency affects candidate scores.
 Policy presets are config-driven: `balanced` is the default tradeoff, `floor` selects the cheapest acceptable candidate, `nitro` emphasizes fast healthy providers, and `quality` favors the strongest candidate. Legacy policy names `cost_efficient`, `capability_heavy`, and `domain_skills` remain supported.
+Optional learned scoring is configured under `scoring.learned`; it applies a bounded linear score boost from trainable feature/model weights such as `difficulty.hard`, `domain.coding`, `modality.vision`, `supports_web_apps`, `capability`, `cost`, `provider.<name>`, and `model.<id-or-alias>`. Learned contributions are exposed as `score_components.learned_score_boost`.
 When `default_model` is provided with `allowed_models` or `allowed_providers`, the default must satisfy those filters. The router will not silently return an out-of-filter fallback.
 
 Legacy Morph clients can call `/v1/router/raw` for a difficulty-only response:

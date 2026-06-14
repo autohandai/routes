@@ -753,13 +753,14 @@ fn schemas() -> Value {
                 "cost_penalty": { "type": "number" },
                 "overkill_penalty": { "type": "number" },
                 "routing_priority_boost": { "type": "number" },
+                "learned_score_boost": { "type": "number" },
                 "latency_penalty": { "type": "number" },
                 "health_penalty": { "type": "number" },
                 "capability_exclusion_penalty": { "type": "number" },
                 "context_exclusion_penalty": { "type": "number" },
                 "final_score": { "type": "number" }
             },
-            "required": ["capability_fit", "capability_fit_score", "domain_bonus", "domain_bonus_score", "raw_capability_score", "cost_penalty", "overkill_penalty", "routing_priority_boost", "latency_penalty", "health_penalty", "capability_exclusion_penalty", "context_exclusion_penalty", "final_score"]
+            "required": ["capability_fit", "capability_fit_score", "domain_bonus", "domain_bonus_score", "raw_capability_score", "cost_penalty", "overkill_penalty", "routing_priority_boost", "learned_score_boost", "latency_penalty", "health_penalty", "capability_exclusion_penalty", "context_exclusion_penalty", "final_score"]
         },
         "ModelCapability": {
             "type": "string",

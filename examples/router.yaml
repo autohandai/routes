@@ -113,6 +113,14 @@ scoring:
   priority_weight: 0.08
   latency_weight: 0.05
   health_weight: 1.0
+  learned:
+    # Optional trainable linear score adjustment. Keep disabled until eval/optimize
+    # artifacts have produced feature/model weights you trust.
+    enabled: false
+    weight: 0.0
+    bias: 0.0
+    feature_weights: {}
+    model_biases: {}
   balanced:
     capability_fit: 0.60
     domain_bonus: 0.20

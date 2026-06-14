@@ -477,9 +477,12 @@ fn scored_candidates(
                 * latency_sensitivity_multiplier(&classifications.latency_sensitivity.label);
             score_components.routing_priority_boost =
                 routing_priority * config.scoring.priority_weight;
+            score_components.learned_score_boost =
+                learned_score_boost(model, classifications, config);
             score_components.latency_penalty = latency_penalty * latency_weight;
             score_components.health_penalty = health_penalty * weights.health;
             score += score_components.routing_priority_boost;
+            score += score_components.learned_score_boost;
             score -= score_components.latency_penalty;
             score -= score_components.health_penalty;
             if !capability_eligible {
@@ -654,6 +657,7 @@ fn score_model_components(
         cost_penalty,
         overkill_penalty,
         routing_priority_boost: 0.0,
+        learned_score_boost: 0.0,
         latency_penalty: 0.0,
         health_penalty: 0.0,
         capability_exclusion_penalty: 0.0,
@@ -722,6 +726,151 @@ fn routing_priority(model: &ModelConfig, config: &RouterConfig) -> f32 {
         .copied()
         .unwrap_or_default();
     (model_priority + provider_priority).clamp(-1.0, 1.0)
+}
+
+fn learned_score_boost(
+    model: &ModelConfig,
+    classifications: &Classifications,
+    config: &RouterConfig,
+) -> f32 {
+    let learned = &config.scoring.learned;
+    if !learned.enabled || learned.weight <= 0.0 {
+        return 0.0;
+    }
+    let mut raw = learned.bias;
+    raw += learned_model_bias(model, config);
+    raw += learned_feature_weight("bias", config);
+    raw += learned_feature_weight(&format!("model.{}", model.id), config);
+    for alias in &model.aliases {
+        raw += learned_feature_weight(&format!("model.{alias}"), config);
+    }
+    raw += learned_feature_weight(&format!("provider.{}", model.provider), config);
+    raw += learned_feature_weight(
+        &format!(
+            "difficulty.{}",
+            label_key(&classifications.difficulty.label)
+        ),
+        config,
+    ) * classifications.difficulty.confidence;
+    raw += learned_feature_weight(
+        &format!("domain.{}", label_key(&classifications.domain.label)),
+        config,
+    ) * classifications.domain.confidence;
+    raw += learned_feature_weight(
+        &format!("modality.{}", label_key(&classifications.modality.label)),
+        config,
+    ) * classifications.modality.confidence;
+    raw += learned_feature_weight(
+        &format!("safety.{}", label_key(&classifications.safety.label)),
+        config,
+    ) * classifications.safety.confidence;
+    raw += learned_feature_weight(
+        &format!(
+            "cacheability.{}",
+            label_key(&classifications.cacheability.label)
+        ),
+        config,
+    ) * classifications.cacheability.confidence;
+    raw += learned_feature_weight(
+        &format!(
+            "latency_sensitivity.{}",
+            label_key(&classifications.latency_sensitivity.label)
+        ),
+        config,
+    ) * classifications.latency_sensitivity.confidence;
+    raw += learned_feature_weight(
+        &format!(
+            "reasoning_depth.{}",
+            label_key(&classifications.reasoning_depth.label)
+        ),
+        config,
+    ) * classifications.reasoning_depth.confidence;
+    raw += learned_feature_weight("domain_match", config)
+        * domain_bonus(model, classifications.domain.label.clone());
+    raw += learned_feature_weight("capability", config) * model.capability;
+    raw += learned_feature_weight("cost", config) * normalized_cost(model);
+    raw += learned_feature_weight("local", config) * if model.local { 1.0 } else { 0.0 };
+    raw += learned_feature_weight("supports_vision", config)
+        * if model.capabilities.supports_vision {
+            1.0
+        } else {
+            0.0
+        };
+    raw += learned_feature_weight("supports_audio", config)
+        * if model.capabilities.supports_audio {
+            1.0
+        } else {
+            0.0
+        };
+    raw += learned_feature_weight("supports_tools", config)
+        * if model.capabilities.supports_tools {
+            1.0
+        } else {
+            0.0
+        };
+    raw += learned_feature_weight("supports_json", config)
+        * if model.capabilities.supports_json {
+            1.0
+        } else {
+            0.0
+        };
+    raw += learned_feature_weight("supports_code", config)
+        * if model.capabilities.supports_code {
+            1.0
+        } else {
+            0.0
+        };
+    raw += learned_feature_weight("supports_web_apps", config)
+        * if model.capabilities.supports_web_apps {
+            1.0
+        } else {
+            0.0
+        };
+    raw += learned_feature_weight("supports_long_context", config)
+        * if model.capabilities.supports_long_context {
+            1.0
+        } else {
+            0.0
+        };
+    learned.weight * raw.clamp(-1.0, 1.0)
+}
+
+fn learned_feature_weight(feature: &str, config: &RouterConfig) -> f32 {
+    config
+        .scoring
+        .learned
+        .feature_weights
+        .get(feature)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn learned_model_bias(model: &ModelConfig, config: &RouterConfig) -> f32 {
+    config
+        .scoring
+        .learned
+        .model_biases
+        .get(&model.id)
+        .copied()
+        .or_else(|| {
+            model
+                .aliases
+                .iter()
+                .find_map(|alias| config.scoring.learned.model_biases.get(alias).copied())
+        })
+        .unwrap_or_default()
+}
+
+fn label_key<T: std::fmt::Debug>(label: &T) -> String {
+    let raw = format!("{label:?}");
+    let mut key = String::new();
+    for (index, character) in raw.chars().enumerate() {
+        if character.is_uppercase() && index > 0 {
+            key.push('_');
+        }
+        key.extend(character.to_lowercase());
+    }
+    key
 }
 
 fn latency_penalty(
@@ -1412,6 +1561,44 @@ mod tests {
                 .iter()
                 .any(|candidate| candidate.model == "preferred-balanced"
                     && candidate.routing_priority > 0.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn learned_scoring_can_promote_a_trained_candidate() {
+        let base_engine = engine();
+        let mut config = (*base_engine.config()).clone();
+        config.scoring.learned.enabled = true;
+        config.scoring.learned.weight = 0.6;
+        config
+            .scoring
+            .learned
+            .model_biases
+            .insert("strong".to_string(), 1.0);
+        let engine = RoutingEngine::new(config, HeuristicClassifier::default());
+
+        let route = engine
+            .route(MultimodelRequest {
+                input: "Fix this typo in the Rust comment".to_string(),
+                allowed_models: vec!["cheap".to_string(), "strong".to_string()],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+                policy: RouterPolicy::Balanced,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(route.model, "strong");
+        let learned_candidate = route
+            .candidates
+            .iter()
+            .find(|candidate| candidate.model == "strong")
+            .expect("strong candidate is present");
+        assert!(learned_candidate.score_components.learned_score_boost > 0.0);
+        assert!(
+            (learned_candidate.score_components.final_score - learned_candidate.score).abs()
+                < 0.0001
         );
     }
 

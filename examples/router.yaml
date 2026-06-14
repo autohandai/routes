@@ -61,13 +61,24 @@ safety:
   redaction_replacement: "[redacted]"
 
 classifier:
+  # heuristic is local deterministic fallback. Set backend to llm_judge or route_llm
+  # to call a configured small classifier model such as Qwen3.527B.
+  backend: heuristic
   confidence_threshold: 0.62
   easy_threshold: 0.28
   hard_threshold: 0.79
-  # Optional: set to any configured model id/alias to use a live LLM judge.
-  # The judge must return JSON labels; router falls back to heuristic on error.
-  # llm_judge_model: local-coder
+  # Compatibility alias for adapters.llm_judge.model.
+  llm_judge_model:
   llm_judge_timeout_ms: 2500
+  adapters:
+    llm_judge:
+      model:
+      timeout_ms: 2500
+      prompt_template:
+    route_llm:
+      model:
+      timeout_ms: 2500
+      prompt_template:
 
 scoring:
   # Optional operator hints inspired by OpenRouter/LiteLLM routing controls.

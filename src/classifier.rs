@@ -1,4 +1,4 @@
-use crate::config::RouterConfig;
+use crate::config::{ClassifierBackend, ClassifierModelAdapterConfig, RouterConfig};
 use crate::provider::ProviderClient;
 use crate::types::{
     AmbiguityLabel, CacheabilityLabel, ChatMessage, Classification, Classifications,
@@ -82,17 +82,30 @@ impl SmartClassifier {
         self.judge_metrics.snapshot()
     }
 
-    async fn judge(&self, input: &str) -> Result<Classifications> {
-        let Some(model_id) = self.config.classifier.llm_judge_model.as_deref() else {
-            anyhow::bail!("LLM judge model is not configured");
+    async fn classify_with_adapter(
+        &self,
+        input: &str,
+        backend: ClassifierBackend,
+        adapter: ClassifierModelAdapterConfig,
+    ) -> Result<Classifications> {
+        let Some(model_id) = adapter.model.as_deref() else {
+            anyhow::bail!(
+                "{} classifier model is not configured",
+                backend.config_key()
+            );
         };
         let model = self
             .config
             .find_model(model_id)
-            .with_context(|| format!("LLM judge model {model_id} is not configured"))?;
-        let judge_prompt = format!(
+            .with_context(|| format!("classifier model {model_id} is not configured"))?;
+        let default_prompt = format!(
             "Classify the user request for model routing. Return only JSON with keys difficulty, ambiguity, domain, modality, safety, cacheability, latency_sensitivity, reasoning_depth, confidence, ambiguity_confidence, domain_confidence, modality_confidence, safety_confidence, cacheability_confidence, latency_sensitivity_confidence, reasoning_depth_confidence. Valid difficulty: easy, medium, hard, needs_info. Valid ambiguity: low, med, high. Valid domain: general, summary, coding, design, data. Valid modality: text, vision, audio, tool_use, multimodal. Valid safety: safe, sensitive, unsafe. Valid cacheability: low, medium, high. Valid latency_sensitivity: low, medium, high. Valid reasoning_depth: shallow, moderate, deep.\n\nUser request:\n{input}"
         );
+        let judge_prompt = adapter
+            .prompt_template
+            .as_deref()
+            .map(|template| template.replace("{input}", input))
+            .unwrap_or(default_prompt);
         let body = OpenAiChatRequest {
             model: model.id.clone(),
             messages: vec![ChatMessage {
@@ -106,15 +119,16 @@ impl SmartClassifier {
         };
 
         let response = timeout(
-            Duration::from_millis(self.config.classifier.llm_judge_timeout_ms),
+            Duration::from_millis(adapter.timeout_ms),
             self.providers.send_chat(&self.config, model, body),
         )
         .await
-        .context("LLM judge request timed out")??;
+        .with_context(|| format!("{} classifier request timed out", backend.config_key()))??;
         let status = response.status();
         anyhow::ensure!(
             status.is_success(),
-            "LLM judge provider returned HTTP status {status}"
+            "{} classifier provider returned HTTP status {status}",
+            backend.config_key()
         );
         let bytes = response
             .bytes()
@@ -124,7 +138,12 @@ impl SmartClassifier {
         let content = value
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
-            .context("LLM judge response did not include choices[0].message.content")?;
+            .with_context(|| {
+                format!(
+                    "{} classifier response did not include choices[0].message.content",
+                    backend.config_key()
+                )
+            })?;
         parse_judge_content(content)
     }
 }
@@ -132,9 +151,16 @@ impl SmartClassifier {
 #[async_trait]
 impl PromptClassifier for SmartClassifier {
     async fn classify(&self, input: &str) -> Classifications {
-        if self.config.classifier.llm_judge_model.is_some() {
+        let backend = self.config.classifier.active_backend();
+        if matches!(
+            backend,
+            ClassifierBackend::LlmJudge | ClassifierBackend::RouteLlm
+        ) {
             self.judge_metrics.requests.fetch_add(1, Ordering::Relaxed);
-            match self.judge(input).await {
+            match self
+                .classify_with_adapter(input, backend, self.config.classifier.active_adapter())
+                .await
+            {
                 Ok(classifications) => {
                     self.judge_metrics.successes.fetch_add(1, Ordering::Relaxed);
                     return classifications;
@@ -148,7 +174,8 @@ impl PromptClassifier for SmartClassifier {
                     }
                     tracing::warn!(
                         ?error,
-                        "LLM judge classification failed; falling back to heuristic classifier"
+                        backend = backend.config_key(),
+                        "classifier backend failed; falling back to heuristic classifier"
                     );
                 }
             }
@@ -975,8 +1002,9 @@ mod tests {
     use super::*;
     use crate::{
         config::{
-            AuthConfig, BudgetConfig, ClassifierConfig, RouterConfig, RuntimeConfig, ScoringConfig,
-            TelemetryConfig,
+            AuthConfig, BudgetConfig, ClassifierAdaptersConfig, ClassifierBackend,
+            ClassifierConfig, ClassifierModelAdapterConfig, RouterConfig, RuntimeConfig,
+            ScoringConfig, TelemetryConfig,
         },
         types::{ModelConfig, ProviderConfig, ProviderKind, RouterPolicy},
     };
@@ -1051,6 +1079,42 @@ mod tests {
         assert_eq!(metrics.fallbacks, 0);
         assert_eq!(metrics.invalid_outputs, 0);
         assert_eq!(metrics.heuristic_routes, 0);
+    }
+
+    #[tokio::test]
+    async fn route_llm_backend_uses_configured_adapter_model() {
+        let base_url = spawn_judge_server(
+            "{\"difficulty\":\"hard\",\"ambiguity\":\"low\",\"domain\":\"design\",\"confidence\":0.93,\"ambiguity_confidence\":0.82,\"domain_confidence\":0.89}",
+            0,
+        )
+        .await;
+        let mut config = judge_config(base_url, 500);
+        config.classifier = ClassifierConfig {
+            backend: ClassifierBackend::RouteLlm,
+            adapters: ClassifierAdaptersConfig {
+                route_llm: ClassifierModelAdapterConfig {
+                    model: Some("judge-model".to_string()),
+                    timeout_ms: 500,
+                    prompt_template: Some(
+                        "RouteLLM classify this request and return JSON only: {input}".to_string(),
+                    ),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let classifier = SmartClassifier::new(config).unwrap();
+
+        let classifications = classifier
+            .classify("Design a distributed Rust router")
+            .await;
+        let metrics = classifier.judge_metrics();
+
+        assert_eq!(classifications.difficulty.label, DifficultyLabel::Hard);
+        assert_eq!(classifications.domain.label, DomainLabel::Design);
+        assert_eq!(metrics.requests, 1);
+        assert_eq!(metrics.successes, 1);
+        assert_eq!(metrics.fallbacks, 0);
     }
 
     #[tokio::test]
@@ -1255,6 +1319,7 @@ mod tests {
                 hard_threshold: 0.62,
                 llm_judge_model: Some("judge-model".to_string()),
                 llm_judge_timeout_ms: timeout_ms,
+                ..Default::default()
             },
             auth: AuthConfig::default(),
             scoring: ScoringConfig::default(),

@@ -40,6 +40,8 @@ pub struct RouterConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClassifierConfig {
+    #[serde(default)]
+    pub backend: ClassifierBackend,
     #[serde(default = "default_threshold")]
     pub confidence_threshold: f32,
     #[serde(default = "default_easy_threshold")]
@@ -50,6 +52,35 @@ pub struct ClassifierConfig {
     pub llm_judge_model: Option<String>,
     #[serde(default = "default_llm_judge_timeout_ms")]
     pub llm_judge_timeout_ms: u64,
+    #[serde(default)]
+    pub adapters: ClassifierAdaptersConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassifierBackend {
+    #[default]
+    Heuristic,
+    LlmJudge,
+    RouteLlm,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClassifierAdaptersConfig {
+    #[serde(default)]
+    pub llm_judge: ClassifierModelAdapterConfig,
+    #[serde(default)]
+    pub route_llm: ClassifierModelAdapterConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClassifierModelAdapterConfig {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default = "default_llm_judge_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub prompt_template: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -339,11 +370,23 @@ fn default_health_weight() -> f32 {
 impl Default for ClassifierConfig {
     fn default() -> Self {
         Self {
+            backend: ClassifierBackend::Heuristic,
             confidence_threshold: default_threshold(),
             easy_threshold: default_easy_threshold(),
             hard_threshold: default_hard_threshold(),
             llm_judge_model: None,
             llm_judge_timeout_ms: default_llm_judge_timeout_ms(),
+            adapters: Default::default(),
+        }
+    }
+}
+
+impl Default for ClassifierModelAdapterConfig {
+    fn default() -> Self {
+        Self {
+            model: None,
+            timeout_ms: default_llm_judge_timeout_ms(),
+            prompt_template: None,
         }
     }
 }
@@ -545,12 +588,7 @@ impl RouterConfig {
             "default_model {} does not match a configured model id or alias",
             self.default_model
         );
-        if let Some(judge) = &self.classifier.llm_judge_model {
-            anyhow::ensure!(
-                self.find_model(judge).is_some(),
-                "classifier.llm_judge_model {judge} does not match a configured model id or alias"
-            );
-        }
+        self.classifier.validate(self)?;
         anyhow::ensure!(
             self.classifier.easy_threshold < self.classifier.hard_threshold,
             "classifier.easy_threshold must be lower than classifier.hard_threshold"
@@ -814,6 +852,103 @@ impl TelemetryConfig {
     }
 }
 
+impl ClassifierConfig {
+    fn validate(&self, config: &RouterConfig) -> Result<()> {
+        anyhow::ensure!(
+            self.confidence_threshold.is_finite()
+                && (0.0..=1.0).contains(&self.confidence_threshold),
+            "classifier.confidence_threshold must be between 0.0 and 1.0"
+        );
+        anyhow::ensure!(
+            self.easy_threshold.is_finite()
+                && self.hard_threshold.is_finite()
+                && self.easy_threshold < self.hard_threshold,
+            "classifier.easy_threshold must be lower than classifier.hard_threshold"
+        );
+        if let Some(judge) = &self.llm_judge_model {
+            anyhow::ensure!(
+                config.find_model(judge).is_some(),
+                "classifier.llm_judge_model {judge} does not match a configured model id or alias"
+            );
+        }
+        let adapter = self.active_adapter();
+        if matches!(
+            self.active_backend(),
+            ClassifierBackend::LlmJudge | ClassifierBackend::RouteLlm
+        ) {
+            let model = adapter.model.as_deref().unwrap_or_default().trim();
+            anyhow::ensure!(
+                !model.is_empty(),
+                "classifier.adapters.{}.model is required when classifier.backend is {}",
+                self.active_backend().config_key(),
+                self.active_backend().config_key()
+            );
+            anyhow::ensure!(
+                config.find_model(model).is_some(),
+                "classifier.adapters.{}.model {model} does not match a configured model id or alias",
+                self.active_backend().config_key()
+            );
+        }
+        adapter.validate(self.active_backend())?;
+        Ok(())
+    }
+
+    pub fn active_backend(&self) -> ClassifierBackend {
+        if self.backend == ClassifierBackend::Heuristic && self.llm_judge_model.is_some() {
+            ClassifierBackend::LlmJudge
+        } else {
+            self.backend
+        }
+    }
+
+    pub fn active_adapter(&self) -> ClassifierModelAdapterConfig {
+        match self.active_backend() {
+            ClassifierBackend::Heuristic => ClassifierModelAdapterConfig::default(),
+            ClassifierBackend::LlmJudge => {
+                let mut adapter = self.adapters.llm_judge.clone();
+                if adapter.model.is_none() {
+                    adapter.model = self.llm_judge_model.clone();
+                }
+                if adapter.timeout_ms == default_llm_judge_timeout_ms()
+                    && self.llm_judge_timeout_ms != default_llm_judge_timeout_ms()
+                {
+                    adapter.timeout_ms = self.llm_judge_timeout_ms;
+                }
+                adapter
+            }
+            ClassifierBackend::RouteLlm => self.adapters.route_llm.clone(),
+        }
+    }
+}
+
+impl ClassifierBackend {
+    pub fn config_key(self) -> &'static str {
+        match self {
+            Self::Heuristic => "heuristic",
+            Self::LlmJudge => "llm_judge",
+            Self::RouteLlm => "route_llm",
+        }
+    }
+}
+
+impl ClassifierModelAdapterConfig {
+    fn validate(&self, backend: ClassifierBackend) -> Result<()> {
+        anyhow::ensure!(
+            self.timeout_ms > 0,
+            "classifier.adapters.{}.timeout_ms must be greater than zero",
+            backend.config_key()
+        );
+        if let Some(template) = &self.prompt_template {
+            anyhow::ensure!(
+                template.contains("{input}"),
+                "classifier.adapters.{}.prompt_template must include {{input}}",
+                backend.config_key()
+            );
+        }
+        Ok(())
+    }
+}
+
 impl CacheConfig {
     fn validate(&self) -> Result<()> {
         self.semantic.validate()
@@ -1011,9 +1146,10 @@ impl ScoringConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthConfig, BudgetConfig, ClassifierConfig, ProviderHealthSamplerConfig, RouterConfig,
-        RuntimeConfig, SafetyRoutingAction, SafetyRoutingConfig, ScoringConfig,
-        SemanticCacheConfig, ShadowEvalConfig, TelemetryConfig,
+        AuthConfig, BudgetConfig, ClassifierBackend, ClassifierConfig,
+        ClassifierModelAdapterConfig, ProviderHealthSamplerConfig, RouterConfig, RuntimeConfig,
+        SafetyRoutingAction, SafetyRoutingConfig, ScoringConfig, SemanticCacheConfig,
+        ShadowEvalConfig, TelemetryConfig,
     };
     use crate::types::{ModelConfig, ProviderConfig, ProviderKind, RouterPolicy};
 
@@ -1128,6 +1264,55 @@ mod tests {
             .insert("provider-a".to_string(), 0.1);
 
         config.validate().expect("valid scoring hints accepted");
+    }
+
+    #[test]
+    fn legacy_llm_judge_model_selects_llm_judge_backend() {
+        let mut config = valid_config();
+        config.classifier.llm_judge_model = Some("alias-a".to_string());
+        config
+            .validate()
+            .expect("legacy llm_judge_model is still accepted");
+
+        assert_eq!(
+            config.classifier.active_backend(),
+            ClassifierBackend::LlmJudge
+        );
+        assert_eq!(
+            config.classifier.active_adapter().model.as_deref(),
+            Some("alias-a")
+        );
+    }
+
+    #[test]
+    fn rejects_route_llm_backend_without_model() {
+        let mut config = valid_config();
+        config.classifier.backend = ClassifierBackend::RouteLlm;
+
+        let error = config
+            .validate()
+            .expect_err("route_llm backend requires model");
+        assert!(
+            error
+                .to_string()
+                .contains("classifier.adapters.route_llm.model")
+        );
+    }
+
+    #[test]
+    fn rejects_classifier_prompt_template_without_input_placeholder() {
+        let mut config = valid_config();
+        config.classifier.backend = ClassifierBackend::RouteLlm;
+        config.classifier.adapters.route_llm = ClassifierModelAdapterConfig {
+            model: Some("model-a".to_string()),
+            timeout_ms: 1_000,
+            prompt_template: Some("classify this prompt".to_string()),
+        };
+
+        let error = config
+            .validate()
+            .expect_err("classifier template requires input placeholder");
+        assert!(error.to_string().contains("prompt_template"));
     }
 
     #[test]

@@ -30,11 +30,21 @@ safety:
   redaction_replacement: "[redacted]"
 
 classifier:
+  backend: heuristic
   confidence_threshold: 0.62
   easy_threshold: 0.28
   hard_threshold: 0.79
   llm_judge_model:
   llm_judge_timeout_ms: 2500
+  adapters:
+    llm_judge:
+      model:
+      timeout_ms: 2500
+      prompt_template:
+    route_llm:
+      model:
+      timeout_ms: 2500
+      prompt_template:
 
 scoring:
   balanced:

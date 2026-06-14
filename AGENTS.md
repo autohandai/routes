@@ -30,6 +30,7 @@ This repository is a Rust LLM router intended to sit in front of OpenAI-compatib
 - `cargo test`
 - `cargo run -- --config examples/router.yaml validate`
 - `cargo run -- --config examples/router.yaml openapi`
+- `cargo run -- --config examples/router.yaml config-schema`
 - `cargo run -- --config examples/router.yaml serve`
 - `cargo run -- init-config router.yaml`
 - `cargo run -- --config examples/router.yaml classify "Fix this typo"`

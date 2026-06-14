@@ -4,6 +4,7 @@ Rust LLM router and OpenAI-compatible proxy for hosted and local inference. It e
 
 See [PRODUCTION.md](PRODUCTION.md) for the explicit 100M-user readiness bar and open-weight provider roadmap.
 See [docs/](docs/README.md) for container packaging and deployment examples for AWS, Google Cloud, Azure, and Cloudflare.
+Use `cargo run -- config-schema` to print a JSON Schema for `router.yaml` that can be wired into YAML editors or CI checks.
 
 ## Run
 
@@ -11,6 +12,7 @@ See [docs/](docs/README.md) for container packaging and deployment examples for 
 cargo run -- init-config router.yaml
 cargo run -- --config examples/router.yaml validate
 cargo run -- --config examples/router.yaml openapi
+cargo run -- --config examples/router.yaml config-schema
 cargo run -- --config examples/router.yaml serve
 cargo run -- --config examples/router.yaml eval-gate examples/eval.production.jsonl --output router.eval-gate.json
 cargo run -- load-test --url http://127.0.0.1:8080 --requests 1000 --concurrency 32 --output router.load.json

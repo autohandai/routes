@@ -3,6 +3,7 @@
 pub mod accounting;
 pub mod classifier;
 pub mod config;
+pub mod config_schema;
 pub mod conformance;
 pub mod eval;
 pub mod health;

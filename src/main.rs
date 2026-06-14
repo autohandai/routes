@@ -3,6 +3,7 @@ use autohand_router::{
     RouterConfig,
     accounting::BudgetAccounting,
     classifier::SmartClassifier,
+    config_schema,
     conformance::{run_provider_conformance, run_provider_conformance_matrix},
     eval::{calibrate_thresholds, eval_gate, evaluate, load_jsonl, optimize_with_artifact},
     judge::run_judge_smoke,
@@ -43,6 +44,7 @@ enum Command {
     Serve,
     Validate,
     Openapi,
+    ConfigSchema,
     InitConfig {
         #[arg(default_value = "router.yaml")]
         output: PathBuf,
@@ -181,6 +183,13 @@ async fn main() -> Result<()> {
         }
         Command::Openapi => {
             println!("{}", serde_json::to_string_pretty(&openapi::spec())?);
+            Ok(())
+        }
+        Command::ConfigSchema => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&config_schema::schema())?
+            );
             Ok(())
         }
         Command::InitConfig { output } => {

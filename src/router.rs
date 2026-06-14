@@ -1,6 +1,7 @@
 use crate::{
     classifier::PromptClassifier,
     config::RouterConfig,
+    health::ProviderHealthStore,
     tokens::estimate_tokens,
     types::{
         Classifications, DifficultyLabel, DomainLabel, ModelCapability, ModelConfig,
@@ -13,6 +14,7 @@ use std::sync::Arc;
 pub struct RoutingEngine<C> {
     config: Arc<RouterConfig>,
     classifier: Arc<C>,
+    provider_health: ProviderHealthStore,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -29,6 +31,7 @@ where
         Self {
             config: Arc::new(config),
             classifier: Arc::new(classifier),
+            provider_health: ProviderHealthStore::default(),
         }
     }
 
@@ -38,6 +41,10 @@ where
 
     pub fn classifier(&self) -> Arc<C> {
         self.classifier.clone()
+    }
+
+    pub fn provider_health(&self) -> ProviderHealthStore {
+        self.provider_health.clone()
     }
 
     pub async fn classify(&self, input: &str) -> Classifications {
@@ -82,6 +89,7 @@ where
             &classifications,
             &request.policy,
             &self.config,
+            &self.provider_health,
             token_budget.estimated_input_tokens,
             token_budget.requested_output_tokens,
             &request.required_capabilities,
@@ -308,6 +316,7 @@ fn scored_candidates(
     classifications: &Classifications,
     policy: &RouterPolicy,
     config: &RouterConfig,
+    provider_health: &ProviderHealthStore,
     estimated_input_tokens: u32,
     requested_output_tokens: u32,
     required_capabilities: &[ModelCapability],
@@ -325,9 +334,12 @@ fn scored_candidates(
             let capability_eligible = missing_capabilities.is_empty();
             let mut score = score_model(model, classifications, policy, config);
             let routing_priority = routing_priority(model, config);
-            let latency_penalty =
-                provider.map_or(0.0, |provider| latency_penalty(provider, config));
-            let health_penalty = provider.map_or(0.0, |provider| health_penalty(provider, config));
+            let latency_penalty = provider.map_or(0.0, |provider| {
+                latency_penalty(provider, config, provider_health)
+            });
+            let health_penalty = provider.map_or(0.0, |provider| {
+                health_penalty(provider, config, provider_health)
+            });
             score += routing_priority * config.scoring.priority_weight;
             score -= latency_penalty * config.scoring.latency_weight;
             score -= health_penalty * config.scoring.health_weight;
@@ -456,23 +468,43 @@ fn routing_priority(model: &ModelConfig, config: &RouterConfig) -> f32 {
     (model_priority + provider_priority).clamp(-1.0, 1.0)
 }
 
-fn latency_penalty(provider: &crate::types::ProviderConfig, config: &RouterConfig) -> f32 {
-    config
+fn latency_penalty(
+    provider: &crate::types::ProviderConfig,
+    config: &RouterConfig,
+    provider_health: &ProviderHealthStore,
+) -> f32 {
+    let static_penalty = config
         .scoring
         .provider_latency_p95_ms
         .get(&provider.name)
         .map(|latency_ms| (*latency_ms as f32 / 5_000.0).clamp(0.0, 1.0))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let sampled_penalty = provider_health
+        .observation(&provider.name)
+        .and_then(|observation| observation.latency_ms)
+        .map(|latency_ms| (latency_ms as f32 / 5_000.0).clamp(0.0, 1.0))
+        .unwrap_or_default();
+    static_penalty.max(sampled_penalty)
 }
 
-fn health_penalty(provider: &crate::types::ProviderConfig, config: &RouterConfig) -> f32 {
-    config
+fn health_penalty(
+    provider: &crate::types::ProviderConfig,
+    config: &RouterConfig,
+    provider_health: &ProviderHealthStore,
+) -> f32 {
+    let static_penalty = config
         .scoring
         .provider_health_penalties
         .get(&provider.name)
         .copied()
         .unwrap_or_default()
-        .clamp(0.0, 1.0)
+        .clamp(0.0, 1.0);
+    let sampled_penalty = provider_health
+        .observation(&provider.name)
+        .map(|observation| observation.health_penalty)
+        .unwrap_or_default()
+        .clamp(0.0, 1.0);
+    static_penalty.max(sampled_penalty)
 }
 
 #[cfg(test)]
@@ -480,6 +512,7 @@ mod tests {
     use super::*;
     use crate::{
         classifier::HeuristicClassifier,
+        provider::{ProviderHealth, ProviderHealthStatus},
         types::{ProviderConfig, ProviderKind},
     };
     use std::collections::HashMap;
@@ -938,6 +971,44 @@ mod tests {
                 .iter()
                 .any(|candidate| candidate.provider == "degraded"
                     && candidate.health_penalty > 0.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn sampled_provider_health_penalty_demotes_degraded_provider() {
+        let engine = scoring_hint_engine();
+        engine.provider_health().record(
+            ProviderHealth {
+                provider: "degraded".to_string(),
+                adapter: "mock".to_string(),
+                status: ProviderHealthStatus::Error,
+                status_code: Some(503),
+                error: Some("unavailable".to_string()),
+            },
+            250,
+        );
+
+        let route = engine
+            .route(MultimodelRequest {
+                input: "Design a production Rust router with concurrency, tests, and retry logic"
+                    .to_string(),
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+                policy: RouterPolicy::CapabilityHeavy,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_ne!(route.provider, "degraded");
+        assert!(
+            route
+                .candidates
+                .iter()
+                .any(|candidate| candidate.provider == "degraded"
+                    && candidate.health_penalty > 0.0
+                    && candidate.latency_penalty > 0.0)
         );
     }
 

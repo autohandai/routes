@@ -98,6 +98,18 @@ Provider config also supports `chat_path`, optional `responses_path`, optional `
 
 Set `responses_path`, `embeddings_path`, `images_path`, `speech_path`, `audio_transcriptions_path`, or `audio_translations_path` to `null` for providers that do not support those OpenAI-compatible endpoints.
 
+To let routing react to provider health over time, enable the runtime health sampler:
+
+```yaml
+runtime:
+  provider_health_sampler:
+    enabled: true
+    interval_ms: 30000
+    initial_delay_ms: 500
+```
+
+When enabled during `serve`, the router periodically checks each provider health endpoint, records observed latency and status, and applies those sampled latency/error penalties during automatic routing. `/v1/router/providers` returns both the live check result and the latest sampled observations.
+
 Use `kind: ollama` for Ollama's OpenAI-compatible surface. Use `kind: ollama_native` with `chat_path: /api/chat` to transform native Ollama chat responses into OpenAI-compatible `/v1/chat/completions` responses for local open-weight models. Use `kind: llama_cpp` for llama.cpp's OpenAI-compatible server and `kind: llama_cpp_native` with `chat_path: /completion` for the native completion server. Use `kind: vllm` for vLLM's OpenAI-compatible server; vLLM currently belongs on the OpenAI-compatible adapter path, with explicit provider identity for health, metrics, and conformance artifacts.
 
 `serve` handles Ctrl-C by stopping new accepts and giving in-flight work `runtime.graceful_shutdown_timeout_ms` to finish before the server future is forced to stop.

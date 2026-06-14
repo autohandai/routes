@@ -5,6 +5,7 @@ pub mod classifier;
 pub mod config;
 pub mod conformance;
 pub mod eval;
+pub mod health;
 pub mod judge;
 pub mod load;
 pub mod openapi;

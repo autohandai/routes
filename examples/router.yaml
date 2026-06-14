@@ -26,6 +26,12 @@ telemetry:
 runtime:
   # After Ctrl-C, stop accepting new requests and wait this long for in-flight work.
   graceful_shutdown_timeout_ms: 30000
+  provider_health_sampler:
+    # When enabled during serve, periodically samples provider health endpoints and
+    # feeds observed latency/error penalties into routing decisions.
+    enabled: false
+    interval_ms: 30000
+    initial_delay_ms: 500
 
 classifier:
   confidence_threshold: 0.62

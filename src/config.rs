@@ -95,6 +95,18 @@ pub struct TelemetryConfig {
 pub struct RuntimeConfig {
     #[serde(default = "default_graceful_shutdown_timeout_ms")]
     pub graceful_shutdown_timeout_ms: u64,
+    #[serde(default)]
+    pub provider_health_sampler: ProviderHealthSamplerConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderHealthSamplerConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_provider_health_interval_ms")]
+    pub interval_ms: u64,
+    #[serde(default = "default_provider_health_initial_delay_ms")]
+    pub initial_delay_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +231,17 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             graceful_shutdown_timeout_ms: default_graceful_shutdown_timeout_ms(),
+            provider_health_sampler: ProviderHealthSamplerConfig::default(),
+        }
+    }
+}
+
+impl Default for ProviderHealthSamplerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_ms: default_provider_health_interval_ms(),
+            initial_delay_ms: default_provider_health_initial_delay_ms(),
         }
     }
 }
@@ -245,6 +268,14 @@ fn default_llm_judge_timeout_ms() -> u64 {
 
 fn default_graceful_shutdown_timeout_ms() -> u64 {
     30_000
+}
+
+fn default_provider_health_interval_ms() -> u64 {
+    30_000
+}
+
+fn default_provider_health_initial_delay_ms() -> u64 {
+    500
 }
 
 fn default_budget_lock_timeout_ms() -> u64 {
@@ -564,6 +595,17 @@ impl RuntimeConfig {
             self.graceful_shutdown_timeout_ms > 0,
             "runtime.graceful_shutdown_timeout_ms must be greater than zero"
         );
+        self.provider_health_sampler.validate()?;
+        Ok(())
+    }
+}
+
+impl ProviderHealthSamplerConfig {
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.interval_ms > 0,
+            "runtime.provider_health_sampler.interval_ms must be greater than zero"
+        );
         Ok(())
     }
 }
@@ -684,8 +726,8 @@ impl ScoringConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthConfig, BudgetConfig, ClassifierConfig, RouterConfig, RuntimeConfig, ScoringConfig,
-        TelemetryConfig,
+        AuthConfig, BudgetConfig, ClassifierConfig, ProviderHealthSamplerConfig, RouterConfig,
+        RuntimeConfig, ScoringConfig, TelemetryConfig,
     };
     use crate::types::{ModelConfig, ProviderConfig, ProviderKind, RouterPolicy};
 
@@ -850,6 +892,25 @@ mod tests {
             error
                 .to_string()
                 .contains("scoring.provider_health_penalties.provider-a")
+        );
+    }
+
+    #[test]
+    fn rejects_zero_provider_health_sampler_interval() {
+        let mut config = valid_config();
+        config.runtime.provider_health_sampler = ProviderHealthSamplerConfig {
+            enabled: true,
+            interval_ms: 0,
+            initial_delay_ms: 0,
+        };
+
+        let error = config
+            .validate()
+            .expect_err("zero sampler interval rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("runtime.provider_health_sampler.interval_ms")
         );
     }
 }

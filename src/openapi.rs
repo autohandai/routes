@@ -191,9 +191,13 @@ pub fn spec() -> Value {
                                             "providers": {
                                                 "type": "array",
                                                 "items": { "$ref": "#/components/schemas/ProviderHealth" }
+                                            },
+                                            "sampled": {
+                                                "type": "array",
+                                                "items": { "$ref": "#/components/schemas/ProviderHealthObservation" }
                                             }
                                         },
-                                        "required": ["providers"]
+                                        "required": ["providers", "sampled"]
                                     }
                                 }
                             }
@@ -811,6 +815,19 @@ fn schemas() -> Value {
             },
             "required": ["provider", "adapter", "status"]
         },
+        "ProviderHealthObservation": {
+            "type": "object",
+            "properties": {
+                "provider": { "type": "string" },
+                "status": { "type": "string", "enum": ["ok", "error", "unknown"] },
+                "status_code": { "type": ["integer", "null"] },
+                "error": { "type": ["string", "null"] },
+                "latency_ms": { "type": ["integer", "null"] },
+                "health_penalty": { "type": "number" },
+                "observed_unix_seconds": { "type": "integer" }
+            },
+            "required": ["provider", "status", "health_penalty", "observed_unix_seconds"]
+        },
         "MetricsSnapshot": {
             "type": "object",
             "additionalProperties": true,
@@ -924,6 +941,7 @@ mod tests {
         assert!(spec["components"]["schemas"]["OpenAiImagesRequest"].is_object());
         assert!(spec["components"]["schemas"]["OpenAiSpeechRequest"].is_object());
         assert!(spec["components"]["schemas"]["OpenAiAudioMultipartRequest"].is_object());
+        assert!(spec["components"]["schemas"]["ProviderHealthObservation"].is_object());
         assert!(spec["components"]["schemas"]["JudgeMetricsSnapshot"].is_object());
     }
 }

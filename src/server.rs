@@ -33,7 +33,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{net::TcpListener, sync::oneshot, time::sleep};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -389,10 +389,40 @@ pub fn app(state: AppState) -> Router {
 
 pub async fn serve(state: AppState, bind: &str) -> Result<()> {
     let shutdown_timeout = state.engine.config().runtime.graceful_shutdown_timeout();
+    start_provider_health_sampler(&state);
     let listener = TcpListener::bind(bind).await?;
     info!("listening on http://{}", listener.local_addr()?);
     serve_with_shutdown_timeout(listener, app(state), shutdown_timeout).await?;
     Ok(())
+}
+
+fn start_provider_health_sampler(state: &AppState) {
+    let config = state.engine.config();
+    let sampler = config.runtime.provider_health_sampler.clone();
+    if !sampler.enabled {
+        return;
+    }
+    let providers = config.providers.clone();
+    let client = state.providers.clone();
+    let store = state.engine.provider_health();
+    tokio::spawn(async move {
+        sleep(Duration::from_millis(sampler.initial_delay_ms)).await;
+        loop {
+            for provider in &providers {
+                let started = Instant::now();
+                let health = client.check_provider(provider).await;
+                let latency_ms = started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+                let observation = store.record(health, latency_ms);
+                tracing::debug!(
+                    provider = observation.provider,
+                    latency_ms = observation.latency_ms,
+                    health_penalty = observation.health_penalty,
+                    "sampled provider health"
+                );
+            }
+            sleep(Duration::from_millis(sampler.interval_ms)).await;
+        }
+    });
 }
 
 async fn serve_with_shutdown_timeout(
@@ -932,7 +962,10 @@ async fn provider_status(State(state): State<Arc<AppState>>) -> Json<serde_json:
     for provider in &config.providers {
         providers.push(state.providers.check_provider(provider).await);
     }
-    Json(serde_json::json!({ "providers": providers }))
+    Json(serde_json::json!({
+        "providers": providers,
+        "sampled": state.engine.provider_health().snapshot()
+    }))
 }
 
 async fn models(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {

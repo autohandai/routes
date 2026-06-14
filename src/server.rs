@@ -6,8 +6,8 @@ use crate::{
     provider::{ProviderClient, ProviderResponse, is_transient_status},
     router::RoutingEngine,
     semantic_cache::{
-        SemanticCache, SemanticCacheEndpoint, SemanticCacheHit, SemanticCacheRequest,
-        SemanticCacheWrite,
+        SemanticCache, SemanticCacheEmbedding, SemanticCacheEndpoint, SemanticCacheHit,
+        SemanticCacheRequest, SemanticCacheWrite,
     },
     shadow_eval::{ShadowEvalEndpoint, ShadowEvalLogger, ShadowEvalRecordInput},
     telemetry::DecisionLogger,
@@ -2224,6 +2224,80 @@ fn semantic_cache_request_for_route(
     Some(SemanticCacheRequest { endpoint, prompt })
 }
 
+async fn semantic_cache_embedding_for_request(
+    state: &AppState,
+    config: &RouterConfig,
+    request: Option<&SemanticCacheRequest>,
+) -> Option<SemanticCacheEmbedding> {
+    let request = request?;
+    let embedding_model = config.cache.semantic.embedding_model.trim();
+    if embedding_model == "local-hash" {
+        return SemanticCacheEmbedding::local_hash(&request.prompt);
+    }
+
+    let Some(model) = config.find_model(embedding_model).cloned() else {
+        warn!(
+            embedding_model,
+            "semantic cache embedding model is not configured"
+        );
+        return None;
+    };
+    let response = match state
+        .providers
+        .send_embeddings(
+            config,
+            &model,
+            OpenAiEmbeddingsRequest {
+                model: model.id.clone(),
+                input: Value::String(request.prompt.clone()),
+                extra: Default::default(),
+            },
+        )
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            warn!(?error, "semantic cache embedding request failed");
+            return None;
+        }
+    };
+    let status = response.status();
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(error) => {
+            warn!(?error, "failed to read semantic cache embedding response");
+            return None;
+        }
+    };
+    if !status.is_success() {
+        warn!(
+            status = status.as_u16(),
+            "semantic cache embedding provider returned non-success status"
+        );
+        return None;
+    }
+    let value = match serde_json::from_slice::<Value>(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(?error, "semantic cache embedding response was not JSON");
+            return None;
+        }
+    };
+    let embedding = value
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|data| data.first())
+        .and_then(|item| item.get("embedding"))
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_f64().map(|value| value as f32))
+                .collect::<Vec<_>>()
+        })?;
+    SemanticCacheEmbedding::dense(embedding_model, embedding)
+}
+
 fn shadow_eval_request_for_chat(
     state: &AppState,
     config: &RouterConfig,
@@ -2314,23 +2388,17 @@ async fn dispatch_chat(
         .iter()
         .map(|model| model.id.clone())
         .collect::<Vec<_>>();
-    let semantic_cache_hit = semantic_cache_request.as_ref().and_then(|request| {
-        state
-            .semantic_cache
-            .lookup(&config.cache.semantic, request, &candidate_model_ids)
-    });
-    let budget_model = semantic_cache_hit
-        .as_ref()
-        .and_then(|hit| config.find_model(&hit.model))
-        .unwrap_or(first_model);
-
-    if let Some(message) = reserve_budget(
-        &state,
-        &config.budget,
-        budget_model,
-        estimated_input_tokens,
-        requested_output_tokens,
-    ) {
+    let provider_backed_semantic_cache = semantic_cache_request.is_some()
+        && config.cache.semantic.embedding_model.trim() != "local-hash";
+    if provider_backed_semantic_cache
+        && let Some(message) = reserve_budget(
+            &state,
+            &config.budget,
+            first_model,
+            estimated_input_tokens,
+            requested_output_tokens,
+        )
+    {
         state
             .metrics
             .budget_rejections
@@ -2340,6 +2408,44 @@ async fn dispatch_chat(
             Json(ProviderClient::error_json(message)),
         )
             .into_response();
+    }
+    let semantic_cache_embedding =
+        semantic_cache_embedding_for_request(&state, &config, semantic_cache_request.as_ref())
+            .await;
+    let semantic_cache_hit = semantic_cache_request
+        .as_ref()
+        .zip(semantic_cache_embedding.as_ref())
+        .and_then(|(request, embedding)| {
+            state.semantic_cache.lookup(
+                &config.cache.semantic,
+                request,
+                &candidate_model_ids,
+                embedding,
+            )
+        });
+    if !provider_backed_semantic_cache {
+        let budget_model = semantic_cache_hit
+            .as_ref()
+            .and_then(|hit| config.find_model(&hit.model))
+            .unwrap_or(first_model);
+
+        if let Some(message) = reserve_budget(
+            &state,
+            &config.budget,
+            budget_model,
+            estimated_input_tokens,
+            requested_output_tokens,
+        ) {
+            state
+                .metrics
+                .budget_rejections
+                .fetch_add(1, Ordering::Relaxed);
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(ProviderClient::error_json(message)),
+            )
+                .into_response();
+        }
     }
 
     state.metrics.chat_requests.fetch_add(1, Ordering::Relaxed);
@@ -2402,9 +2508,11 @@ async fn dispatch_chat(
                     selected_latency_ms,
                     semantic_cache_request
                         .as_ref()
-                        .map(|request| SemanticCacheWrite {
+                        .zip(semantic_cache_embedding.clone())
+                        .map(|(request, embedding)| SemanticCacheWrite {
                             endpoint: request.endpoint,
                             prompt: request.prompt.clone(),
+                            embedding,
                         }),
                     shadow_eval_dispatch.clone(),
                 )
@@ -2471,23 +2579,17 @@ async fn dispatch_responses(
         .iter()
         .map(|model| model.id.clone())
         .collect::<Vec<_>>();
-    let semantic_cache_hit = semantic_cache_request.as_ref().and_then(|request| {
-        state
-            .semantic_cache
-            .lookup(&config.cache.semantic, request, &candidate_model_ids)
-    });
-    let budget_model = semantic_cache_hit
-        .as_ref()
-        .and_then(|hit| config.find_model(&hit.model))
-        .unwrap_or(first_model);
-
-    if let Some(message) = reserve_budget(
-        &state,
-        &config.budget,
-        budget_model,
-        estimated_input_tokens,
-        requested_output_tokens,
-    ) {
+    let provider_backed_semantic_cache = semantic_cache_request.is_some()
+        && config.cache.semantic.embedding_model.trim() != "local-hash";
+    if provider_backed_semantic_cache
+        && let Some(message) = reserve_budget(
+            &state,
+            &config.budget,
+            first_model,
+            estimated_input_tokens,
+            requested_output_tokens,
+        )
+    {
         state
             .metrics
             .budget_rejections
@@ -2497,6 +2599,44 @@ async fn dispatch_responses(
             Json(ProviderClient::error_json(message)),
         )
             .into_response();
+    }
+    let semantic_cache_embedding =
+        semantic_cache_embedding_for_request(&state, &config, semantic_cache_request.as_ref())
+            .await;
+    let semantic_cache_hit = semantic_cache_request
+        .as_ref()
+        .zip(semantic_cache_embedding.as_ref())
+        .and_then(|(request, embedding)| {
+            state.semantic_cache.lookup(
+                &config.cache.semantic,
+                request,
+                &candidate_model_ids,
+                embedding,
+            )
+        });
+    if !provider_backed_semantic_cache {
+        let budget_model = semantic_cache_hit
+            .as_ref()
+            .and_then(|hit| config.find_model(&hit.model))
+            .unwrap_or(first_model);
+
+        if let Some(message) = reserve_budget(
+            &state,
+            &config.budget,
+            budget_model,
+            estimated_input_tokens,
+            requested_output_tokens,
+        ) {
+            state
+                .metrics
+                .budget_rejections
+                .fetch_add(1, Ordering::Relaxed);
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(ProviderClient::error_json(message)),
+            )
+                .into_response();
+        }
     }
 
     state
@@ -2562,9 +2702,11 @@ async fn dispatch_responses(
                     selected_latency_ms,
                     semantic_cache_request
                         .as_ref()
-                        .map(|request| SemanticCacheWrite {
+                        .zip(semantic_cache_embedding.clone())
+                        .map(|(request, embedding)| SemanticCacheWrite {
                             endpoint: request.endpoint,
                             prompt: request.prompt.clone(),
+                            embedding,
                         }),
                     shadow_eval_dispatch.clone(),
                 )
@@ -3796,6 +3938,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn automatic_chat_semantic_cache_can_use_provider_embeddings() {
+        let (upstream_url, chat_calls, embedding_calls) =
+            spawn_embedding_cache_upstream("cache-model").await;
+        let mut config = semantic_cache_config(upstream_url);
+        config.cache.semantic.embedding_model = "cache-model".to_string();
+        config.cache.semantic.similarity_threshold = 0.99;
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let first = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&OpenAiChatRequest {
+                model: "auto".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String("Explain Rust ownership with examples".to_string()),
+                }],
+                extra: Default::default(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert!(first.status().is_success());
+        assert_eq!(
+            first
+                .headers()
+                .get("x-autohand-router-cache")
+                .and_then(|value| value.to_str().ok()),
+            Some("miss")
+        );
+
+        let second = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&OpenAiChatRequest {
+                model: "auto".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String("Explain Rust ownership examples".to_string()),
+                }],
+                extra: Default::default(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert!(second.status().is_success());
+        assert_eq!(
+            second
+                .headers()
+                .get("x-autohand-router-cache")
+                .and_then(|value| value.to_str().ok()),
+            Some("hit")
+        );
+        assert_eq!(
+            second
+                .headers()
+                .get("x-autohand-router-cache-embedding-model")
+                .and_then(|value| value.to_str().ok()),
+            Some("cache-model")
+        );
+        assert_eq!(chat_calls.load(AtomicOrdering::Relaxed), 1);
+        assert_eq!(embedding_calls.load(AtomicOrdering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn provider_embedding_cache_respects_budget_before_embedding_dispatch() {
+        let (upstream_url, chat_calls, embedding_calls) =
+            spawn_embedding_cache_upstream("cache-model").await;
+        let mut config = semantic_cache_config(upstream_url);
+        config.cache.semantic.embedding_model = "cache-model".to_string();
+        config.budget.max_chat_requests = Some(0);
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&OpenAiChatRequest {
+                model: "auto".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String("Explain Rust ownership with examples".to_string()),
+                }],
+                extra: Default::default(),
+            })
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(chat_calls.load(AtomicOrdering::Relaxed), 0);
+        assert_eq!(embedding_calls.load(AtomicOrdering::Relaxed), 0);
+    }
+
+    #[tokio::test]
     async fn automatic_chat_writes_pairwise_shadow_eval_record() {
         let (upstream_url, calls) = spawn_echo_chat_upstream().await;
         let shadow_path = std::env::temp_dir().join(format!(
@@ -4433,6 +4668,82 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{addr}"), calls)
+    }
+
+    async fn spawn_embedding_cache_upstream(
+        model_id: &'static str,
+    ) -> (String, Arc<AtomicU64>, Arc<AtomicU64>) {
+        async fn chat(
+            axum::extract::State((model_id, chat_calls, _embedding_calls)): axum::extract::State<(
+                &'static str,
+                Arc<AtomicU64>,
+                Arc<AtomicU64>,
+            )>,
+        ) -> axum::response::Response {
+            chat_calls.fetch_add(1, AtomicOrdering::Relaxed);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": "chatcmpl-provider-embedding-cache-test",
+                    "object": "chat.completion",
+                    "model": model_id,
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "provider embedding cached ok"
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 2,
+                        "total_tokens": 12
+                    }
+                })),
+            )
+                .into_response()
+        }
+
+        async fn embeddings(
+            axum::extract::State((_model_id, _chat_calls, embedding_calls)): axum::extract::State<
+                (&'static str, Arc<AtomicU64>, Arc<AtomicU64>),
+            >,
+            Json(request): Json<Value>,
+        ) -> axum::response::Response {
+            embedding_calls.fetch_add(1, AtomicOrdering::Relaxed);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "object": "list",
+                    "model": request["model"],
+                    "data": [{
+                        "object": "embedding",
+                        "index": 0,
+                        "embedding": [0.25, 0.5, 0.75]
+                    }],
+                    "usage": {
+                        "prompt_tokens": 3,
+                        "total_tokens": 3
+                    }
+                })),
+            )
+                .into_response()
+        }
+
+        let chat_calls = Arc::new(AtomicU64::new(0));
+        let embedding_calls = Arc::new(AtomicU64::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let state = (model_id, chat_calls.clone(), embedding_calls.clone());
+        let app = Router::new()
+            .route("/v1/chat/completions", post(chat))
+            .route("/v1/embeddings", post(embeddings))
+            .with_state(state);
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), chat_calls, embedding_calls)
     }
 
     async fn spawn_echo_chat_upstream() -> (String, Arc<AtomicU64>) {

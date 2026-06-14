@@ -650,7 +650,7 @@ impl RouterConfig {
         self.budget.validate()?;
         self.telemetry.validate()?;
         self.runtime.validate()?;
-        self.cache.validate()?;
+        self.cache.validate(self)?;
         self.shadow_eval.validate()?;
         self.safety.validate(self)?;
         self.sticky_routing.validate()?;
@@ -998,17 +998,41 @@ impl ClassifierModelAdapterConfig {
 }
 
 impl CacheConfig {
-    fn validate(&self) -> Result<()> {
-        self.semantic.validate()
+    fn validate(&self, config: &RouterConfig) -> Result<()> {
+        self.semantic.validate(config)
     }
 }
 
 impl SemanticCacheConfig {
-    fn validate(&self) -> Result<()> {
+    fn validate(&self, config: &RouterConfig) -> Result<()> {
         anyhow::ensure!(
             !self.enabled || !self.embedding_model.trim().is_empty(),
             "cache.semantic.embedding_model cannot be empty when semantic cache is enabled"
         );
+        if self.enabled && self.embedding_model.trim() != "local-hash" {
+            let model = config.find_model(&self.embedding_model).with_context(|| {
+                format!(
+                    "cache.semantic.embedding_model {} does not match a configured model id or alias",
+                    self.embedding_model
+                )
+            })?;
+            let provider = config
+                .providers
+                .iter()
+                .find(|provider| provider.name == model.provider)
+                .with_context(|| {
+                    format!(
+                        "cache.semantic.embedding_model {} references missing provider {}",
+                        self.embedding_model, model.provider
+                    )
+                })?;
+            anyhow::ensure!(
+                provider.embeddings_path.is_some(),
+                "cache.semantic.embedding_model {} provider {} does not support embeddings",
+                self.embedding_model,
+                provider.name
+            );
+        }
         anyhow::ensure!(
             self.similarity_threshold.is_finite()
                 && (0.0..=1.0).contains(&self.similarity_threshold),
@@ -1466,6 +1490,57 @@ mod tests {
                 .to_string()
                 .contains("cache.semantic.similarity_threshold")
         );
+    }
+
+    #[test]
+    fn accepts_provider_backed_semantic_cache_embedding_model() {
+        let mut config = valid_config();
+        config.cache.semantic = SemanticCacheConfig {
+            enabled: true,
+            embedding_model: "alias-a".to_string(),
+            similarity_threshold: 0.80,
+            ttl_seconds: 60,
+            max_entries: 16,
+        };
+
+        config
+            .validate()
+            .expect("configured embedding model alias is accepted");
+    }
+
+    #[test]
+    fn rejects_unknown_semantic_cache_embedding_model() {
+        let mut config = valid_config();
+        config.cache.semantic = SemanticCacheConfig {
+            enabled: true,
+            embedding_model: "missing-embedding-model".to_string(),
+            similarity_threshold: 0.80,
+            ttl_seconds: 60,
+            max_entries: 16,
+        };
+
+        let error = config
+            .validate()
+            .expect_err("unknown semantic embedding model rejected");
+        assert!(error.to_string().contains("cache.semantic.embedding_model"));
+    }
+
+    #[test]
+    fn rejects_semantic_cache_embedding_provider_without_embeddings_path() {
+        let mut config = valid_config();
+        config.providers[0].embeddings_path = None;
+        config.cache.semantic = SemanticCacheConfig {
+            enabled: true,
+            embedding_model: "model-a".to_string(),
+            similarity_threshold: 0.80,
+            ttl_seconds: 60,
+            max_entries: 16,
+        };
+
+        let error = config
+            .validate()
+            .expect_err("provider without embeddings path rejected");
+        assert!(error.to_string().contains("does not support embeddings"));
     }
 
     #[test]

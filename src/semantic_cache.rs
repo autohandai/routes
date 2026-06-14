@@ -33,6 +33,7 @@ pub struct SemanticCacheRequest {
 pub struct SemanticCacheWrite {
     pub endpoint: SemanticCacheEndpoint,
     pub prompt: String,
+    pub embedding: SemanticCacheEmbedding,
 }
 
 #[derive(Debug, Clone)]
@@ -56,8 +57,7 @@ struct SemanticCacheEntry {
     endpoint: SemanticCacheEndpoint,
     model: String,
     provider: String,
-    embedding_model: String,
-    embedding: SparseEmbedding,
+    embedding: SemanticCacheEmbedding,
     status_code: u16,
     content_type: Option<String>,
     body: Bytes,
@@ -75,22 +75,19 @@ impl SemanticCache {
         config: &SemanticCacheConfig,
         request: &SemanticCacheRequest,
         candidate_models: &[String],
+        query: &SemanticCacheEmbedding,
     ) -> Option<SemanticCacheHit> {
         if !config.enabled || request.prompt.trim().is_empty() {
             return None;
         }
         let now = unix_seconds();
-        let query = SparseEmbedding::from_text(&request.prompt);
-        if query.values.is_empty() {
-            return None;
-        }
         let mut state = self.state.write().ok()?;
         state.retain(|entry| now.saturating_sub(entry.inserted_unix_seconds) <= config.ttl_seconds);
         state
             .iter()
             .filter(|entry| {
                 entry.endpoint == request.endpoint
-                    && entry.embedding_model == config.embedding_model
+                    && entry.embedding.model == query.model
                     && candidate_models.contains(&entry.model)
             })
             .filter_map(|entry| {
@@ -107,7 +104,7 @@ impl SemanticCache {
                 content_type: entry.content_type.clone(),
                 body: entry.body.clone(),
                 similarity,
-                embedding_model: entry.embedding_model.clone(),
+                embedding_model: entry.embedding.model.clone(),
             })
     }
 
@@ -124,10 +121,6 @@ impl SemanticCache {
         if !config.enabled || write.prompt.trim().is_empty() || body.is_empty() {
             return;
         }
-        let embedding = SparseEmbedding::from_text(&write.prompt);
-        if embedding.values.is_empty() {
-            return;
-        }
         let Ok(mut state) = self.state.write() else {
             return;
         };
@@ -135,8 +128,7 @@ impl SemanticCache {
             endpoint: write.endpoint,
             model: model.to_string(),
             provider: provider.to_string(),
-            embedding_model: config.embedding_model.clone(),
-            embedding,
+            embedding: write.embedding,
             status_code,
             content_type,
             body,
@@ -155,6 +147,81 @@ impl SemanticCache {
             .map(|state| state.len())
             .unwrap_or_default();
         SemanticCacheSnapshot { entries }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SemanticCacheEmbedding {
+    model: String,
+    kind: EmbeddingKind,
+}
+
+impl SemanticCacheEmbedding {
+    pub fn local_hash(text: &str) -> Option<Self> {
+        let embedding = SparseEmbedding::from_text(text);
+        (!embedding.values.is_empty()).then_some(Self {
+            model: "local-hash".to_string(),
+            kind: EmbeddingKind::Sparse(embedding),
+        })
+    }
+
+    pub fn dense(model: impl Into<String>, values: Vec<f32>) -> Option<Self> {
+        let embedding = DenseEmbedding::new(values)?;
+        Some(Self {
+            model: model.into(),
+            kind: EmbeddingKind::Dense(embedding),
+        })
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn cosine_similarity(&self, other: &Self) -> f32 {
+        match (&self.kind, &other.kind) {
+            (EmbeddingKind::Sparse(left), EmbeddingKind::Sparse(right)) => {
+                left.cosine_similarity(right)
+            }
+            (EmbeddingKind::Dense(left), EmbeddingKind::Dense(right)) => {
+                left.cosine_similarity(right)
+            }
+            _ => 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum EmbeddingKind {
+    Sparse(SparseEmbedding),
+    Dense(DenseEmbedding),
+}
+
+#[derive(Debug, Clone)]
+struct DenseEmbedding {
+    values: Vec<f32>,
+    norm: f32,
+}
+
+impl DenseEmbedding {
+    fn new(values: Vec<f32>) -> Option<Self> {
+        if values.is_empty() || values.iter().any(|value| !value.is_finite()) {
+            return None;
+        }
+        let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
+        (norm > 0.0).then_some(Self { values, norm })
+    }
+
+    fn cosine_similarity(&self, other: &Self) -> f32 {
+        if self.values.len() != other.values.len() {
+            return 0.0;
+        }
+        let dot = self
+            .values
+            .iter()
+            .zip(&other.values)
+            .map(|(left, right)| left * right)
+            .sum::<f32>();
+        (dot / (self.norm * other.norm)).clamp(0.0, 1.0)
     }
 }
 
@@ -232,6 +299,10 @@ mod tests {
             SemanticCacheWrite {
                 endpoint: SemanticCacheEndpoint::Chat,
                 prompt: "Explain Rust ownership with examples".to_string(),
+                embedding: SemanticCacheEmbedding::local_hash(
+                    "Explain Rust ownership with examples",
+                )
+                .unwrap(),
             },
             "model-a",
             "provider-a",
@@ -248,6 +319,7 @@ mod tests {
                     prompt: "Explain Rust ownership examples".to_string(),
                 },
                 &["model-a".to_string()],
+                &SemanticCacheEmbedding::local_hash("Explain Rust ownership examples").unwrap(),
             )
             .expect("similar prompt should hit");
 
@@ -270,6 +342,7 @@ mod tests {
             SemanticCacheWrite {
                 endpoint: SemanticCacheEndpoint::Responses,
                 prompt: "Summarize routing docs".to_string(),
+                embedding: SemanticCacheEmbedding::local_hash("Summarize routing docs").unwrap(),
             },
             "model-a",
             "provider-a",
@@ -291,8 +364,51 @@ mod tests {
                         prompt: "Summarize routing docs".to_string(),
                     },
                     &["model-a".to_string()],
+                    &SemanticCacheEmbedding::local_hash("Summarize routing docs").unwrap(),
                 )
                 .is_none()
         );
+    }
+
+    #[test]
+    fn semantic_cache_matches_dense_provider_embeddings() {
+        let cache = SemanticCache::default();
+        let config = SemanticCacheConfig {
+            enabled: true,
+            embedding_model: "embed-model".to_string(),
+            similarity_threshold: 0.95,
+            ttl_seconds: 60,
+            max_entries: 16,
+        };
+        cache.record(
+            &config,
+            SemanticCacheWrite {
+                endpoint: SemanticCacheEndpoint::Chat,
+                prompt: "Prompt A".to_string(),
+                embedding: SemanticCacheEmbedding::dense("embed-model", vec![0.1, 0.2, 0.3])
+                    .unwrap(),
+            },
+            "model-a",
+            "provider-a",
+            200,
+            Some("application/json".to_string()),
+            Bytes::from_static(b"{\"cached\":true}"),
+        );
+
+        let hit = cache
+            .lookup(
+                &config,
+                &SemanticCacheRequest {
+                    endpoint: SemanticCacheEndpoint::Chat,
+                    prompt: "Prompt B".to_string(),
+                },
+                &["model-a".to_string()],
+                &SemanticCacheEmbedding::dense("embed-model", vec![0.1, 0.2, 0.3]).unwrap(),
+            )
+            .expect("matching dense embedding should hit");
+
+        assert_eq!(hit.model, "model-a");
+        assert_eq!(hit.embedding_model, "embed-model");
+        assert!(hit.similarity >= 0.95);
     }
 }

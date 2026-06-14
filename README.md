@@ -125,7 +125,7 @@ cache:
     ttl_seconds: 3600
 ```
 
-The cache uses deterministic local hashed embeddings and cosine similarity, so it does not require a separate embedding provider. It only stores successful buffered responses for prompts classified as medium/high cacheability, and it skips explicit model requests and streaming passthrough. Cache behavior is visible through `x-autohand-router-cache`, `x-autohand-router-cache-similarity`, JSON metrics, and Prometheus event counters.
+The cache uses cosine similarity. `embedding_model: local-hash` is deterministic and does not require a provider call; setting `embedding_model` to any configured model id or alias with embeddings support uses real provider-backed vectors. It only stores successful buffered responses for prompts classified as medium/high cacheability, and it skips explicit model requests and streaming passthrough. Cache behavior is visible through `x-autohand-router-cache`, `x-autohand-router-cache-similarity`, JSON metrics, and Prometheus event counters.
 
 To collect pairwise routing data without changing foreground responses, enable shadow evaluation:
 

@@ -5,6 +5,7 @@ This repository is a Rust LLM router intended to sit in front of OpenAI-compatib
 ## Engineering Contract
 
 - Keep the public API OpenAI-compatible wherever possible.
+- For every new user prompt or request, finish the turn by testing and validating the relevant change, then create a focused git commit for the completed work. Keep the commit scoped to the files changed for that request.
 - Keep Morph-compatible router endpoints:
   - `POST /v1/router/classify`
   - `POST /v1/router/multimodel`

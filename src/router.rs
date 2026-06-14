@@ -706,6 +706,7 @@ mod tests {
             budget: Default::default(),
             telemetry: Default::default(),
             runtime: Default::default(),
+            cache: Default::default(),
         };
         RoutingEngine::new(config, HeuristicClassifier::default())
     }
@@ -767,6 +768,7 @@ mod tests {
             budget: Default::default(),
             telemetry: Default::default(),
             runtime: Default::default(),
+            cache: Default::default(),
         };
         RoutingEngine::new(config, HeuristicClassifier::default())
     }
@@ -833,6 +835,7 @@ mod tests {
             budget: Default::default(),
             telemetry: Default::default(),
             runtime: Default::default(),
+            cache: Default::default(),
         };
         RoutingEngine::new(config, HeuristicClassifier::default())
     }
@@ -936,6 +939,7 @@ mod tests {
             budget: Default::default(),
             telemetry: Default::default(),
             runtime: Default::default(),
+            cache: Default::default(),
         };
         RoutingEngine::new(config, HeuristicClassifier::default())
     }

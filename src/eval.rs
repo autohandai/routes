@@ -872,6 +872,7 @@ mod tests {
             budget: BudgetConfig::default(),
             telemetry: TelemetryConfig::default(),
             runtime: RuntimeConfig::default(),
+            cache: Default::default(),
         }
     }
 }

@@ -5,11 +5,15 @@ use crate::{
     openapi,
     provider::{ProviderClient, ProviderResponse, is_transient_status},
     router::RoutingEngine,
+    semantic_cache::{
+        SemanticCache, SemanticCacheEndpoint, SemanticCacheHit, SemanticCacheRequest,
+        SemanticCacheWrite,
+    },
     telemetry::DecisionLogger,
     tokens::estimate_tokens,
     types::{
-        ClassifyRequest, ClassifyResponse, ModelCapability, ModelConfig, MultimodelRequest,
-        OpenAiAudioMultipartRequest, OpenAiChatRequest, OpenAiEmbeddingsRequest,
+        CacheabilityLabel, ClassifyRequest, ClassifyResponse, ModelCapability, ModelConfig,
+        MultimodelRequest, OpenAiAudioMultipartRequest, OpenAiChatRequest, OpenAiEmbeddingsRequest,
         OpenAiImagesRequest, OpenAiMultipartPart, OpenAiResponsesRequest, OpenAiSpeechRequest,
         RouterPolicy,
     },
@@ -46,6 +50,7 @@ pub struct AppState {
     pub metrics: Arc<RouterMetrics>,
     pub accounting: BudgetAccounting,
     pub telemetry: DecisionLogger,
+    pub semantic_cache: SemanticCache,
 }
 
 #[derive(Default)]
@@ -65,6 +70,8 @@ pub struct RouterMetrics {
     auth_failures: AtomicU64,
     upstream_errors: AtomicU64,
     budget_rejections: AtomicU64,
+    semantic_cache_hits: AtomicU64,
+    semantic_cache_misses: AtomicU64,
     selected_models: AtomicU64,
     prompt_tokens: AtomicU64,
     completion_tokens: AtomicU64,
@@ -91,6 +98,8 @@ struct MetricsSnapshot {
     auth_failures: u64,
     upstream_errors: u64,
     budget_rejections: u64,
+    semantic_cache_hits: u64,
+    semantic_cache_misses: u64,
     selected_models: u64,
     prompt_tokens: u64,
     completion_tokens: u64,
@@ -161,6 +170,8 @@ impl RouterMetrics {
             auth_failures: self.auth_failures.load(Ordering::Relaxed),
             upstream_errors: self.upstream_errors.load(Ordering::Relaxed),
             budget_rejections: self.budget_rejections.load(Ordering::Relaxed),
+            semantic_cache_hits: self.semantic_cache_hits.load(Ordering::Relaxed),
+            semantic_cache_misses: self.semantic_cache_misses.load(Ordering::Relaxed),
             selected_models: self.selected_models.load(Ordering::Relaxed),
             prompt_tokens: self.prompt_tokens.load(Ordering::Relaxed),
             completion_tokens: self.completion_tokens.load(Ordering::Relaxed),
@@ -683,6 +694,18 @@ fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     push_labeled_metric(
         &mut output,
         "autohand_router_events_total",
+        &[("event", "semantic_cache_hits")],
+        snapshot.semantic_cache_hits,
+    );
+    push_labeled_metric(
+        &mut output,
+        "autohand_router_events_total",
+        &[("event", "semantic_cache_misses")],
+        snapshot.semantic_cache_misses,
+    );
+    push_labeled_metric(
+        &mut output,
+        "autohand_router_events_total",
         &[("event", "selected_models")],
         snapshot.selected_models,
     );
@@ -1107,73 +1130,82 @@ async fn chat_completions(
     let requested_model = request.model.clone();
     let config = state.engine.config();
     let automatic = requested_model.starts_with("router-") || requested_model == "auto";
-    let (models, estimated_input_tokens, requested_output_tokens) = if automatic {
-        let policy = parse_router_model_policy(&requested_model);
-        let route_input = prompt.clone();
-        let required_capabilities = request.required_capabilities();
-        let route = state
-            .engine
-            .route(MultimodelRequest {
-                input: route_input.clone(),
-                allowed_models: vec![],
-                allowed_providers: vec![],
-                required_capabilities,
-                policy,
-                default_model: None,
-                max_output_tokens: request.max_output_tokens(),
-            })
-            .await;
-        state.metrics.route_requests.fetch_add(1, Ordering::Relaxed);
-        if route.fallback {
+    let (models, estimated_input_tokens, requested_output_tokens, semantic_cache_request) =
+        if automatic {
+            let policy = parse_router_model_policy(&requested_model);
+            let route_input = prompt.clone();
+            let required_capabilities = request.required_capabilities();
+            let route = state
+                .engine
+                .route(MultimodelRequest {
+                    input: route_input.clone(),
+                    allowed_models: vec![],
+                    allowed_providers: vec![],
+                    required_capabilities,
+                    policy,
+                    default_model: None,
+                    max_output_tokens: request.max_output_tokens(),
+                })
+                .await;
+            state.metrics.route_requests.fetch_add(1, Ordering::Relaxed);
+            if route.fallback {
+                state
+                    .metrics
+                    .fallback_routes
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             state
-                .metrics
-                .fallback_routes
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        state
-            .telemetry
-            .record_route("chat.auto", &route_input, &route)
-            .await;
-        let Some(model) = config.find_model(&route.model).cloned() else {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(ProviderClient::error_json(format!(
-                    "routed model {} is not configured",
-                    route.model
-                ))),
-            )
-                .into_response();
-        };
-        let mut models = vec![model];
-        for candidate in route.candidates {
-            if models.iter().any(|model| model.id == candidate.model) {
-                continue;
+                .telemetry
+                .record_route("chat.auto", &route_input, &route)
+                .await;
+            let Some(model) = config.find_model(&route.model).cloned() else {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(ProviderClient::error_json(format!(
+                        "routed model {} is not configured",
+                        route.model
+                    ))),
+                )
+                    .into_response();
+            };
+            let mut models = vec![model];
+            for candidate in route.candidates {
+                if models.iter().any(|model| model.id == candidate.model) {
+                    continue;
+                }
+                if let Some(model) = config.find_model(&candidate.model).cloned() {
+                    models.push(model);
+                }
             }
-            if let Some(model) = config.find_model(&candidate.model).cloned() {
-                models.push(model);
-            }
-        }
-        (
-            models,
-            route.estimated_input_tokens,
-            route.requested_output_tokens,
-        )
-    } else {
-        let Some(model) = config.find_model(&requested_model).cloned() else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ProviderClient::error_json(format!(
-                    "model {requested_model} is not configured"
-                ))),
+            (
+                models,
+                route.estimated_input_tokens,
+                route.requested_output_tokens,
+                semantic_cache_request_for_route(
+                    &config,
+                    SemanticCacheEndpoint::Chat,
+                    route.cacheability.as_ref(),
+                    request.stream(),
+                    route_input,
+                ),
             )
-                .into_response();
+        } else {
+            let Some(model) = config.find_model(&requested_model).cloned() else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ProviderClient::error_json(format!(
+                        "model {requested_model} is not configured"
+                    ))),
+                )
+                    .into_response();
+            };
+            (
+                vec![model],
+                estimate_tokens(&prompt),
+                request.max_output_tokens().unwrap_or(1024),
+                None,
+            )
         };
-        (
-            vec![model],
-            estimate_tokens(&prompt),
-            request.max_output_tokens().unwrap_or(1024),
-        )
-    };
 
     dispatch_chat(
         state,
@@ -1183,6 +1215,7 @@ async fn chat_completions(
         automatic,
         estimated_input_tokens,
         requested_output_tokens,
+        semantic_cache_request,
     )
     .await
 }
@@ -1195,73 +1228,82 @@ async fn responses(
     let requested_model = request.model.clone();
     let config = state.engine.config();
     let automatic = requested_model.starts_with("router-") || requested_model == "auto";
-    let (models, estimated_input_tokens, requested_output_tokens) = if automatic {
-        let policy = parse_router_model_policy(&requested_model);
-        let route_input = prompt.clone();
-        let required_capabilities = request.required_capabilities();
-        let route = state
-            .engine
-            .route(MultimodelRequest {
-                input: route_input.clone(),
-                allowed_models: vec![],
-                allowed_providers: vec![],
-                required_capabilities,
-                policy,
-                default_model: None,
-                max_output_tokens: request.max_output_tokens(),
-            })
-            .await;
-        state.metrics.route_requests.fetch_add(1, Ordering::Relaxed);
-        if route.fallback {
+    let (models, estimated_input_tokens, requested_output_tokens, semantic_cache_request) =
+        if automatic {
+            let policy = parse_router_model_policy(&requested_model);
+            let route_input = prompt.clone();
+            let required_capabilities = request.required_capabilities();
+            let route = state
+                .engine
+                .route(MultimodelRequest {
+                    input: route_input.clone(),
+                    allowed_models: vec![],
+                    allowed_providers: vec![],
+                    required_capabilities,
+                    policy,
+                    default_model: None,
+                    max_output_tokens: request.max_output_tokens(),
+                })
+                .await;
+            state.metrics.route_requests.fetch_add(1, Ordering::Relaxed);
+            if route.fallback {
+                state
+                    .metrics
+                    .fallback_routes
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             state
-                .metrics
-                .fallback_routes
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        state
-            .telemetry
-            .record_route("responses.auto", &route_input, &route)
-            .await;
-        let Some(model) = config.find_model(&route.model).cloned() else {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(ProviderClient::error_json(format!(
-                    "routed model {} is not configured",
-                    route.model
-                ))),
-            )
-                .into_response();
-        };
-        let mut models = vec![model];
-        for candidate in route.candidates {
-            if models.iter().any(|model| model.id == candidate.model) {
-                continue;
+                .telemetry
+                .record_route("responses.auto", &route_input, &route)
+                .await;
+            let Some(model) = config.find_model(&route.model).cloned() else {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(ProviderClient::error_json(format!(
+                        "routed model {} is not configured",
+                        route.model
+                    ))),
+                )
+                    .into_response();
+            };
+            let mut models = vec![model];
+            for candidate in route.candidates {
+                if models.iter().any(|model| model.id == candidate.model) {
+                    continue;
+                }
+                if let Some(model) = config.find_model(&candidate.model).cloned() {
+                    models.push(model);
+                }
             }
-            if let Some(model) = config.find_model(&candidate.model).cloned() {
-                models.push(model);
-            }
-        }
-        (
-            models,
-            route.estimated_input_tokens,
-            route.requested_output_tokens,
-        )
-    } else {
-        let Some(model) = config.find_model(&requested_model).cloned() else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ProviderClient::error_json(format!(
-                    "model {requested_model} is not configured"
-                ))),
+            (
+                models,
+                route.estimated_input_tokens,
+                route.requested_output_tokens,
+                semantic_cache_request_for_route(
+                    &config,
+                    SemanticCacheEndpoint::Responses,
+                    route.cacheability.as_ref(),
+                    request.stream(),
+                    route_input,
+                ),
             )
-                .into_response();
+        } else {
+            let Some(model) = config.find_model(&requested_model).cloned() else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ProviderClient::error_json(format!(
+                        "model {requested_model} is not configured"
+                    ))),
+                )
+                    .into_response();
+            };
+            (
+                vec![model],
+                estimate_tokens(&prompt),
+                request.max_output_tokens().unwrap_or(1024),
+                None,
+            )
         };
-        (
-            vec![model],
-            estimate_tokens(&prompt),
-            request.max_output_tokens().unwrap_or(1024),
-        )
-    };
 
     dispatch_responses(
         state,
@@ -1271,6 +1313,7 @@ async fn responses(
         automatic,
         estimated_input_tokens,
         requested_output_tokens,
+        semantic_cache_request,
     )
     .await
 }
@@ -1711,6 +1754,25 @@ async fn parse_audio_multipart(
     })
 }
 
+fn semantic_cache_request_for_route(
+    config: &RouterConfig,
+    endpoint: SemanticCacheEndpoint,
+    cacheability: Option<&CacheabilityLabel>,
+    stream: bool,
+    prompt: String,
+) -> Option<SemanticCacheRequest> {
+    if !config.cache.semantic.enabled || stream || prompt.trim().is_empty() {
+        return None;
+    }
+    if !matches!(
+        cacheability,
+        Some(CacheabilityLabel::Medium | CacheabilityLabel::High)
+    ) {
+        return None;
+    }
+    Some(SemanticCacheRequest { endpoint, prompt })
+}
+
 async fn dispatch_chat(
     state: Arc<AppState>,
     config: Arc<RouterConfig>,
@@ -1719,6 +1781,7 @@ async fn dispatch_chat(
     allow_failover: bool,
     estimated_input_tokens: u32,
     requested_output_tokens: u32,
+    semantic_cache_request: Option<SemanticCacheRequest>,
 ) -> Response {
     let Some(first_model) = models.first() else {
         state
@@ -1731,10 +1794,24 @@ async fn dispatch_chat(
         )
             .into_response();
     };
+    let candidate_model_ids = models
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<Vec<_>>();
+    let semantic_cache_hit = semantic_cache_request.as_ref().and_then(|request| {
+        state
+            .semantic_cache
+            .lookup(&config.cache.semantic, request, &candidate_model_ids)
+    });
+    let budget_model = semantic_cache_hit
+        .as_ref()
+        .and_then(|hit| config.find_model(&hit.model))
+        .unwrap_or(first_model);
+
     if let Some(message) = reserve_budget(
         &state,
         &config.budget,
-        first_model,
+        budget_model,
         estimated_input_tokens,
         requested_output_tokens,
     ) {
@@ -1750,6 +1827,22 @@ async fn dispatch_chat(
     }
 
     state.metrics.chat_requests.fetch_add(1, Ordering::Relaxed);
+    if let Some(hit) = semantic_cache_hit {
+        state
+            .metrics
+            .semantic_cache_hits
+            .fetch_add(1, Ordering::Relaxed);
+        if let Some(model) = config.find_model(&hit.model) {
+            state.metrics.record_selection(model);
+        }
+        return cached_upstream_response(hit, estimated_input_tokens, requested_output_tokens);
+    }
+    if semantic_cache_request.is_some() {
+        state
+            .metrics
+            .semantic_cache_misses
+            .fetch_add(1, Ordering::Relaxed);
+    }
 
     let mut last_error = None;
     let mut failovers = 0_u32;
@@ -1788,6 +1881,12 @@ async fn dispatch_chat(
                     failovers,
                     estimated_input_tokens,
                     requested_output_tokens,
+                    semantic_cache_request
+                        .as_ref()
+                        .map(|request| SemanticCacheWrite {
+                            endpoint: request.endpoint,
+                            prompt: request.prompt.clone(),
+                        }),
                 )
                 .await;
             }
@@ -1834,6 +1933,7 @@ async fn dispatch_responses(
     allow_failover: bool,
     estimated_input_tokens: u32,
     requested_output_tokens: u32,
+    semantic_cache_request: Option<SemanticCacheRequest>,
 ) -> Response {
     let Some(first_model) = models.first() else {
         state
@@ -1846,10 +1946,24 @@ async fn dispatch_responses(
         )
             .into_response();
     };
+    let candidate_model_ids = models
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<Vec<_>>();
+    let semantic_cache_hit = semantic_cache_request.as_ref().and_then(|request| {
+        state
+            .semantic_cache
+            .lookup(&config.cache.semantic, request, &candidate_model_ids)
+    });
+    let budget_model = semantic_cache_hit
+        .as_ref()
+        .and_then(|hit| config.find_model(&hit.model))
+        .unwrap_or(first_model);
+
     if let Some(message) = reserve_budget(
         &state,
         &config.budget,
-        first_model,
+        budget_model,
         estimated_input_tokens,
         requested_output_tokens,
     ) {
@@ -1868,6 +1982,22 @@ async fn dispatch_responses(
         .metrics
         .responses_requests
         .fetch_add(1, Ordering::Relaxed);
+    if let Some(hit) = semantic_cache_hit {
+        state
+            .metrics
+            .semantic_cache_hits
+            .fetch_add(1, Ordering::Relaxed);
+        if let Some(model) = config.find_model(&hit.model) {
+            state.metrics.record_selection(model);
+        }
+        return cached_upstream_response(hit, estimated_input_tokens, requested_output_tokens);
+    }
+    if semantic_cache_request.is_some() {
+        state
+            .metrics
+            .semantic_cache_misses
+            .fetch_add(1, Ordering::Relaxed);
+    }
 
     let mut last_error = None;
     let mut failovers = 0_u32;
@@ -1906,6 +2036,12 @@ async fn dispatch_responses(
                     failovers,
                     estimated_input_tokens,
                     requested_output_tokens,
+                    semantic_cache_request
+                        .as_ref()
+                        .map(|request| SemanticCacheWrite {
+                            endpoint: request.endpoint,
+                            prompt: request.prompt.clone(),
+                        }),
                 )
                 .await;
             }
@@ -2023,6 +2159,7 @@ async fn dispatch_embeddings(
                     failovers,
                     estimated_input_tokens,
                     0,
+                    None,
                 )
                 .await;
             }
@@ -2140,6 +2277,7 @@ async fn dispatch_images(
                     failovers,
                     estimated_input_tokens,
                     0,
+                    None,
                 )
                 .await;
             }
@@ -2257,6 +2395,7 @@ async fn dispatch_speech(
                     failovers,
                     estimated_input_tokens,
                     0,
+                    None,
                 )
                 .await;
             }
@@ -2396,6 +2535,7 @@ async fn dispatch_audio_multipart(
                     failovers,
                     estimated_input_tokens,
                     0,
+                    None,
                 )
                 .await;
             }
@@ -2520,9 +2660,15 @@ async fn upstream_response(
     failovers: u32,
     estimated_input_tokens: u32,
     requested_output_tokens: u32,
+    semantic_cache_write: Option<SemanticCacheWrite>,
 ) -> Response {
     let status = upstream.status();
     let headers = upstream.headers().clone();
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let semantic_cache_was_enabled = semantic_cache_write.is_some();
     let mut response = if stream {
         match upstream {
             ProviderResponse::Upstream(upstream) => {
@@ -2538,6 +2684,17 @@ async fn upstream_response(
                         if let Some(usage) = usage_from_value(&value) {
                             state.metrics.record_usage(model, usage);
                         }
+                    }
+                    if let Some(write) = semantic_cache_write {
+                        state.semantic_cache.record(
+                            &state.engine.config().cache.semantic,
+                            write,
+                            &model.id,
+                            &model.provider,
+                            status.as_u16(),
+                            content_type.clone(),
+                            bytes.clone(),
+                        );
                     }
                 }
                 Response::new(Body::from(bytes))
@@ -2592,6 +2749,63 @@ async fn upstream_response(
             .headers_mut()
             .insert("x-autohand-router-output-tokens", value);
     }
+    if semantic_cache_was_enabled && let Ok(value) = HeaderValue::from_str("miss") {
+        response
+            .headers_mut()
+            .insert("x-autohand-router-cache", value);
+    }
+    response
+}
+
+fn cached_upstream_response(
+    hit: SemanticCacheHit,
+    estimated_input_tokens: u32,
+    requested_output_tokens: u32,
+) -> Response {
+    let status = StatusCode::from_u16(hit.status_code).unwrap_or(StatusCode::OK);
+    let mut response = Response::new(Body::from(hit.body));
+    *response.status_mut() = status;
+    if let Some(content_type) = hit.content_type
+        && let Ok(value) = HeaderValue::from_str(&content_type)
+    {
+        response.headers_mut().insert(header::CONTENT_TYPE, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&hit.model) {
+        response
+            .headers_mut()
+            .insert("x-autohand-router-model", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&hit.provider) {
+        response
+            .headers_mut()
+            .insert("x-autohand-router-provider", value);
+    }
+    response
+        .headers_mut()
+        .insert("x-autohand-router-cache", HeaderValue::from_static("hit"));
+    if let Ok(value) = HeaderValue::from_str(&format!("{:.4}", hit.similarity)) {
+        response
+            .headers_mut()
+            .insert("x-autohand-router-cache-similarity", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&hit.embedding_model) {
+        response
+            .headers_mut()
+            .insert("x-autohand-router-cache-embedding-model", value);
+    }
+    response
+        .headers_mut()
+        .insert("x-autohand-router-failovers", HeaderValue::from_static("0"));
+    if let Ok(value) = HeaderValue::from_str(&estimated_input_tokens.to_string()) {
+        response
+            .headers_mut()
+            .insert("x-autohand-router-input-tokens", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&requested_output_tokens.to_string()) {
+        response
+            .headers_mut()
+            .insert("x-autohand-router-output-tokens", value);
+    }
     response
 }
 
@@ -2617,7 +2831,8 @@ mod tests {
         classifier::SmartClassifier,
         config::{
             AuthConfig, BudgetAccountingBackend, BudgetAccountingConfig, BudgetConfig,
-            ClassifierConfig, RouterConfig, RuntimeConfig, ScoringConfig, TelemetryConfig,
+            ClassifierConfig, RouterConfig, RuntimeConfig, ScoringConfig, SemanticCacheConfig,
+            TelemetryConfig,
         },
         provider::ProviderClient,
         router::RoutingEngine,
@@ -2632,7 +2847,13 @@ mod tests {
         Json, Router, extract::Multipart, http::StatusCode, response::IntoResponse, routing::post,
     };
     use serde_json::Value;
-    use std::time::SystemTime;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering as AtomicOrdering},
+        },
+        time::SystemTime,
+    };
     use tokio::net::TcpListener;
 
     #[test]
@@ -2820,6 +3041,81 @@ mod tests {
                 "autohand_router_selection_requests_total_by_model{model=\"strong-ok\"} 1"
             )
         );
+    }
+
+    #[tokio::test]
+    async fn automatic_chat_uses_semantic_cache_for_similar_prompt() {
+        let (upstream_url, calls) = spawn_counting_chat_upstream("cache-model").await;
+        let config = semantic_cache_config(upstream_url);
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let first = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&OpenAiChatRequest {
+                model: "auto".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String("Explain Rust ownership with examples".to_string()),
+                }],
+                extra: Default::default(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert!(first.status().is_success());
+        assert_eq!(
+            first
+                .headers()
+                .get("x-autohand-router-cache")
+                .and_then(|value| value.to_str().ok()),
+            Some("miss")
+        );
+        let first_body = first.json::<Value>().await.unwrap();
+        assert_eq!(first_body["choices"][0]["message"]["content"], "cached ok");
+
+        let second = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&OpenAiChatRequest {
+                model: "auto".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String("Explain Rust ownership examples".to_string()),
+                }],
+                extra: Default::default(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert!(second.status().is_success());
+        assert_eq!(
+            second
+                .headers()
+                .get("x-autohand-router-cache")
+                .and_then(|value| value.to_str().ok()),
+            Some("hit")
+        );
+        assert!(
+            second
+                .headers()
+                .get("x-autohand-router-cache-similarity")
+                .is_some()
+        );
+        let second_body = second.json::<Value>().await.unwrap();
+        assert_eq!(second_body, first_body);
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 1);
+
+        let metrics = client
+            .get(format!("{router_url}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(metrics["semantic_cache_misses"], 1);
+        assert_eq!(metrics["semantic_cache_hits"], 1);
+        assert_eq!(metrics["chat_requests"], 2);
     }
 
     #[test]
@@ -3110,6 +3406,50 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn spawn_counting_chat_upstream(model_id: &'static str) -> (String, Arc<AtomicU64>) {
+        async fn chat(
+            axum::extract::State((model_id, calls)): axum::extract::State<(
+                &'static str,
+                Arc<AtomicU64>,
+            )>,
+        ) -> axum::response::Response {
+            calls.fetch_add(1, AtomicOrdering::Relaxed);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": "chatcmpl-cache-test",
+                    "object": "chat.completion",
+                    "model": model_id,
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "cached ok"
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 2,
+                        "total_tokens": 12
+                    }
+                })),
+            )
+                .into_response()
+        }
+
+        let calls = Arc::new(AtomicU64::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(chat))
+            .with_state((model_id, calls.clone()));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), calls)
+    }
+
     async fn spawn_speech_upstream() -> String {
         async fn speech(Json(request): Json<Value>) -> Json<Value> {
             Json(serde_json::json!({
@@ -3183,6 +3523,7 @@ mod tests {
             accounting: crate::accounting::BudgetAccounting::from_budget_config(&config.budget)
                 .unwrap(),
             telemetry: DecisionLogger::new(&config.telemetry),
+            semantic_cache: Default::default(),
         };
         tokio::spawn(async move {
             axum::serve(listener, app(state)).await.unwrap();
@@ -3269,6 +3610,7 @@ mod tests {
             budget: BudgetConfig::default(),
             telemetry: TelemetryConfig::default(),
             runtime: RuntimeConfig::default(),
+            cache: Default::default(),
         }
     }
 
@@ -3318,6 +3660,62 @@ mod tests {
             budget: BudgetConfig::default(),
             telemetry: TelemetryConfig::default(),
             runtime: RuntimeConfig::default(),
+            cache: Default::default(),
+        }
+    }
+
+    fn semantic_cache_config(base_url: String) -> RouterConfig {
+        RouterConfig {
+            bind: "127.0.0.1:0".to_string(),
+            default_model: "cache-model".to_string(),
+            policy: RouterPolicy::Balanced,
+            providers: vec![ProviderConfig {
+                name: "cache-provider".to_string(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url,
+                api_key_env: None,
+                api_key: None,
+                chat_path: "/v1/chat/completions".to_string(),
+                responses_path: Some("/v1/responses".to_string()),
+                embeddings_path: Some("/v1/embeddings".to_string()),
+                images_path: Some("/v1/images/generations".to_string()),
+                speech_path: Some("/v1/audio/speech".to_string()),
+                audio_transcriptions_path: Some("/v1/audio/transcriptions".to_string()),
+                audio_translations_path: Some("/v1/audio/translations".to_string()),
+                health_path: None,
+                timeout_ms: 1_000,
+                retries: 0,
+                max_concurrency: None,
+                queue_timeout_ms: None,
+                extra_headers: Default::default(),
+            }],
+            models: vec![ModelConfig {
+                id: "cache-model".to_string(),
+                provider: "cache-provider".to_string(),
+                aliases: vec![],
+                capability: 0.70,
+                cost_per_million_input: 1.0,
+                cost_per_million_output: 1.0,
+                domains: vec![DomainLabel::General, DomainLabel::Summary],
+                context_window: Some(4096),
+                capabilities: Default::default(),
+                local: true,
+            }],
+            classifier: ClassifierConfig::default(),
+            auth: AuthConfig::default(),
+            scoring: ScoringConfig::default(),
+            budget: BudgetConfig::default(),
+            telemetry: TelemetryConfig::default(),
+            runtime: RuntimeConfig::default(),
+            cache: crate::config::CacheConfig {
+                semantic: SemanticCacheConfig {
+                    enabled: true,
+                    embedding_model: "local-hash".to_string(),
+                    similarity_threshold: 0.70,
+                    ttl_seconds: 60,
+                    max_entries: 16,
+                },
+            },
         }
     }
 
@@ -3373,6 +3771,7 @@ mod tests {
             },
             telemetry: TelemetryConfig::default(),
             runtime: RuntimeConfig::default(),
+            cache: Default::default(),
         }
     }
 

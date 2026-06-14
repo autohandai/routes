@@ -30,6 +30,8 @@ pub struct RouterConfig {
     pub telemetry: TelemetryConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +91,26 @@ pub struct TelemetryConfig {
     pub decision_log_path: Option<String>,
     #[serde(default)]
     pub include_inputs: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CacheConfig {
+    #[serde(default)]
+    pub semantic: SemanticCacheConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticCacheConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_semantic_cache_embedding_model")]
+    pub embedding_model: String,
+    #[serde(default = "default_semantic_cache_similarity_threshold")]
+    pub similarity_threshold: f32,
+    #[serde(default = "default_semantic_cache_ttl_seconds")]
+    pub ttl_seconds: u64,
+    #[serde(default = "default_semantic_cache_max_entries")]
+    pub max_entries: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +258,18 @@ impl Default for RuntimeConfig {
     }
 }
 
+impl Default for SemanticCacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            embedding_model: default_semantic_cache_embedding_model(),
+            similarity_threshold: default_semantic_cache_similarity_threshold(),
+            ttl_seconds: default_semantic_cache_ttl_seconds(),
+            max_entries: default_semantic_cache_max_entries(),
+        }
+    }
+}
+
 impl Default for ProviderHealthSamplerConfig {
     fn default() -> Self {
         Self {
@@ -276,6 +310,22 @@ fn default_provider_health_interval_ms() -> u64 {
 
 fn default_provider_health_initial_delay_ms() -> u64 {
     500
+}
+
+fn default_semantic_cache_embedding_model() -> String {
+    "local-hash".to_string()
+}
+
+fn default_semantic_cache_similarity_threshold() -> f32 {
+    0.92
+}
+
+fn default_semantic_cache_ttl_seconds() -> u64 {
+    3_600
+}
+
+fn default_semantic_cache_max_entries() -> usize {
+    1_024
 }
 
 fn default_budget_lock_timeout_ms() -> u64 {
@@ -376,6 +426,7 @@ impl RouterConfig {
         self.budget.validate()?;
         self.telemetry.validate()?;
         self.runtime.validate()?;
+        self.cache.validate()?;
         Ok(())
     }
 
@@ -622,6 +673,35 @@ impl TelemetryConfig {
     }
 }
 
+impl CacheConfig {
+    fn validate(&self) -> Result<()> {
+        self.semantic.validate()
+    }
+}
+
+impl SemanticCacheConfig {
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.enabled || !self.embedding_model.trim().is_empty(),
+            "cache.semantic.embedding_model cannot be empty when semantic cache is enabled"
+        );
+        anyhow::ensure!(
+            self.similarity_threshold.is_finite()
+                && (0.0..=1.0).contains(&self.similarity_threshold),
+            "cache.semantic.similarity_threshold must be between 0.0 and 1.0"
+        );
+        anyhow::ensure!(
+            self.ttl_seconds > 0,
+            "cache.semantic.ttl_seconds must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.max_entries > 0,
+            "cache.semantic.max_entries must be greater than zero"
+        );
+        Ok(())
+    }
+}
+
 impl BudgetConfig {
     fn validate(&self) -> Result<()> {
         if let Some(value) = self.max_chat_requests {
@@ -727,7 +807,7 @@ impl ScoringConfig {
 mod tests {
     use super::{
         AuthConfig, BudgetConfig, ClassifierConfig, ProviderHealthSamplerConfig, RouterConfig,
-        RuntimeConfig, ScoringConfig, TelemetryConfig,
+        RuntimeConfig, ScoringConfig, SemanticCacheConfig, TelemetryConfig,
     };
     use crate::types::{ModelConfig, ProviderConfig, ProviderKind, RouterPolicy};
 
@@ -774,6 +854,7 @@ mod tests {
             budget: BudgetConfig::default(),
             telemetry: TelemetryConfig::default(),
             runtime: RuntimeConfig::default(),
+            cache: Default::default(),
         }
     }
 
@@ -911,6 +992,27 @@ mod tests {
             error
                 .to_string()
                 .contains("runtime.provider_health_sampler.interval_ms")
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_semantic_cache_threshold() {
+        let mut config = valid_config();
+        config.cache.semantic = SemanticCacheConfig {
+            enabled: true,
+            embedding_model: "local-hash".to_string(),
+            similarity_threshold: 1.5,
+            ttl_seconds: 60,
+            max_entries: 16,
+        };
+
+        let error = config
+            .validate()
+            .expect_err("invalid semantic cache threshold rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("cache.semantic.similarity_threshold")
         );
     }
 }

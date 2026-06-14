@@ -227,6 +227,9 @@ pub fn spec() -> Value {
                                 "x-autohand-router-failovers": { "schema": { "type": "integer" } },
                                 "x-autohand-router-input-tokens": { "schema": { "type": "integer" } },
                                 "x-autohand-router-output-tokens": { "schema": { "type": "integer" } },
+                                "x-autohand-router-cache": { "schema": { "type": "string", "enum": ["hit", "miss"] } },
+                                "x-autohand-router-cache-similarity": { "schema": { "type": "number" } },
+                                "x-autohand-router-cache-embedding-model": { "schema": { "type": "string" } },
                                 "x-autohand-router-request-id": { "schema": { "type": "string" } }
                             },
                             "content": {
@@ -266,6 +269,9 @@ pub fn spec() -> Value {
                                 "x-autohand-router-failovers": { "schema": { "type": "integer" } },
                                 "x-autohand-router-input-tokens": { "schema": { "type": "integer" } },
                                 "x-autohand-router-output-tokens": { "schema": { "type": "integer" } },
+                                "x-autohand-router-cache": { "schema": { "type": "string", "enum": ["hit", "miss"] } },
+                                "x-autohand-router-cache-similarity": { "schema": { "type": "number" } },
+                                "x-autohand-router-cache-embedding-model": { "schema": { "type": "string" } },
                                 "x-autohand-router-request-id": { "schema": { "type": "string" } }
                             },
                             "content": {
@@ -867,6 +873,8 @@ fn schemas() -> Value {
                 "auth_failures": { "type": "integer" },
                 "upstream_errors": { "type": "integer" },
                 "budget_rejections": { "type": "integer" },
+                "semantic_cache_hits": { "type": "integer" },
+                "semantic_cache_misses": { "type": "integer" },
                 "selected_models": { "type": "integer" },
                 "prompt_tokens": { "type": "integer" },
                 "completion_tokens": { "type": "integer" },

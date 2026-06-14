@@ -190,6 +190,7 @@ async fn main() -> Result<()> {
                 metrics: Default::default(),
                 accounting: BudgetAccounting::from_budget_config(&config.budget)?,
                 telemetry: DecisionLogger::new(&config.telemetry),
+                semantic_cache: Default::default(),
             };
             server::serve(state, &bind).await
         }

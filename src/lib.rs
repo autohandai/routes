@@ -11,6 +11,7 @@ pub mod load;
 pub mod openapi;
 pub mod provider;
 pub mod router;
+pub mod semantic_cache;
 pub mod server;
 pub mod telemetry;
 pub mod tokens;

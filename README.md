@@ -42,6 +42,7 @@ x-autohand-router-provider: <selected provider>
 x-autohand-router-failovers: <number of skipped transient failures>
 x-autohand-router-input-tokens: <estimated prompt tokens>
 x-autohand-router-output-tokens: <requested output tokens>
+x-autohand-router-cache: hit|miss
 ```
 
 ## Router API
@@ -111,13 +112,26 @@ runtime:
 
 When enabled during `serve`, the router periodically checks each provider health endpoint, records observed latency and status, and applies those sampled latency/error penalties during automatic routing. `/v1/router/providers` returns both the live check result and the latest sampled observations.
 
+To enable the process-local semantic response cache for automatic non-stream chat and Responses requests:
+
+```yaml
+cache:
+  semantic:
+    enabled: true
+    embedding_model: local-hash
+    similarity_threshold: 0.92
+    ttl_seconds: 3600
+```
+
+The cache uses deterministic local hashed embeddings and cosine similarity, so it does not require a separate embedding provider. It only stores successful buffered responses for prompts classified as medium/high cacheability, and it skips explicit model requests and streaming passthrough. Cache behavior is visible through `x-autohand-router-cache`, `x-autohand-router-cache-similarity`, JSON metrics, and Prometheus event counters.
+
 Use `kind: ollama` for Ollama's OpenAI-compatible surface. Use `kind: ollama_native` with `chat_path: /api/chat` to transform native Ollama chat responses into OpenAI-compatible `/v1/chat/completions` responses for local open-weight models. Use `kind: llama_cpp` for llama.cpp's OpenAI-compatible server and `kind: llama_cpp_native` with `chat_path: /completion` for the native completion server. Use `kind: vllm` for vLLM's OpenAI-compatible server; vLLM currently belongs on the OpenAI-compatible adapter path, with explicit provider identity for health, metrics, and conformance artifacts.
 
 `serve` handles Ctrl-C by stopping new accepts and giving in-flight work `runtime.graceful_shutdown_timeout_ms` to finish before the server future is forced to stop.
 
 For `auto` and `router-*` chat, responses, embeddings, image-generation, speech, transcription, or translation requests, the router also fails over across the scored candidate list. Explicit model requests stay strict and do not silently switch models.
 
-`/metrics` includes request counters, selected model/provider counters, LLM-judge success/fallback counters, parsed upstream token usage for non-stream responses, and estimated cost from configured per-million token prices. `/metrics/prometheus` exposes the same snapshot in Prometheus text exposition format for fleet scraping. Streaming responses are passed through without buffering, so token usage is only counted when the upstream sends it in a buffered JSON response.
+`/metrics` includes request counters, selected model/provider counters, semantic cache hit/miss counters, LLM-judge success/fallback counters, parsed upstream token usage for non-stream responses, and estimated cost from configured per-million token prices. `/metrics/prometheus` exposes the same snapshot in Prometheus text exposition format for fleet scraping. Streaming responses are passed through without buffering, so token usage is only counted when the upstream sends it in a buffered JSON response.
 
 ## Load Testing
 
@@ -233,7 +247,7 @@ models:
 
 Startup validation rejects ambiguous configs: provider names, model IDs, and aliases must be unique; provider URLs and paths must be valid HTTP-style values; timeouts and concurrency limits must be positive. This prevents silent routing drift when many local and hosted providers are configured together.
 
-The deterministic local classifier is always available, so routing works without external services. To enable LLM-judge routing, set `classifier.llm_judge_model` to any configured model id or alias. Judge requests go through the same provider adapter boundary as chat, so native adapters such as `ollama_native` and `llama_cpp_native` can be used for local open-weight judge models. Judge output must include all labels and confidence fields with finite values from `0.0` to `1.0`; invalid output, timeout, or provider errors increment judge fallback counters and automatically fall back to the heuristic classifier. The architecture keeps classifier and scoring boundaries separate so GEPA-style optimizers or remote Morph calls can be added without changing HTTP handlers.
+The deterministic local classifier is always available, so routing works without external services. To enable LLM-judge routing, set `classifier.llm_judge_model` to any configured model id or alias. Judge requests go through the same provider adapter boundary as chat, so native adapters such as `ollama_native` and `llama_cpp_native` can be used for local open-weight judge models. Judge output must include difficulty, ambiguity, domain, and their confidence fields with finite values from `0.0` to `1.0`; advanced heads such as modality, safety, cacheability, latency sensitivity, and reasoning depth are accepted when present and otherwise receive conservative defaults. Invalid output, timeout, or provider errors increment judge fallback counters and automatically fall back to the heuristic classifier. The architecture keeps classifier and scoring boundaries separate so GEPA-style optimizers or remote Morph calls can be added without changing HTTP handlers.
 
 Before enabling an LLM judge in production, run a live smoke against the configured judge model:
 

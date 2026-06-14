@@ -33,6 +33,16 @@ runtime:
     interval_ms: 30000
     initial_delay_ms: 500
 
+cache:
+  semantic:
+    # Opt-in process-local semantic response cache for automatic non-stream chat/Responses.
+    enabled: false
+    # local-hash is deterministic and does not require a provider call.
+    embedding_model: local-hash
+    similarity_threshold: 0.92
+    ttl_seconds: 3600
+    max_entries: 1024
+
 classifier:
   confidence_threshold: 0.62
   easy_threshold: 0.28

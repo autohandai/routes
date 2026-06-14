@@ -223,6 +223,19 @@ pub struct SemanticCacheConfig {
     pub ttl_seconds: u64,
     #[serde(default = "default_semantic_cache_max_entries")]
     pub max_entries: usize,
+    #[serde(default)]
+    pub backend: SemanticCacheBackend,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default = "default_semantic_cache_lock_timeout_ms")]
+    pub lock_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticCacheBackend {
+    Memory,
+    File,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -447,7 +460,16 @@ impl Default for SemanticCacheConfig {
             similarity_threshold: default_semantic_cache_similarity_threshold(),
             ttl_seconds: default_semantic_cache_ttl_seconds(),
             max_entries: default_semantic_cache_max_entries(),
+            backend: SemanticCacheBackend::Memory,
+            file_path: None,
+            lock_timeout_ms: default_semantic_cache_lock_timeout_ms(),
         }
+    }
+}
+
+impl Default for SemanticCacheBackend {
+    fn default() -> Self {
+        Self::Memory
     }
 }
 
@@ -562,6 +584,10 @@ fn default_semantic_cache_ttl_seconds() -> u64 {
 
 fn default_semantic_cache_max_entries() -> usize {
     1_024
+}
+
+fn default_semantic_cache_lock_timeout_ms() -> u64 {
+    1_000
 }
 
 fn default_shadow_eval_sample_rate() -> f32 {
@@ -1085,6 +1111,17 @@ impl SemanticCacheConfig {
             self.max_entries > 0,
             "cache.semantic.max_entries must be greater than zero"
         );
+        anyhow::ensure!(
+            self.lock_timeout_ms > 0,
+            "cache.semantic.lock_timeout_ms must be greater than zero"
+        );
+        if self.enabled && self.backend == SemanticCacheBackend::File {
+            let path = self.file_path.as_deref().unwrap_or_default().trim();
+            anyhow::ensure!(
+                !path.is_empty(),
+                "cache.semantic.file_path is required when backend is file"
+            );
+        }
         Ok(())
     }
 }
@@ -1310,9 +1347,9 @@ mod tests {
     use super::{
         AuthConfig, BudgetConfig, ClassifierBackend, ClassifierConfig,
         ClassifierModelAdapterConfig, ProviderHealthSamplerConfig, RouterConfig, RuntimeConfig,
-        SafetyRoutingAction, SafetyRoutingConfig, ScoringConfig, SemanticCacheConfig,
-        ShadowEvalConfig, ShadowEvalJudgeConfig, StickyRoutingBackend, StickyRoutingConfig,
-        TelemetryConfig,
+        SafetyRoutingAction, SafetyRoutingConfig, ScoringConfig, SemanticCacheBackend,
+        SemanticCacheConfig, ShadowEvalConfig, ShadowEvalJudgeConfig, StickyRoutingBackend,
+        StickyRoutingConfig, TelemetryConfig,
     };
     use crate::types::{ModelConfig, ProviderConfig, ProviderKind, RouterPolicy};
 
@@ -1561,6 +1598,9 @@ mod tests {
             similarity_threshold: 1.5,
             ttl_seconds: 60,
             max_entries: 16,
+            backend: SemanticCacheBackend::Memory,
+            file_path: None,
+            lock_timeout_ms: 1_000,
         };
 
         let error = config
@@ -1582,6 +1622,9 @@ mod tests {
             similarity_threshold: 0.80,
             ttl_seconds: 60,
             max_entries: 16,
+            backend: SemanticCacheBackend::Memory,
+            file_path: None,
+            lock_timeout_ms: 1_000,
         };
 
         config
@@ -1598,6 +1641,9 @@ mod tests {
             similarity_threshold: 0.80,
             ttl_seconds: 60,
             max_entries: 16,
+            backend: SemanticCacheBackend::Memory,
+            file_path: None,
+            lock_timeout_ms: 1_000,
         };
 
         let error = config
@@ -1616,12 +1662,55 @@ mod tests {
             similarity_threshold: 0.80,
             ttl_seconds: 60,
             max_entries: 16,
+            backend: SemanticCacheBackend::Memory,
+            file_path: None,
+            lock_timeout_ms: 1_000,
         };
 
         let error = config
             .validate()
             .expect_err("provider without embeddings path rejected");
         assert!(error.to_string().contains("does not support embeddings"));
+    }
+
+    #[test]
+    fn rejects_file_semantic_cache_without_file_path() {
+        let mut config = valid_config();
+        config.cache.semantic = SemanticCacheConfig {
+            enabled: true,
+            embedding_model: "local-hash".to_string(),
+            similarity_threshold: 0.80,
+            ttl_seconds: 60,
+            max_entries: 16,
+            backend: SemanticCacheBackend::File,
+            file_path: None,
+            lock_timeout_ms: 1_000,
+        };
+
+        let error = config
+            .validate()
+            .expect_err("file semantic cache requires path");
+        assert!(error.to_string().contains("cache.semantic.file_path"));
+    }
+
+    #[test]
+    fn rejects_zero_semantic_cache_lock_timeout() {
+        let mut config = valid_config();
+        config.cache.semantic = SemanticCacheConfig {
+            enabled: true,
+            embedding_model: "local-hash".to_string(),
+            similarity_threshold: 0.80,
+            ttl_seconds: 60,
+            max_entries: 16,
+            backend: SemanticCacheBackend::File,
+            file_path: Some("semantic-cache.json".to_string()),
+            lock_timeout_ms: 0,
+        };
+
+        let error = config
+            .validate()
+            .expect_err("zero semantic cache lock timeout rejected");
+        assert!(error.to_string().contains("cache.semantic.lock_timeout_ms"));
     }
 
     #[test]

@@ -114,7 +114,7 @@ runtime:
 
 When enabled during `serve`, the router periodically checks each provider health endpoint, records observed latency and status, and applies those sampled latency/error penalties during automatic routing. `/v1/router/providers` returns both the live check result and the latest sampled observations.
 
-To enable the process-local semantic response cache for automatic non-stream chat and Responses requests:
+To enable the semantic response cache for automatic non-stream chat and Responses requests:
 
 ```yaml
 cache:
@@ -123,9 +123,13 @@ cache:
     embedding_model: local-hash
     similarity_threshold: 0.92
     ttl_seconds: 3600
+    max_entries: 1024
+    backend: file
+    file_path: router.semantic-cache.json
+    lock_timeout_ms: 1000
 ```
 
-The cache uses cosine similarity. `embedding_model: local-hash` is deterministic and does not require a provider call; setting `embedding_model` to any configured model id or alias with embeddings support uses real provider-backed vectors. It only stores successful buffered responses for prompts classified as medium/high cacheability, and it skips explicit model requests and streaming passthrough. Cache behavior is visible through `x-autohand-router-cache`, `x-autohand-router-cache-similarity`, JSON metrics, and Prometheus event counters.
+The cache uses cosine similarity. `embedding_model: local-hash` is deterministic and does not require a provider call; setting `embedding_model` to any configured model id or alias with embeddings support uses real provider-backed vectors. `backend: memory` is process-local; `backend: file` stores JSON cache entries behind a lock file so multiple local router replicas can share hits. It only stores successful buffered responses for prompts classified as medium/high cacheability, and it skips explicit model requests and streaming passthrough. Cache behavior is visible through `x-autohand-router-cache`, `x-autohand-router-cache-similarity`, JSON metrics, and Prometheus event counters.
 
 To collect pairwise routing data without changing foreground responses, enable shadow evaluation:
 

@@ -3788,8 +3788,8 @@ mod tests {
         config::{
             AuthConfig, BudgetAccountingBackend, BudgetAccountingConfig, BudgetConfig,
             ClassifierConfig, RouterConfig, RuntimeConfig, SafetyRoutingAction,
-            SafetyRoutingConfig, ScoringConfig, SemanticCacheConfig, ShadowEvalConfig,
-            StickyRoutingBackend, StickyRoutingConfig, TelemetryConfig,
+            SafetyRoutingConfig, ScoringConfig, SemanticCacheBackend, SemanticCacheConfig,
+            ShadowEvalConfig, StickyRoutingBackend, StickyRoutingConfig, TelemetryConfig,
         },
         provider::ProviderClient,
         router::RoutingEngine,
@@ -4073,6 +4073,83 @@ mod tests {
         assert_eq!(metrics["semantic_cache_misses"], 1);
         assert_eq!(metrics["semantic_cache_hits"], 1);
         assert_eq!(metrics["chat_requests"], 2);
+    }
+
+    #[tokio::test]
+    async fn automatic_chat_uses_file_backed_semantic_cache_across_instances() {
+        let (upstream_url, calls) = spawn_counting_chat_upstream("cache-model").await;
+        let cache_path = std::env::temp_dir().join(format!(
+            "autohand-router-shared-semantic-cache-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let mut first_config = semantic_cache_config(upstream_url.clone());
+        first_config.cache.semantic.backend = SemanticCacheBackend::File;
+        first_config.cache.semantic.file_path = Some(cache_path.to_string_lossy().to_string());
+        let mut second_config = semantic_cache_config(upstream_url);
+        second_config.cache.semantic.backend = SemanticCacheBackend::File;
+        second_config.cache.semantic.file_path = Some(cache_path.to_string_lossy().to_string());
+        let first_router_url = spawn_router(first_config).await;
+        let second_router_url = spawn_router(second_config).await;
+        let client = reqwest::Client::new();
+
+        let first = client
+            .post(format!("{first_router_url}/v1/chat/completions"))
+            .json(&OpenAiChatRequest {
+                model: "auto".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String("Explain Rust ownership with examples".to_string()),
+                }],
+                extra: Default::default(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert!(first.status().is_success());
+        assert_eq!(
+            first
+                .headers()
+                .get("x-autohand-router-cache")
+                .and_then(|value| value.to_str().ok()),
+            Some("miss")
+        );
+        let first_body = first.json::<Value>().await.unwrap();
+
+        let second = client
+            .post(format!("{second_router_url}/v1/chat/completions"))
+            .json(&OpenAiChatRequest {
+                model: "auto".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String("Explain Rust ownership examples".to_string()),
+                }],
+                extra: Default::default(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert!(second.status().is_success());
+        assert_eq!(
+            second
+                .headers()
+                .get("x-autohand-router-cache")
+                .and_then(|value| value.to_str().ok()),
+            Some("hit")
+        );
+        let second_body = second.json::<Value>().await.unwrap();
+        assert_eq!(second_body, first_body);
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 1);
+
+        let second_metrics = client
+            .get(format!("{second_router_url}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(second_metrics["semantic_cache_hits"], 1);
+        let _ = std::fs::remove_file(cache_path);
     }
 
     #[tokio::test]
@@ -5259,7 +5336,10 @@ mod tests {
             accounting: crate::accounting::BudgetAccounting::from_budget_config(&config.budget)
                 .unwrap(),
             telemetry: DecisionLogger::new(&config.telemetry),
-            semantic_cache: Default::default(),
+            semantic_cache: crate::semantic_cache::SemanticCache::from_config(
+                &config.cache.semantic,
+            )
+            .unwrap(),
             shadow_eval: crate::shadow_eval::ShadowEvalLogger::new(&config.shadow_eval),
             sticky_routing: crate::sticky::StickyRoutingStore::from_config(&config.sticky_routing)
                 .unwrap(),
@@ -5459,6 +5539,9 @@ mod tests {
                     similarity_threshold: 0.70,
                     ttl_seconds: 60,
                     max_entries: 16,
+                    backend: SemanticCacheBackend::Memory,
+                    file_path: None,
+                    lock_timeout_ms: 1_000,
                 },
             },
             shadow_eval: Default::default(),

@@ -19,6 +19,18 @@ telemetry:
   decision_log_path:
   include_inputs: false
 
+cache:
+  semantic:
+    enabled: false
+    embedding_model: local-hash
+    similarity_threshold: 0.92
+    ttl_seconds: 3600
+    max_entries: 1024
+    # Use backend: file with a shared path when running multiple local replicas.
+    backend: memory
+    file_path:
+    lock_timeout_ms: 1000
+
 shadow_eval:
   enabled: false
   sample_rate: 0.01

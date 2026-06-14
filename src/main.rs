@@ -13,6 +13,7 @@ use autohand_router::{
     openapi,
     provider::ProviderClient,
     router::RoutingEngine,
+    semantic_cache::SemanticCache,
     server::{self, AppState},
     shadow_eval::ShadowEvalLogger,
     sticky::StickyRoutingStore,
@@ -198,7 +199,7 @@ async fn main() -> Result<()> {
                 metrics: Default::default(),
                 accounting: BudgetAccounting::from_budget_config(&config.budget)?,
                 telemetry: DecisionLogger::new(&config.telemetry),
-                semantic_cache: Default::default(),
+                semantic_cache: SemanticCache::from_config(&config.cache.semantic)?,
                 shadow_eval: ShadowEvalLogger::new(&config.shadow_eval),
                 sticky_routing: StickyRoutingStore::from_config(&config.sticky_routing)?,
             };

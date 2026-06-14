@@ -49,7 +49,7 @@ x-autohand-router-output-tokens: <requested output tokens>
 ```bash
 curl -s http://127.0.0.1:8080/v1/router/classify \
   -H 'content-type: application/json' \
-  -d '{"input":"Add error handling to this Rust function","classes":["difficulty","ambiguity","domain"]}'
+  -d '{"input":"Add error handling to this Rust function","classes":["difficulty","ambiguity","domain","modality","safety","cacheability","latency_sensitivity","reasoning_depth"]}'
 ```
 
 ```bash
@@ -63,8 +63,9 @@ curl -s http://127.0.0.1:8080/v1/router/multimodel \
   }'
 ```
 
-The response includes `model`, `provider`, `difficulty`, `ambiguity`, `domain`, confidence fields, policy, reason, and whether fallback was used.
+The response includes `model`, `provider`, `difficulty`, `ambiguity`, `domain`, `modality`, `safety`, `cacheability`, `latency_sensitivity`, `reasoning_depth`, confidence fields, policy, reason, and whether fallback was used.
 It also includes estimated input tokens, requested output tokens, per-candidate context eligibility, and per-candidate capability eligibility so oversized or modality-specific prompts do not route to models that cannot fit or satisfy them.
+Reasoning depth raises or lowers the capability target, and latency sensitivity changes how strongly observed/static provider latency affects candidate scores.
 When `default_model` is provided with `allowed_models` or `allowed_providers`, the default must satisfy those filters. The router will not silently return an out-of-filter fallback.
 
 Legacy Morph clients can call `/v1/router/raw` for a difficulty-only response:

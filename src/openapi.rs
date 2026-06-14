@@ -72,7 +72,7 @@ pub fn spec() -> Value {
             },
             "/v1/router/classify": {
                 "post": {
-                    "summary": "Classify prompt difficulty, ambiguity, and domain",
+                    "summary": "Classify prompt routing heads",
                     "requestBody": {
                         "required": true,
                         "content": {
@@ -614,16 +614,26 @@ fn schemas() -> Value {
             "properties": {
                 "difficulty": { "$ref": "#/components/schemas/DifficultyClassification" },
                 "ambiguity": { "$ref": "#/components/schemas/AmbiguityClassification" },
-                "domain": { "$ref": "#/components/schemas/DomainClassification" }
+                "domain": { "$ref": "#/components/schemas/DomainClassification" },
+                "modality": { "$ref": "#/components/schemas/ModalityClassification" },
+                "safety": { "$ref": "#/components/schemas/SafetyClassification" },
+                "cacheability": { "$ref": "#/components/schemas/CacheabilityClassification" },
+                "latency_sensitivity": { "$ref": "#/components/schemas/LatencySensitivityClassification" },
+                "reasoning_depth": { "$ref": "#/components/schemas/ReasoningDepthClassification" }
             }
         },
         "ClassificationHead": {
             "type": "string",
-            "enum": ["difficulty", "ambiguity", "domain"]
+            "enum": ["difficulty", "ambiguity", "domain", "modality", "safety", "cacheability", "latency_sensitivity", "reasoning_depth"]
         },
         "DifficultyClassification": classification_schema(["easy", "medium", "hard", "needs_info"]),
         "AmbiguityClassification": classification_schema(["low", "med", "high"]),
         "DomainClassification": classification_schema(["general", "summary", "coding", "design", "data"]),
+        "ModalityClassification": classification_schema(["text", "vision", "audio", "tool_use", "multimodal"]),
+        "SafetyClassification": classification_schema(["safe", "sensitive", "unsafe"]),
+        "CacheabilityClassification": classification_schema(["low", "medium", "high"]),
+        "LatencySensitivityClassification": classification_schema(["low", "medium", "high"]),
+        "ReasoningDepthClassification": classification_schema(["shallow", "moderate", "deep"]),
         "MultimodelRequest": {
             "type": "object",
             "properties": {
@@ -648,6 +658,16 @@ fn schemas() -> Value {
                 "ambiguity_confidence": { "type": ["number", "null"] },
                 "domain": { "type": ["string", "null"], "enum": ["general", "summary", "coding", "design", "data", null] },
                 "domain_confidence": { "type": ["number", "null"] },
+                "modality": { "type": ["string", "null"], "enum": ["text", "vision", "audio", "tool_use", "multimodal", null] },
+                "modality_confidence": { "type": ["number", "null"] },
+                "safety": { "type": ["string", "null"], "enum": ["safe", "sensitive", "unsafe", null] },
+                "safety_confidence": { "type": ["number", "null"] },
+                "cacheability": { "type": ["string", "null"], "enum": ["low", "medium", "high", null] },
+                "cacheability_confidence": { "type": ["number", "null"] },
+                "latency_sensitivity": { "type": ["string", "null"], "enum": ["low", "medium", "high", null] },
+                "latency_sensitivity_confidence": { "type": ["number", "null"] },
+                "reasoning_depth": { "type": ["string", "null"], "enum": ["shallow", "moderate", "deep", null] },
+                "reasoning_depth_confidence": { "type": ["number", "null"] },
                 "policy": { "$ref": "#/components/schemas/RouterPolicy" },
                 "reason": { "type": "string" },
                 "fallback": { "type": "boolean" },
@@ -942,6 +962,11 @@ mod tests {
         assert!(spec["components"]["schemas"]["OpenAiSpeechRequest"].is_object());
         assert!(spec["components"]["schemas"]["OpenAiAudioMultipartRequest"].is_object());
         assert!(spec["components"]["schemas"]["ProviderHealthObservation"].is_object());
+        assert!(spec["components"]["schemas"]["ModalityClassification"].is_object());
+        assert!(spec["components"]["schemas"]["SafetyClassification"].is_object());
+        assert!(spec["components"]["schemas"]["CacheabilityClassification"].is_object());
+        assert!(spec["components"]["schemas"]["LatencySensitivityClassification"].is_object());
+        assert!(spec["components"]["schemas"]["ReasoningDepthClassification"].is_object());
         assert!(spec["components"]["schemas"]["JudgeMetricsSnapshot"].is_object());
     }
 }

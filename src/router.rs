@@ -4,8 +4,9 @@ use crate::{
     health::ProviderHealthStore,
     tokens::estimate_tokens,
     types::{
-        Classifications, DifficultyLabel, DomainLabel, ModelCapability, ModelConfig,
-        MultimodelRequest, MultimodelResponse, RouteCandidate, RouterPolicy,
+        Classifications, DifficultyLabel, DomainLabel, LatencySensitivityLabel, ModelCapability,
+        ModelConfig, MultimodelRequest, MultimodelResponse, ReasoningDepthLabel, RouteCandidate,
+        RouterPolicy,
     },
 };
 use std::sync::Arc;
@@ -228,6 +229,46 @@ where
             .domain
             .meets_threshold
             .then_some(classifications.domain.confidence);
+        let modality = classifications
+            .modality
+            .meets_threshold
+            .then_some(classifications.modality.label);
+        let modality_confidence = classifications
+            .modality
+            .meets_threshold
+            .then_some(classifications.modality.confidence);
+        let safety = classifications
+            .safety
+            .meets_threshold
+            .then_some(classifications.safety.label);
+        let safety_confidence = classifications
+            .safety
+            .meets_threshold
+            .then_some(classifications.safety.confidence);
+        let cacheability = classifications
+            .cacheability
+            .meets_threshold
+            .then_some(classifications.cacheability.label);
+        let cacheability_confidence = classifications
+            .cacheability
+            .meets_threshold
+            .then_some(classifications.cacheability.confidence);
+        let latency_sensitivity = classifications
+            .latency_sensitivity
+            .meets_threshold
+            .then_some(classifications.latency_sensitivity.label);
+        let latency_sensitivity_confidence = classifications
+            .latency_sensitivity
+            .meets_threshold
+            .then_some(classifications.latency_sensitivity.confidence);
+        let reasoning_depth = classifications
+            .reasoning_depth
+            .meets_threshold
+            .then_some(classifications.reasoning_depth.label);
+        let reasoning_depth_confidence = classifications
+            .reasoning_depth
+            .meets_threshold
+            .then_some(classifications.reasoning_depth.confidence);
 
         MultimodelResponse {
             model: model_id,
@@ -238,6 +279,16 @@ where
             ambiguity_confidence,
             domain,
             domain_confidence,
+            modality,
+            modality_confidence,
+            safety,
+            safety_confidence,
+            cacheability,
+            cacheability_confidence,
+            latency_sensitivity,
+            latency_sensitivity_confidence,
+            reasoning_depth,
+            reasoning_depth_confidence,
             policy,
             reason: reason.to_string(),
             fallback,
@@ -270,6 +321,46 @@ where
             .domain
             .meets_threshold
             .then_some(classifications.domain.confidence);
+        let modality = classifications
+            .modality
+            .meets_threshold
+            .then_some(classifications.modality.label);
+        let modality_confidence = classifications
+            .modality
+            .meets_threshold
+            .then_some(classifications.modality.confidence);
+        let safety = classifications
+            .safety
+            .meets_threshold
+            .then_some(classifications.safety.label);
+        let safety_confidence = classifications
+            .safety
+            .meets_threshold
+            .then_some(classifications.safety.confidence);
+        let cacheability = classifications
+            .cacheability
+            .meets_threshold
+            .then_some(classifications.cacheability.label);
+        let cacheability_confidence = classifications
+            .cacheability
+            .meets_threshold
+            .then_some(classifications.cacheability.confidence);
+        let latency_sensitivity = classifications
+            .latency_sensitivity
+            .meets_threshold
+            .then_some(classifications.latency_sensitivity.label);
+        let latency_sensitivity_confidence = classifications
+            .latency_sensitivity
+            .meets_threshold
+            .then_some(classifications.latency_sensitivity.confidence);
+        let reasoning_depth = classifications
+            .reasoning_depth
+            .meets_threshold
+            .then_some(classifications.reasoning_depth.label);
+        let reasoning_depth_confidence = classifications
+            .reasoning_depth
+            .meets_threshold
+            .then_some(classifications.reasoning_depth.confidence);
 
         MultimodelResponse {
             model: String::new(),
@@ -280,6 +371,16 @@ where
             ambiguity_confidence,
             domain,
             domain_confidence,
+            modality,
+            modality_confidence,
+            safety,
+            safety_confidence,
+            cacheability,
+            cacheability_confidence,
+            latency_sensitivity,
+            latency_sensitivity_confidence,
+            reasoning_depth,
+            reasoning_depth_confidence,
             policy,
             reason: reason.to_string(),
             fallback,
@@ -340,8 +441,10 @@ fn scored_candidates(
             let health_penalty = provider.map_or(0.0, |provider| {
                 health_penalty(provider, config, provider_health)
             });
+            let latency_weight = config.scoring.latency_weight
+                * latency_sensitivity_multiplier(&classifications.latency_sensitivity.label);
             score += routing_priority * config.scoring.priority_weight;
-            score -= latency_penalty * config.scoring.latency_weight;
+            score -= latency_penalty * latency_weight;
             score -= health_penalty * config.scoring.health_weight;
             if !capability_eligible {
                 score -= 10.0;
@@ -409,7 +512,7 @@ pub fn score_model(
     policy: &RouterPolicy,
     config: &RouterConfig,
 ) -> f32 {
-    let required = required_capability(&classifications.difficulty.label);
+    let required = required_capability_for_classifications(classifications);
     let capability_fit = 1.0 - (required - model.capability).max(0.0);
     let overkill_penalty = (model.capability - required).max(0.0) * 0.12;
     let cost = normalized_cost(model);
@@ -429,6 +532,23 @@ pub fn required_capability(difficulty: &DifficultyLabel) -> f32 {
         DifficultyLabel::Medium => 0.58,
         DifficultyLabel::Hard => 0.84,
         DifficultyLabel::NeedsInfo => 0.55,
+    }
+}
+
+fn required_capability_for_classifications(classifications: &Classifications) -> f32 {
+    let base = required_capability(&classifications.difficulty.label);
+    match classifications.reasoning_depth.label {
+        ReasoningDepthLabel::Shallow => (base - 0.08).max(0.20),
+        ReasoningDepthLabel::Moderate => base,
+        ReasoningDepthLabel::Deep => (base + 0.10).min(0.95),
+    }
+}
+
+fn latency_sensitivity_multiplier(label: &LatencySensitivityLabel) -> f32 {
+    match label {
+        LatencySensitivityLabel::Low => 0.55,
+        LatencySensitivityLabel::Medium => 1.0,
+        LatencySensitivityLabel::High => 1.65,
     }
 }
 
@@ -851,6 +971,32 @@ mod tests {
             })
             .await;
         assert_eq!(route.model, "strong");
+    }
+
+    #[tokio::test]
+    async fn route_response_includes_advanced_classifier_heads() {
+        let route = engine()
+            .route(MultimodelRequest {
+                input: "ASAP fast instant realtime: analyze this screenshot and design a production architecture with root cause debugging, tradeoffs, and call the JSON schema tool with no API keys".to_string(),
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+                policy: RouterPolicy::Balanced,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(
+            route.modality,
+            Some(crate::types::ModalityLabel::Multimodal)
+        );
+        assert_eq!(route.safety, Some(crate::types::SafetyLabel::Sensitive));
+        assert_eq!(
+            route.latency_sensitivity,
+            Some(LatencySensitivityLabel::High)
+        );
+        assert_eq!(route.reasoning_depth, Some(ReasoningDepthLabel::Deep));
     }
 
     #[tokio::test]

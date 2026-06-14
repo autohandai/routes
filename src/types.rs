@@ -30,6 +30,48 @@ pub enum DomainLabel {
     Data,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModalityLabel {
+    Text,
+    Vision,
+    Audio,
+    ToolUse,
+    Multimodal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SafetyLabel {
+    Safe,
+    Sensitive,
+    Unsafe,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheabilityLabel {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LatencySensitivityLabel {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningDepthLabel {
+    Shallow,
+    Moderate,
+    Deep,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelCapability {
@@ -280,6 +322,11 @@ pub enum ClassificationHead {
     Difficulty,
     Ambiguity,
     Domain,
+    Modality,
+    Safety,
+    Cacheability,
+    LatencySensitivity,
+    ReasoningDepth,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,6 +337,16 @@ pub struct SelectedClassifications {
     pub ambiguity: Option<Classification<AmbiguityLabel>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain: Option<Classification<DomainLabel>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modality: Option<Classification<ModalityLabel>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety: Option<Classification<SafetyLabel>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cacheability: Option<Classification<CacheabilityLabel>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_sensitivity: Option<Classification<LatencySensitivityLabel>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_depth: Option<Classification<ReasoningDepthLabel>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -297,6 +354,11 @@ pub struct Classifications {
     pub difficulty: Classification<DifficultyLabel>,
     pub ambiguity: Classification<AmbiguityLabel>,
     pub domain: Classification<DomainLabel>,
+    pub modality: Classification<ModalityLabel>,
+    pub safety: Classification<SafetyLabel>,
+    pub cacheability: Classification<CacheabilityLabel>,
+    pub latency_sensitivity: Classification<LatencySensitivityLabel>,
+    pub reasoning_depth: Classification<ReasoningDepthLabel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,6 +379,17 @@ impl SelectedClassifications {
                 .then_some(classifications.ambiguity),
             domain: (include_all || heads.contains(&ClassificationHead::Domain))
                 .then_some(classifications.domain),
+            modality: (include_all || heads.contains(&ClassificationHead::Modality))
+                .then_some(classifications.modality),
+            safety: (include_all || heads.contains(&ClassificationHead::Safety))
+                .then_some(classifications.safety),
+            cacheability: (include_all || heads.contains(&ClassificationHead::Cacheability))
+                .then_some(classifications.cacheability),
+            latency_sensitivity: (include_all
+                || heads.contains(&ClassificationHead::LatencySensitivity))
+            .then_some(classifications.latency_sensitivity),
+            reasoning_depth: (include_all || heads.contains(&ClassificationHead::ReasoningDepth))
+                .then_some(classifications.reasoning_depth),
         }
     }
 }
@@ -352,6 +425,26 @@ pub struct MultimodelResponse {
     pub domain: Option<DomainLabel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_confidence: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modality: Option<ModalityLabel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modality_confidence: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety: Option<SafetyLabel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_confidence: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cacheability: Option<CacheabilityLabel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cacheability_confidence: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_sensitivity: Option<LatencySensitivityLabel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_sensitivity_confidence: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_depth: Option<ReasoningDepthLabel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_depth_confidence: Option<f32>,
     pub policy: RouterPolicy,
     pub reason: String,
     pub fallback: bool,
@@ -634,9 +727,10 @@ fn push_unique(capabilities: &mut Vec<ModelCapability>, capability: ModelCapabil
 #[cfg(test)]
 mod tests {
     use super::{
-        AmbiguityLabel, Classification, ClassificationHead, Classifications, DifficultyLabel,
-        DomainLabel, LegacyRouterMode, ModelCapability, OpenAiChatRequest, OpenAiEmbeddingsRequest,
-        OpenAiResponsesRequest, RawRouterResponse, RouterPolicy, SelectedClassifications,
+        AmbiguityLabel, CacheabilityLabel, Classification, ClassificationHead, Classifications,
+        DifficultyLabel, DomainLabel, LatencySensitivityLabel, LegacyRouterMode, ModalityLabel,
+        ModelCapability, OpenAiChatRequest, OpenAiEmbeddingsRequest, OpenAiResponsesRequest,
+        RawRouterResponse, ReasoningDepthLabel, RouterPolicy, SafetyLabel, SelectedClassifications,
     };
     use serde_json::Value;
 
@@ -660,6 +754,36 @@ mod tests {
                 confidence: 0.85,
                 meets_threshold: true,
             },
+            modality: Classification {
+                class_id: 0,
+                label: ModalityLabel::Text,
+                confidence: 0.9,
+                meets_threshold: true,
+            },
+            safety: Classification {
+                class_id: 0,
+                label: SafetyLabel::Safe,
+                confidence: 0.9,
+                meets_threshold: true,
+            },
+            cacheability: Classification {
+                class_id: 2,
+                label: CacheabilityLabel::High,
+                confidence: 0.8,
+                meets_threshold: true,
+            },
+            latency_sensitivity: Classification {
+                class_id: 1,
+                label: LatencySensitivityLabel::Medium,
+                confidence: 0.75,
+                meets_threshold: true,
+            },
+            reasoning_depth: Classification {
+                class_id: 1,
+                label: ReasoningDepthLabel::Moderate,
+                confidence: 0.8,
+                meets_threshold: true,
+            },
         }
     }
 
@@ -675,6 +799,7 @@ mod tests {
         assert!(object.contains_key("difficulty"));
         assert!(object.contains_key("domain"));
         assert!(!object.contains_key("ambiguity"));
+        assert!(!object.contains_key("modality"));
     }
 
     #[test]
@@ -686,6 +811,11 @@ mod tests {
         assert!(object.contains_key("difficulty"));
         assert!(object.contains_key("ambiguity"));
         assert!(object.contains_key("domain"));
+        assert!(object.contains_key("modality"));
+        assert!(object.contains_key("safety"));
+        assert!(object.contains_key("cacheability"));
+        assert!(object.contains_key("latency_sensitivity"));
+        assert!(object.contains_key("reasoning_depth"));
     }
 
     #[test]

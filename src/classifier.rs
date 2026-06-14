@@ -1,8 +1,9 @@
 use crate::config::RouterConfig;
 use crate::provider::ProviderClient;
 use crate::types::{
-    AmbiguityLabel, ChatMessage, Classification, Classifications, DifficultyLabel, DomainLabel,
-    OpenAiChatRequest,
+    AmbiguityLabel, CacheabilityLabel, ChatMessage, Classification, Classifications,
+    DifficultyLabel, DomainLabel, LatencySensitivityLabel, ModalityLabel, OpenAiChatRequest,
+    ReasoningDepthLabel, SafetyLabel,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -90,7 +91,7 @@ impl SmartClassifier {
             .find_model(model_id)
             .with_context(|| format!("LLM judge model {model_id} is not configured"))?;
         let judge_prompt = format!(
-            "Classify the user request for model routing. Return only JSON with keys difficulty, ambiguity, domain, confidence, ambiguity_confidence, domain_confidence. Valid difficulty: easy, medium, hard, needs_info. Valid ambiguity: low, med, high. Valid domain: general, summary, coding, design, data.\n\nUser request:\n{input}"
+            "Classify the user request for model routing. Return only JSON with keys difficulty, ambiguity, domain, modality, safety, cacheability, latency_sensitivity, reasoning_depth, confidence, ambiguity_confidence, domain_confidence, modality_confidence, safety_confidence, cacheability_confidence, latency_sensitivity_confidence, reasoning_depth_confidence. Valid difficulty: easy, medium, hard, needs_info. Valid ambiguity: low, med, high. Valid domain: general, summary, coding, design, data. Valid modality: text, vision, audio, tool_use, multimodal. Valid safety: safe, sensitive, unsafe. Valid cacheability: low, medium, high. Valid latency_sensitivity: low, medium, high. Valid reasoning_depth: shallow, moderate, deep.\n\nUser request:\n{input}"
         );
         let body = OpenAiChatRequest {
             model: model.id.clone(),
@@ -201,10 +202,26 @@ impl PromptClassifier for HeuristicClassifier {
         );
         let ambiguity = classify_ambiguity(&features, self.confidence_threshold);
         let domain = classify_domain(&features, self.confidence_threshold);
+        let modality = classify_modality(&features, self.confidence_threshold);
+        let safety = classify_safety(&features, self.confidence_threshold);
+        let cacheability = classify_cacheability(&features, self.confidence_threshold);
+        let latency_sensitivity =
+            classify_latency_sensitivity(&features, self.confidence_threshold);
+        let reasoning_depth = classify_reasoning_depth(
+            &features,
+            self.confidence_threshold,
+            &difficulty.label,
+            &ambiguity.label,
+        );
         Classifications {
             difficulty,
             ambiguity,
             domain,
+            modality,
+            safety,
+            cacheability,
+            latency_sensitivity,
+            reasoning_depth,
         }
     }
 }
@@ -215,6 +232,10 @@ struct PromptFeatures {
     token_count: usize,
     question_marks: usize,
     code_markers: usize,
+    image_markers: usize,
+    audio_markers: usize,
+    tool_markers: usize,
+    json_markers: usize,
 }
 
 impl From<&str> for PromptFeatures {
@@ -226,11 +247,52 @@ impl From<&str> for PromptFeatures {
             .iter()
             .filter(|marker| lower.contains(**marker))
             .count();
+        let image_markers = count_terms(
+            &lower,
+            &[
+                "image",
+                "screenshot",
+                "photo",
+                "vision",
+                "diagram",
+                "ocr",
+                "multimodal",
+            ],
+        );
+        let audio_markers = count_terms(
+            &lower,
+            &[
+                "audio",
+                "speech",
+                "voice",
+                "transcribe",
+                "transcription",
+                "translate this recording",
+                "tts",
+            ],
+        );
+        let tool_markers = count_terms(
+            &lower,
+            &[
+                "tool",
+                "function call",
+                "function calling",
+                "call the api",
+                "use the api",
+                "webhook",
+                "json schema",
+            ],
+        );
+        let json_markers = count_terms(&lower, &["json", "schema", "structured output"]);
         Self {
             lower,
             token_count,
             question_marks,
             code_markers,
+            image_markers,
+            audio_markers,
+            tool_markers,
+            json_markers,
         }
     }
 }
@@ -447,6 +509,245 @@ fn classify_domain(features: &PromptFeatures, threshold: f32) -> Classification<
     }
 }
 
+fn classify_modality(features: &PromptFeatures, threshold: f32) -> Classification<ModalityLabel> {
+    let has_vision = features.image_markers > 0;
+    let has_audio = features.audio_markers > 0;
+    let has_tools = features.tool_markers > 0;
+    let active_modes = [has_vision, has_audio, has_tools]
+        .into_iter()
+        .filter(|active| *active)
+        .count();
+    let (label, class_id, confidence) = if active_modes > 1 {
+        (ModalityLabel::Multimodal, 4, 0.86)
+    } else if has_vision {
+        (ModalityLabel::Vision, 1, 0.84)
+    } else if has_audio {
+        (ModalityLabel::Audio, 2, 0.84)
+    } else if has_tools {
+        (ModalityLabel::ToolUse, 3, 0.80)
+    } else {
+        (ModalityLabel::Text, 0, 0.88)
+    };
+
+    Classification {
+        class_id,
+        label,
+        confidence,
+        meets_threshold: confidence >= threshold,
+    }
+}
+
+fn classify_safety(features: &PromptFeatures, threshold: f32) -> Classification<SafetyLabel> {
+    let unsafe_terms = count_terms(
+        &features.lower,
+        &[
+            "jailbreak",
+            "bypass safety",
+            "ignore previous instructions",
+            "steal",
+            "exfiltrate",
+            "malware",
+            "phishing",
+            "credential theft",
+            "sql injection",
+            "exploit",
+        ],
+    );
+    let sensitive_terms = count_terms(
+        &features.lower,
+        &[
+            "pii",
+            "ssn",
+            "social security",
+            "credit card",
+            "password",
+            "secret",
+            "api key",
+            "token",
+            "medical",
+            "legal",
+            "financial",
+            "private",
+            "auth",
+            "security",
+        ],
+    );
+    let (label, class_id, confidence) = if unsafe_terms > 0 {
+        (
+            SafetyLabel::Unsafe,
+            2,
+            (0.78 + unsafe_terms as f32 * 0.05).min(0.95),
+        )
+    } else if sensitive_terms > 0 {
+        (
+            SafetyLabel::Sensitive,
+            1,
+            (0.72 + sensitive_terms as f32 * 0.05).min(0.92),
+        )
+    } else {
+        (SafetyLabel::Safe, 0, 0.82)
+    };
+
+    Classification {
+        class_id,
+        label,
+        confidence,
+        meets_threshold: confidence >= threshold,
+    }
+}
+
+fn classify_cacheability(
+    features: &PromptFeatures,
+    threshold: f32,
+) -> Classification<CacheabilityLabel> {
+    let stable_terms = count_terms(
+        &features.lower,
+        &[
+            "explain",
+            "summarize",
+            "document",
+            "docs",
+            "example",
+            "template",
+            "how do i",
+            "what is",
+            "convert",
+            "format",
+        ],
+    );
+    let volatile_terms = count_terms(
+        &features.lower,
+        &[
+            "latest",
+            "today",
+            "current",
+            "now",
+            "live",
+            "my",
+            "this file",
+            "this screenshot",
+            "private",
+            "token",
+            "password",
+            "secret",
+        ],
+    );
+    let mut score =
+        0.45 + (stable_terms + features.json_markers) as f32 * 0.13 - volatile_terms as f32 * 0.18;
+    if features.code_markers > 0 {
+        score -= 0.10;
+    }
+    score = score.clamp(0.0, 1.0);
+    let (label, class_id, confidence) = if score < 0.35 {
+        (CacheabilityLabel::Low, 0, 0.78)
+    } else if score < 0.68 {
+        (CacheabilityLabel::Medium, 1, 0.72)
+    } else {
+        (CacheabilityLabel::High, 2, score.max(0.78))
+    };
+
+    Classification {
+        class_id,
+        label,
+        confidence,
+        meets_threshold: confidence >= threshold,
+    }
+}
+
+fn classify_latency_sensitivity(
+    features: &PromptFeatures,
+    threshold: f32,
+) -> Classification<LatencySensitivityLabel> {
+    let fast_terms = count_terms(
+        &features.lower,
+        &[
+            "fast",
+            "quick",
+            "asap",
+            "low latency",
+            "interactive",
+            "realtime",
+            "real-time",
+            "instant",
+            "stream",
+        ],
+    );
+    let patient_terms = count_terms(
+        &features.lower,
+        &[
+            "deep", "thorough", "careful", "research", "analyze", "audit",
+        ],
+    );
+    let mut score = 0.42 + fast_terms as f32 * 0.22 - patient_terms as f32 * 0.10;
+    if features.token_count > 140 {
+        score -= 0.12;
+    }
+    score = score.clamp(0.0, 1.0);
+    let (label, class_id, confidence) = if score < 0.30 {
+        (LatencySensitivityLabel::Low, 0, 0.76)
+    } else if score < 0.65 {
+        (LatencySensitivityLabel::Medium, 1, 0.72)
+    } else {
+        (LatencySensitivityLabel::High, 2, score.max(0.78))
+    };
+
+    Classification {
+        class_id,
+        label,
+        confidence,
+        meets_threshold: confidence >= threshold,
+    }
+}
+
+fn classify_reasoning_depth(
+    features: &PromptFeatures,
+    threshold: f32,
+    difficulty: &DifficultyLabel,
+    ambiguity: &AmbiguityLabel,
+) -> Classification<ReasoningDepthLabel> {
+    let reasoning_terms = count_terms(
+        &features.lower,
+        &[
+            "reason",
+            "analyze",
+            "architecture",
+            "design",
+            "debug",
+            "root cause",
+            "tradeoff",
+            "proof",
+            "formal",
+            "plan",
+            "multi step",
+            "multi-step",
+            "evaluate",
+            "compare",
+        ],
+    );
+    let mut score = features.token_count as f32 / 220.0 + reasoning_terms as f32 * 0.16;
+    if matches!(difficulty, DifficultyLabel::Hard) {
+        score += 0.28;
+    }
+    if matches!(ambiguity, AmbiguityLabel::High) {
+        score += 0.12;
+    }
+    score = score.clamp(0.0, 1.0);
+    let (label, class_id, confidence) = if score < 0.28 {
+        (ReasoningDepthLabel::Shallow, 0, 0.82)
+    } else if score < 0.65 {
+        (ReasoningDepthLabel::Moderate, 1, 0.74)
+    } else {
+        (ReasoningDepthLabel::Deep, 2, score.max(0.80))
+    };
+
+    Classification {
+        class_id,
+        label,
+        confidence,
+        meets_threshold: confidence >= threshold,
+    }
+}
+
 fn count_terms(input: &str, terms: &[&str]) -> usize {
     terms.iter().filter(|term| input.contains(**term)).count()
 }
@@ -457,9 +758,19 @@ struct JudgeOutput {
     difficulty: DifficultyLabel,
     ambiguity: AmbiguityLabel,
     domain: DomainLabel,
+    modality: Option<ModalityLabel>,
+    safety: Option<SafetyLabel>,
+    cacheability: Option<CacheabilityLabel>,
+    latency_sensitivity: Option<LatencySensitivityLabel>,
+    reasoning_depth: Option<ReasoningDepthLabel>,
     confidence: f32,
     ambiguity_confidence: f32,
     domain_confidence: f32,
+    modality_confidence: Option<f32>,
+    safety_confidence: Option<f32>,
+    cacheability_confidence: Option<f32>,
+    latency_sensitivity_confidence: Option<f32>,
+    reasoning_depth_confidence: Option<f32>,
 }
 
 fn parse_judge_content(content: &str) -> Result<Classifications> {
@@ -485,6 +796,55 @@ fn parse_judge_content(content: &str) -> Result<Classifications> {
             confidence: output.domain_confidence,
             meets_threshold: output.domain_confidence >= 0.5,
         },
+        modality: Classification {
+            class_id: modality_id(output.modality.as_ref().unwrap_or(&ModalityLabel::Text)),
+            label: output.modality.unwrap_or(ModalityLabel::Text),
+            confidence: output.modality_confidence.unwrap_or(0.72),
+            meets_threshold: output.modality_confidence.unwrap_or(0.72) >= 0.5,
+        },
+        safety: Classification {
+            class_id: safety_id(output.safety.as_ref().unwrap_or(&SafetyLabel::Safe)),
+            label: output.safety.unwrap_or(SafetyLabel::Safe),
+            confidence: output.safety_confidence.unwrap_or(0.72),
+            meets_threshold: output.safety_confidence.unwrap_or(0.72) >= 0.5,
+        },
+        cacheability: Classification {
+            class_id: cacheability_id(
+                output
+                    .cacheability
+                    .as_ref()
+                    .unwrap_or(&CacheabilityLabel::Medium),
+            ),
+            label: output.cacheability.unwrap_or(CacheabilityLabel::Medium),
+            confidence: output.cacheability_confidence.unwrap_or(0.68),
+            meets_threshold: output.cacheability_confidence.unwrap_or(0.68) >= 0.5,
+        },
+        latency_sensitivity: Classification {
+            class_id: latency_sensitivity_id(
+                output
+                    .latency_sensitivity
+                    .as_ref()
+                    .unwrap_or(&LatencySensitivityLabel::Medium),
+            ),
+            label: output
+                .latency_sensitivity
+                .unwrap_or(LatencySensitivityLabel::Medium),
+            confidence: output.latency_sensitivity_confidence.unwrap_or(0.68),
+            meets_threshold: output.latency_sensitivity_confidence.unwrap_or(0.68) >= 0.5,
+        },
+        reasoning_depth: Classification {
+            class_id: reasoning_depth_id(
+                output
+                    .reasoning_depth
+                    .as_ref()
+                    .unwrap_or(&ReasoningDepthLabel::Moderate),
+            ),
+            label: output
+                .reasoning_depth
+                .unwrap_or(ReasoningDepthLabel::Moderate),
+            confidence: output.reasoning_depth_confidence.unwrap_or(0.68),
+            meets_threshold: output.reasoning_depth_confidence.unwrap_or(0.68) >= 0.5,
+        },
     })
 }
 
@@ -493,8 +853,26 @@ impl JudgeOutput {
         validate_confidence("confidence", self.confidence)?;
         validate_confidence("ambiguity_confidence", self.ambiguity_confidence)?;
         validate_confidence("domain_confidence", self.domain_confidence)?;
+        validate_optional_confidence("modality_confidence", self.modality_confidence)?;
+        validate_optional_confidence("safety_confidence", self.safety_confidence)?;
+        validate_optional_confidence("cacheability_confidence", self.cacheability_confidence)?;
+        validate_optional_confidence(
+            "latency_sensitivity_confidence",
+            self.latency_sensitivity_confidence,
+        )?;
+        validate_optional_confidence(
+            "reasoning_depth_confidence",
+            self.reasoning_depth_confidence,
+        )?;
         Ok(())
     }
+}
+
+fn validate_optional_confidence(name: &str, value: Option<f32>) -> Result<()> {
+    if let Some(value) = value {
+        validate_confidence(name, value)?;
+    }
+    Ok(())
 }
 
 fn validate_confidence(name: &str, value: f32) -> Result<()> {
@@ -550,6 +928,48 @@ fn domain_id(label: &DomainLabel) -> u8 {
     }
 }
 
+fn modality_id(label: &ModalityLabel) -> u8 {
+    match label {
+        ModalityLabel::Text => 0,
+        ModalityLabel::Vision => 1,
+        ModalityLabel::Audio => 2,
+        ModalityLabel::ToolUse => 3,
+        ModalityLabel::Multimodal => 4,
+    }
+}
+
+fn safety_id(label: &SafetyLabel) -> u8 {
+    match label {
+        SafetyLabel::Safe => 0,
+        SafetyLabel::Sensitive => 1,
+        SafetyLabel::Unsafe => 2,
+    }
+}
+
+fn cacheability_id(label: &CacheabilityLabel) -> u8 {
+    match label {
+        CacheabilityLabel::Low => 0,
+        CacheabilityLabel::Medium => 1,
+        CacheabilityLabel::High => 2,
+    }
+}
+
+fn latency_sensitivity_id(label: &LatencySensitivityLabel) -> u8 {
+    match label {
+        LatencySensitivityLabel::Low => 0,
+        LatencySensitivityLabel::Medium => 1,
+        LatencySensitivityLabel::High => 2,
+    }
+}
+
+fn reasoning_depth_id(label: &ReasoningDepthLabel) -> u8 {
+    match label {
+        ReasoningDepthLabel::Shallow => 0,
+        ReasoningDepthLabel::Moderate => 1,
+        ReasoningDepthLabel::Deep => 2,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,6 +992,23 @@ mod tests {
         assert_eq!(parsed.difficulty.label, DifficultyLabel::Hard);
         assert_eq!(parsed.ambiguity.label, AmbiguityLabel::Low);
         assert_eq!(parsed.domain.label, DomainLabel::Coding);
+    }
+
+    #[test]
+    fn parses_judge_json_with_advanced_heads() {
+        let parsed = parse_judge_content(
+            "{\"difficulty\":\"hard\",\"ambiguity\":\"low\",\"domain\":\"coding\",\"modality\":\"tool_use\",\"safety\":\"sensitive\",\"cacheability\":\"low\",\"latency_sensitivity\":\"high\",\"reasoning_depth\":\"deep\",\"confidence\":0.91,\"ambiguity_confidence\":0.82,\"domain_confidence\":0.88,\"modality_confidence\":0.81,\"safety_confidence\":0.79,\"cacheability_confidence\":0.77,\"latency_sensitivity_confidence\":0.76,\"reasoning_depth_confidence\":0.9}",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.modality.label, ModalityLabel::ToolUse);
+        assert_eq!(parsed.safety.label, SafetyLabel::Sensitive);
+        assert_eq!(parsed.cacheability.label, CacheabilityLabel::Low);
+        assert_eq!(
+            parsed.latency_sensitivity.label,
+            LatencySensitivityLabel::High
+        );
+        assert_eq!(parsed.reasoning_depth.label, ReasoningDepthLabel::Deep);
     }
 
     #[test]
@@ -614,6 +1051,27 @@ mod tests {
         assert_eq!(metrics.fallbacks, 0);
         assert_eq!(metrics.invalid_outputs, 0);
         assert_eq!(metrics.heuristic_routes, 0);
+    }
+
+    #[tokio::test]
+    async fn heuristic_classifier_sets_advanced_heads() {
+        let classifier = HeuristicClassifier::new(0.5);
+        let classifications = classifier
+            .classify(
+                "ASAP fast instant realtime: analyze this screenshot and design a production architecture with root cause debugging, tradeoffs, and call the JSON schema tool with no API keys",
+            )
+            .await;
+
+        assert_eq!(classifications.modality.label, ModalityLabel::Multimodal);
+        assert_eq!(classifications.safety.label, SafetyLabel::Sensitive);
+        assert_eq!(
+            classifications.latency_sensitivity.label,
+            LatencySensitivityLabel::High
+        );
+        assert_eq!(
+            classifications.reasoning_depth.label,
+            ReasoningDepthLabel::Deep
+        );
     }
 
     #[tokio::test]

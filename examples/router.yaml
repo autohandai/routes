@@ -202,6 +202,10 @@ models:
     cost_per_million_output: 0.05
     domains: [general, summary, coding]
     context_window: 128000
+    capabilities:
+      supports_json: true
+      supports_code: true
+      supports_long_context: true
     local: true
 
   - id: qwen2.5-coder:32b
@@ -212,6 +216,12 @@ models:
     cost_per_million_output: 0.10
     domains: [coding, data]
     context_window: 128000
+    capabilities:
+      supports_tools: true
+      supports_json: true
+      supports_code: true
+      supports_web_apps: true
+      supports_long_context: true
     local: true
 
   - id: gemma4:12b-mlx
@@ -222,6 +232,13 @@ models:
     cost_per_million_output: 0.08
     domains: [general, summary, coding]
     context_window: 128000
+    capabilities:
+      supports_vision: true
+      supports_tools: true
+      supports_json: true
+      supports_code: true
+      supports_web_apps: true
+      supports_long_context: true
     local: true
 
   - id: llama-cpp-native-q4
@@ -232,6 +249,9 @@ models:
     cost_per_million_output: 0.06
     domains: [general, coding]
     context_window: 8192
+    capabilities:
+      supports_json: true
+      supports_code: true
     local: true
 
   - id: Qwen/Qwen2.5-Coder-32B-Instruct
@@ -242,6 +262,12 @@ models:
     cost_per_million_output: 0.04
     domains: [coding, data, general]
     context_window: 32768
+    capabilities:
+      supports_tools: true
+      supports_json: true
+      supports_code: true
+      supports_web_apps: true
+      supports_long_context: true
     local: true
 
   - id: openrouter/anthropic/claude-sonnet-4.5
@@ -252,6 +278,14 @@ models:
     cost_per_million_output: 15.0
     domains: [coding, design, general]
     context_window: 200000
+    capabilities:
+      supports_vision: true
+      supports_audio: true
+      supports_tools: true
+      supports_json: true
+      supports_code: true
+      supports_web_apps: true
+      supports_long_context: true
 
   - id: openrouter/anthropic/claude-opus-4.1
     provider: openrouter
@@ -261,3 +295,11 @@ models:
     cost_per_million_output: 75.0
     domains: [coding, design, data, general]
     context_window: 200000
+    capabilities:
+      supports_vision: true
+      supports_audio: true
+      supports_tools: true
+      supports_json: true
+      supports_code: true
+      supports_web_apps: true
+      supports_long_context: true

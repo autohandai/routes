@@ -286,6 +286,7 @@ mod tests {
             cost_per_million_output: 10.0,
             domains: vec![],
             context_window: None,
+            capabilities: Default::default(),
             local: false,
         }
     }

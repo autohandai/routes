@@ -2,7 +2,7 @@ use crate::{
     classifier::{HeuristicClassifier, PromptClassifier},
     config::{PolicyWeights, RouterConfig},
     router::RoutingEngine,
-    types::{DifficultyLabel, DomainLabel, MultimodelRequest, RouterPolicy},
+    types::{DifficultyLabel, DomainLabel, ModelCapability, MultimodelRequest, RouterPolicy},
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,8 @@ pub struct EvalExample {
     pub allowed_models: Vec<String>,
     #[serde(default)]
     pub allowed_providers: Vec<String>,
+    #[serde(default)]
+    pub required_capabilities: Vec<ModelCapability>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -204,6 +206,7 @@ where
                 input: example.input.clone(),
                 allowed_models: example.allowed_models.clone(),
                 allowed_providers: example.allowed_providers.clone(),
+                required_capabilities: example.required_capabilities.clone(),
                 policy: example.policy.clone(),
                 default_model: None,
                 max_output_tokens: None,
@@ -721,6 +724,7 @@ mod tests {
             policy: RouterPolicy::CostEfficient,
             allowed_models: vec![],
             allowed_providers: vec![],
+            required_capabilities: Vec::new(),
         }];
 
         let report = eval_gate(&config, Path::new("tiny.jsonl"), &examples, 2, 0.0, 0.0)
@@ -742,6 +746,7 @@ mod tests {
                 policy: RouterPolicy::CostEfficient,
                 allowed_models: vec![],
                 allowed_providers: vec![],
+                required_capabilities: Vec::new(),
             },
             EvalExample {
                 input: "Design event sourcing platform with security".to_string(),
@@ -750,6 +755,7 @@ mod tests {
                 policy: RouterPolicy::CapabilityHeavy,
                 allowed_models: vec![],
                 allowed_providers: vec![],
+                required_capabilities: Vec::new(),
             },
         ];
 
@@ -778,6 +784,7 @@ mod tests {
                 policy: RouterPolicy::Balanced,
                 allowed_models: vec![],
                 allowed_providers: vec![],
+                required_capabilities: Vec::new(),
             })
             .collect::<Vec<_>>();
 
@@ -843,6 +850,7 @@ mod tests {
                     cost_per_million_output: 0.1,
                     domains: vec![DomainLabel::Coding],
                     context_window: Some(4096),
+                    capabilities: Default::default(),
                     local: true,
                 },
                 ModelConfig {
@@ -854,6 +862,7 @@ mod tests {
                     cost_per_million_output: 10.0,
                     domains: vec![DomainLabel::Design],
                     context_window: Some(4096),
+                    capabilities: Default::default(),
                     local: true,
                 },
             ],

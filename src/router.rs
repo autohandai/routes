@@ -3,8 +3,8 @@ use crate::{
     config::RouterConfig,
     tokens::estimate_tokens,
     types::{
-        Classifications, DifficultyLabel, DomainLabel, ModelConfig, MultimodelRequest,
-        MultimodelResponse, RouteCandidate, RouterPolicy,
+        Classifications, DifficultyLabel, DomainLabel, ModelCapability, ModelConfig,
+        MultimodelRequest, MultimodelResponse, RouteCandidate, RouterPolicy,
     },
 };
 use std::sync::Arc;
@@ -84,12 +84,17 @@ where
             &self.config,
             token_budget.estimated_input_tokens,
             token_budget.requested_output_tokens,
+            &request.required_capabilities,
         );
 
         let Some(best) = scored.iter().max_by(|left, right| {
-            left.score
-                .partial_cmp(&right.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            candidate_selectable(left)
+                .cmp(&candidate_selectable(right))
+                .then_with(|| {
+                    left.score
+                        .partial_cmp(&right.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
         }) else {
             return match allowed_default {
                 Some(model) => self.response_for_model(
@@ -110,6 +115,33 @@ where
             };
         };
 
+        if !candidate_selectable(best) {
+            return match allowed_default.filter(|model| {
+                context_eligible(
+                    model,
+                    token_budget.estimated_input_tokens
+                        .saturating_add(token_budget.requested_output_tokens),
+                ) && capability_eligible(model, &request.required_capabilities)
+            }) {
+                Some(model) => self.response_for_model(
+                    &model.id,
+                    classifications,
+                    request.policy,
+                    "no eligible candidate matched required capabilities/context; using allowed default",
+                    true,
+                    token_budget,
+                ),
+                None => self.response_for_unknown(
+                    classifications,
+                    request.policy,
+                    "no eligible candidate matched required capabilities/context",
+                    true,
+                    token_budget,
+                ),
+            };
+        }
+
+        let best = best;
         let reason = format!(
             "selected by {:?} policy from {} candidate(s)",
             request.policy,
@@ -206,7 +238,6 @@ where
             candidates: Vec::new(),
         }
     }
-
     fn response_for_unknown(
         &self,
         classifications: Classifications,
@@ -279,6 +310,7 @@ fn scored_candidates(
     config: &RouterConfig,
     estimated_input_tokens: u32,
     requested_output_tokens: u32,
+    required_capabilities: &[ModelCapability],
 ) -> Vec<RouteCandidate> {
     let context_required = estimated_input_tokens.saturating_add(requested_output_tokens);
     let mut scored = candidates
@@ -288,9 +320,9 @@ fn scored_candidates(
                 .providers
                 .iter()
                 .find(|provider| provider.name == model.provider);
-            let context_eligible = model
-                .context_window
-                .is_none_or(|window| window >= context_required);
+            let context_eligible = context_eligible(model, context_required);
+            let missing_capabilities = missing_capabilities(model, required_capabilities);
+            let capability_eligible = missing_capabilities.is_empty();
             let mut score = score_model(model, classifications, policy, config);
             let routing_priority = routing_priority(model, config);
             let latency_penalty =
@@ -299,6 +331,9 @@ fn scored_candidates(
             score += routing_priority * config.scoring.priority_weight;
             score -= latency_penalty * config.scoring.latency_weight;
             score -= health_penalty * config.scoring.health_weight;
+            if !capability_eligible {
+                score -= 10.0;
+            }
             if !context_eligible {
                 score -= 10.0;
             }
@@ -312,6 +347,8 @@ fn scored_candidates(
                 routing_priority,
                 latency_penalty,
                 health_penalty,
+                capability_eligible,
+                missing_capabilities,
                 context_window: model.context_window,
                 context_required,
                 context_eligible,
@@ -325,6 +362,33 @@ fn scored_candidates(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     scored
+}
+
+fn candidate_selectable(candidate: &RouteCandidate) -> bool {
+    candidate.capability_eligible && candidate.context_eligible
+}
+
+fn context_eligible(model: &ModelConfig, context_required: u32) -> bool {
+    model
+        .context_window
+        .is_none_or(|window| window >= context_required)
+}
+
+fn capability_eligible(model: &ModelConfig, required_capabilities: &[ModelCapability]) -> bool {
+    required_capabilities
+        .iter()
+        .all(|capability| model.capabilities.supports(capability))
+}
+
+fn missing_capabilities(
+    model: &ModelConfig,
+    required_capabilities: &[ModelCapability],
+) -> Vec<ModelCapability> {
+    required_capabilities
+        .iter()
+        .filter(|capability| !model.capabilities.supports(capability))
+        .cloned()
+        .collect()
 }
 
 pub fn score_model(
@@ -455,6 +519,7 @@ mod tests {
                     cost_per_million_output: 0.1,
                     domains: vec![DomainLabel::Coding],
                     context_window: None,
+                    capabilities: Default::default(),
                     local: true,
                 },
                 ModelConfig {
@@ -466,6 +531,7 @@ mod tests {
                     cost_per_million_output: 1.0,
                     domains: vec![DomainLabel::Coding, DomainLabel::Design],
                     context_window: None,
+                    capabilities: Default::default(),
                     local: true,
                 },
                 ModelConfig {
@@ -477,6 +543,7 @@ mod tests {
                     cost_per_million_output: 40.0,
                     domains: vec![DomainLabel::Design, DomainLabel::Coding],
                     context_window: None,
+                    capabilities: Default::default(),
                     local: true,
                 },
             ],
@@ -525,6 +592,7 @@ mod tests {
                     cost_per_million_output: 0.1,
                     domains: vec![DomainLabel::Coding],
                     context_window: Some(128),
+                    capabilities: Default::default(),
                     local: true,
                 },
                 ModelConfig {
@@ -536,6 +604,73 @@ mod tests {
                     cost_per_million_output: 1.0,
                     domains: vec![DomainLabel::Coding],
                     context_window: Some(4096),
+                    capabilities: Default::default(),
+                    local: true,
+                },
+            ],
+            classifier: Default::default(),
+            auth: Default::default(),
+            scoring: Default::default(),
+            budget: Default::default(),
+            telemetry: Default::default(),
+            runtime: Default::default(),
+        };
+        RoutingEngine::new(config, HeuristicClassifier::default())
+    }
+
+    fn capability_engine() -> RoutingEngine<HeuristicClassifier> {
+        let config = RouterConfig {
+            bind: "127.0.0.1:0".to_string(),
+            default_model: "text-only".to_string(),
+            policy: RouterPolicy::Balanced,
+            providers: vec![ProviderConfig {
+                name: "local".to_string(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: "http://localhost:11434".to_string(),
+                api_key_env: None,
+                api_key: None,
+                chat_path: "/v1/chat/completions".to_string(),
+                responses_path: Some("/v1/responses".to_string()),
+                embeddings_path: Some("/v1/embeddings".to_string()),
+                images_path: Some("/v1/images/generations".to_string()),
+                speech_path: Some("/v1/audio/speech".to_string()),
+                audio_transcriptions_path: Some("/v1/audio/transcriptions".to_string()),
+                audio_translations_path: Some("/v1/audio/translations".to_string()),
+                health_path: None,
+                timeout_ms: 120_000,
+                retries: 1,
+                max_concurrency: None,
+                queue_timeout_ms: None,
+                extra_headers: HashMap::new(),
+            }],
+            models: vec![
+                ModelConfig {
+                    id: "text-only".to_string(),
+                    provider: "local".to_string(),
+                    aliases: vec![],
+                    capability: 0.70,
+                    cost_per_million_input: 0.1,
+                    cost_per_million_output: 0.1,
+                    domains: vec![DomainLabel::General],
+                    context_window: Some(4096),
+                    capabilities: Default::default(),
+                    local: true,
+                },
+                ModelConfig {
+                    id: "vision-tools".to_string(),
+                    provider: "local".to_string(),
+                    aliases: vec![],
+                    capability: 0.62,
+                    cost_per_million_input: 1.0,
+                    cost_per_million_output: 1.0,
+                    domains: vec![DomainLabel::General],
+                    context_window: Some(4096),
+                    capabilities: crate::types::ModelCapabilities {
+                        supports_vision: true,
+                        supports_tools: true,
+                        supports_json: true,
+                        ..Default::default()
+                    },
                     local: true,
                 },
             ],
@@ -614,6 +749,7 @@ mod tests {
                     cost_per_million_output: 0.1,
                     domains: vec![DomainLabel::Coding],
                     context_window: None,
+                    capabilities: Default::default(),
                     local: true,
                 },
                 ModelConfig {
@@ -625,6 +761,7 @@ mod tests {
                     cost_per_million_output: 1.0,
                     domains: vec![DomainLabel::Coding],
                     context_window: None,
+                    capabilities: Default::default(),
                     local: true,
                 },
                 ModelConfig {
@@ -636,6 +773,7 @@ mod tests {
                     cost_per_million_output: 0.1,
                     domains: vec![DomainLabel::Coding],
                     context_window: None,
+                    capabilities: Default::default(),
                     local: true,
                 },
             ],
@@ -656,6 +794,7 @@ mod tests {
                 input: "Fix this typo in the Rust comment".to_string(),
                 allowed_models: vec![],
                 allowed_providers: vec![],
+                required_capabilities: Vec::new(),
                 policy: RouterPolicy::CostEfficient,
                 default_model: None,
                 max_output_tokens: None,
@@ -672,6 +811,7 @@ mod tests {
                 input: "Design a production multi tenant event sourcing architecture with concurrency, migration, benchmark, and security tradeoffs".to_string(),
                 allowed_models: vec![],
                 allowed_providers: vec![],
+                required_capabilities: Vec::new(),
                 policy: RouterPolicy::CapabilityHeavy,
                 default_model: None,
                 max_output_tokens: None,
@@ -688,6 +828,7 @@ mod tests {
                     .to_string(),
                 allowed_models: vec![],
                 allowed_providers: vec![],
+                required_capabilities: Vec::new(),
                 policy: RouterPolicy::CapabilityHeavy,
                 default_model: None,
                 max_output_tokens: Some(512),
@@ -705,12 +846,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn required_capabilities_route_to_capable_model() {
+        let route = capability_engine()
+            .route(MultimodelRequest {
+                input: "Describe the attached screenshot and return JSON".to_string(),
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities: vec![ModelCapability::Vision, ModelCapability::Json],
+                policy: RouterPolicy::Balanced,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(route.model, "vision-tools");
+        assert!(route.candidates.iter().any(|candidate| {
+            candidate.model == "text-only"
+                && !candidate.capability_eligible
+                && candidate
+                    .missing_capabilities
+                    .contains(&ModelCapability::Vision)
+        }));
+    }
+
+    #[tokio::test]
+    async fn route_fails_closed_when_no_model_has_required_capabilities() {
+        let route = capability_engine()
+            .route(MultimodelRequest {
+                input: "Transcribe this audio".to_string(),
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities: vec![ModelCapability::Audio],
+                policy: RouterPolicy::Balanced,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(route.model, "");
+        assert!(route.fallback);
+        assert!(
+            route
+                .reason
+                .contains("no eligible candidate matched required capabilities")
+        );
+    }
+
+    #[tokio::test]
     async fn model_priority_hint_can_promote_a_preferred_candidate() {
         let route = scoring_hint_engine()
             .route(MultimodelRequest {
                 input: "Fix this typo in the Rust comment".to_string(),
                 allowed_models: vec!["cheap".to_string(), "preferred-balanced".to_string()],
                 allowed_providers: vec![],
+                required_capabilities: Vec::new(),
                 policy: RouterPolicy::Balanced,
                 default_model: None,
                 max_output_tokens: None,
@@ -735,6 +924,7 @@ mod tests {
                     .to_string(),
                 allowed_models: vec![],
                 allowed_providers: vec![],
+                required_capabilities: Vec::new(),
                 policy: RouterPolicy::CapabilityHeavy,
                 default_model: None,
                 max_output_tokens: None,
@@ -759,6 +949,7 @@ mod tests {
                     .to_string(),
                 allowed_models: vec!["does-not-exist".to_string()],
                 allowed_providers: vec![],
+                required_capabilities: Vec::new(),
                 policy: RouterPolicy::Balanced,
                 default_model: Some("balanced".to_string()),
                 max_output_tokens: None,
@@ -783,6 +974,7 @@ mod tests {
                 input: "hi".to_string(),
                 allowed_models: vec!["cheap".to_string()],
                 allowed_providers: vec![],
+                required_capabilities: Vec::new(),
                 policy: RouterPolicy::Balanced,
                 default_model: Some("balanced".to_string()),
                 max_output_tokens: None,
@@ -802,6 +994,7 @@ mod tests {
                 input: "hi".to_string(),
                 allowed_models: vec!["balanced".to_string()],
                 allowed_providers: vec![],
+                required_capabilities: Vec::new(),
                 policy: RouterPolicy::Balanced,
                 default_model: Some("balanced".to_string()),
                 max_output_tokens: None,

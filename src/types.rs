@@ -30,6 +30,18 @@ pub enum DomainLabel {
     Data,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCapability {
+    Vision,
+    Audio,
+    Tools,
+    Json,
+    Code,
+    WebApps,
+    LongContext,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RouterPolicy {
@@ -157,7 +169,41 @@ pub struct ModelConfig {
     #[serde(default)]
     pub context_window: Option<u32>,
     #[serde(default)]
+    pub capabilities: ModelCapabilities,
+    #[serde(default)]
     pub local: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelCapabilities {
+    #[serde(default)]
+    pub supports_vision: bool,
+    #[serde(default)]
+    pub supports_audio: bool,
+    #[serde(default)]
+    pub supports_tools: bool,
+    #[serde(default)]
+    pub supports_json: bool,
+    #[serde(default)]
+    pub supports_code: bool,
+    #[serde(default)]
+    pub supports_web_apps: bool,
+    #[serde(default)]
+    pub supports_long_context: bool,
+}
+
+impl ModelCapabilities {
+    pub fn supports(&self, capability: &ModelCapability) -> bool {
+        match capability {
+            ModelCapability::Vision => self.supports_vision,
+            ModelCapability::Audio => self.supports_audio,
+            ModelCapability::Tools => self.supports_tools,
+            ModelCapability::Json => self.supports_json,
+            ModelCapability::Code => self.supports_code,
+            ModelCapability::WebApps => self.supports_web_apps,
+            ModelCapability::LongContext => self.supports_long_context,
+        }
+    }
 }
 
 fn default_capability() -> f32 {
@@ -283,6 +329,8 @@ pub struct MultimodelRequest {
     #[serde(default)]
     pub allowed_providers: Vec<String>,
     #[serde(default)]
+    pub required_capabilities: Vec<ModelCapability>,
+    #[serde(default)]
     pub policy: RouterPolicy,
     #[serde(default)]
     pub default_model: Option<String>,
@@ -324,6 +372,8 @@ pub struct RouteCandidate {
     pub routing_priority: f32,
     pub latency_penalty: f32,
     pub health_penalty: f32,
+    pub capability_eligible: bool,
+    pub missing_capabilities: Vec<ModelCapability>,
     pub context_window: Option<u32>,
     pub context_required: u32,
     pub context_eligible: bool,
@@ -405,6 +455,24 @@ impl OpenAiChatRequest {
             .join("\n")
     }
 
+    pub fn required_capabilities(&self) -> Vec<ModelCapability> {
+        let mut capabilities = Vec::new();
+        if self
+            .messages
+            .iter()
+            .any(|message| content_contains_image(&message.content))
+        {
+            push_unique(&mut capabilities, ModelCapability::Vision);
+        }
+        if self.extra.contains_key("tools") || self.extra.contains_key("tool_choice") {
+            push_unique(&mut capabilities, ModelCapability::Tools);
+        }
+        if response_format_requires_json(self.extra.get("response_format")) {
+            push_unique(&mut capabilities, ModelCapability::Json);
+        }
+        capabilities
+    }
+
     pub fn into_upstream(mut self, model: String) -> Value {
         self.model = model;
         serde_json::to_value(self).expect("OpenAI chat request serializes")
@@ -442,6 +510,20 @@ impl OpenAiResponsesRequest {
             .or_else(|| self.extra.get("max_tokens"))
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok())
+    }
+
+    pub fn required_capabilities(&self) -> Vec<ModelCapability> {
+        let mut capabilities = Vec::new();
+        if content_contains_image(&self.input) {
+            push_unique(&mut capabilities, ModelCapability::Vision);
+        }
+        if self.extra.contains_key("tools") || self.extra.contains_key("tool_choice") {
+            push_unique(&mut capabilities, ModelCapability::Tools);
+        }
+        if response_format_requires_json(self.extra.get("response_format")) {
+            push_unique(&mut capabilities, ModelCapability::Json);
+        }
+        capabilities
     }
 
     pub fn stream(&self) -> bool {
@@ -519,12 +601,42 @@ fn content_to_text(value: &Value) -> Option<String> {
     }
 }
 
+fn content_contains_image(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(content_contains_image),
+        Value::Object(object) => {
+            object.contains_key("image_url")
+                || object.contains_key("input_image")
+                || object
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.contains("image"))
+                || object.values().any(content_contains_image)
+        }
+        _ => false,
+    }
+}
+
+fn response_format_requires_json(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind == "json_object" || kind == "json_schema")
+}
+
+fn push_unique(capabilities: &mut Vec<ModelCapability>, capability: ModelCapability) {
+    if !capabilities.contains(&capability) {
+        capabilities.push(capability);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AmbiguityLabel, Classification, ClassificationHead, Classifications, DifficultyLabel,
-        DomainLabel, LegacyRouterMode, OpenAiEmbeddingsRequest, RawRouterResponse, RouterPolicy,
-        SelectedClassifications,
+        DomainLabel, LegacyRouterMode, ModelCapability, OpenAiChatRequest, OpenAiEmbeddingsRequest,
+        OpenAiResponsesRequest, RawRouterResponse, RouterPolicy, SelectedClassifications,
     };
     use serde_json::Value;
 
@@ -605,6 +717,55 @@ mod tests {
         };
 
         assert_eq!(request.prompt_text(), "first prompt\nsecond prompt");
+    }
+
+    #[test]
+    fn chat_request_detects_vision_tools_and_json_requirements() {
+        let request = OpenAiChatRequest {
+            model: "auto".to_string(),
+            messages: vec![super::ChatMessage {
+                role: "user".to_string(),
+                content: serde_json::json!([
+                    {"type": "text", "text": "Describe this image as JSON"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
+                ]),
+            }],
+            extra: serde_json::Map::from_iter([
+                ("tools".to_string(), serde_json::json!([])),
+                (
+                    "response_format".to_string(),
+                    serde_json::json!({"type": "json_object"}),
+                ),
+            ]),
+        };
+
+        let capabilities = request.required_capabilities();
+
+        assert!(capabilities.contains(&ModelCapability::Vision));
+        assert!(capabilities.contains(&ModelCapability::Tools));
+        assert!(capabilities.contains(&ModelCapability::Json));
+    }
+
+    #[test]
+    fn responses_request_detects_nested_image_requirement() {
+        let request = OpenAiResponsesRequest {
+            model: "auto".to_string(),
+            input: serde_json::json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "What is in this screenshot?"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,abc"}
+                    ]
+                }
+            ]),
+            extra: Default::default(),
+        };
+
+        assert_eq!(
+            request.required_capabilities(),
+            vec![ModelCapability::Vision]
+        );
     }
 
     #[test]

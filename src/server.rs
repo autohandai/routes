@@ -8,7 +8,7 @@ use crate::{
     telemetry::DecisionLogger,
     tokens::estimate_tokens,
     types::{
-        ClassifyRequest, ClassifyResponse, ModelConfig, MultimodelRequest,
+        ClassifyRequest, ClassifyResponse, ModelCapability, ModelConfig, MultimodelRequest,
         OpenAiAudioMultipartRequest, OpenAiChatRequest, OpenAiEmbeddingsRequest,
         OpenAiImagesRequest, OpenAiMultipartPart, OpenAiResponsesRequest, OpenAiSpeechRequest,
         RouterPolicy,
@@ -948,7 +948,8 @@ async fn models(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
                 "owned_by": model.provider,
                 "aliases": model.aliases,
                 "local": model.local,
-                "context_window": model.context_window
+                "context_window": model.context_window,
+                "capabilities": model.capabilities
             })
         })
         .collect::<Vec<_>>();
@@ -1031,6 +1032,7 @@ async fn provider_router(
             input: request.input,
             allowed_models: vec![],
             allowed_providers: vec![provider],
+            required_capabilities: Vec::new(),
             policy: request.mode.policy(),
             default_model: None,
             max_output_tokens: None,
@@ -1075,12 +1077,14 @@ async fn chat_completions(
     let (models, estimated_input_tokens, requested_output_tokens) = if automatic {
         let policy = parse_router_model_policy(&requested_model);
         let route_input = prompt.clone();
+        let required_capabilities = request.required_capabilities();
         let route = state
             .engine
             .route(MultimodelRequest {
                 input: route_input.clone(),
                 allowed_models: vec![],
                 allowed_providers: vec![],
+                required_capabilities,
                 policy,
                 default_model: None,
                 max_output_tokens: request.max_output_tokens(),
@@ -1161,12 +1165,14 @@ async fn responses(
     let (models, estimated_input_tokens, requested_output_tokens) = if automatic {
         let policy = parse_router_model_policy(&requested_model);
         let route_input = prompt.clone();
+        let required_capabilities = request.required_capabilities();
         let route = state
             .engine
             .route(MultimodelRequest {
                 input: route_input.clone(),
                 allowed_models: vec![],
                 allowed_providers: vec![],
+                required_capabilities,
                 policy,
                 default_model: None,
                 max_output_tokens: request.max_output_tokens(),
@@ -1253,6 +1259,7 @@ async fn embeddings(
                 input: route_input.clone(),
                 allowed_models: vec![],
                 allowed_providers: vec![],
+                required_capabilities: Vec::new(),
                 policy,
                 default_model: None,
                 max_output_tokens: Some(0),
@@ -1330,6 +1337,7 @@ async fn images_generations(
                 input: route_input.clone(),
                 allowed_models: vec![],
                 allowed_providers: vec![],
+                required_capabilities: Vec::new(),
                 policy,
                 default_model: None,
                 max_output_tokens: Some(0),
@@ -1407,6 +1415,7 @@ async fn audio_speech(
                 input: route_input.clone(),
                 allowed_models: vec![],
                 allowed_providers: vec![],
+                required_capabilities: vec![ModelCapability::Audio],
                 policy,
                 default_model: None,
                 max_output_tokens: Some(0),
@@ -1544,6 +1553,7 @@ async fn audio_multipart_endpoint(
                 input: route_input.clone(),
                 allowed_models: vec![],
                 allowed_providers: vec![],
+                required_capabilities: vec![ModelCapability::Audio],
                 policy,
                 default_model: None,
                 max_output_tokens: Some(0),
@@ -2626,6 +2636,7 @@ mod tests {
             cost_per_million_output: 10.0,
             domains: vec![],
             context_window: None,
+            capabilities: Default::default(),
             local: false,
         };
         let usage = UsageAccounting {
@@ -2838,6 +2849,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn automatic_speech_routing_requires_audio_capability() {
+        let upstream_url = spawn_speech_upstream().await;
+        let config = speech_config(upstream_url);
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{router_url}/v1/audio/speech"))
+            .json(&OpenAiSpeechRequest {
+                model: "auto".to_string(),
+                input: "read this".to_string(),
+                voice: "alloy".to_string(),
+                extra: Default::default(),
+            })
+            .send()
+            .await
+            .unwrap();
+
+        assert!(response.status().is_success());
+        assert_eq!(
+            response
+                .headers()
+                .get("x-autohand-router-model")
+                .and_then(|value| value.to_str().ok()),
+            Some("speech-model")
+        );
+    }
+
+    #[tokio::test]
     async fn multipart_audio_proxy_rewrites_model_and_records_metrics() {
         let upstream_url = spawn_speech_upstream().await;
         let config = speech_config(upstream_url);
@@ -2980,6 +3019,7 @@ mod tests {
             cost_per_million_output: 10.0,
             domains: vec![],
             context_window: None,
+            capabilities: Default::default(),
             local: false,
         }
     }
@@ -3174,6 +3214,7 @@ mod tests {
                     cost_per_million_output: 1.0,
                     domains: vec![DomainLabel::Coding, DomainLabel::Design],
                     context_window: Some(4096),
+                    capabilities: Default::default(),
                     local: true,
                 },
                 ModelConfig {
@@ -3185,6 +3226,7 @@ mod tests {
                     cost_per_million_output: 1.0,
                     domains: vec![DomainLabel::Coding, DomainLabel::Design],
                     context_window: Some(4096),
+                    capabilities: Default::default(),
                     local: true,
                 },
             ],
@@ -3231,6 +3273,10 @@ mod tests {
                 cost_per_million_output: 1.0,
                 domains: vec![DomainLabel::General],
                 context_window: Some(4096),
+                capabilities: crate::types::ModelCapabilities {
+                    supports_audio: true,
+                    ..Default::default()
+                },
                 local: true,
             }],
             classifier: ClassifierConfig::default(),
@@ -3276,6 +3322,7 @@ mod tests {
                 cost_per_million_output: 1.0,
                 domains: vec![DomainLabel::General],
                 context_window: Some(4096),
+                capabilities: Default::default(),
                 local: true,
             }],
             classifier: ClassifierConfig::default(),

@@ -958,6 +958,7 @@ mod tests {
             cost_per_million_output: 1.0,
             domains: vec![DomainLabel::General],
             context_window: Some(4096),
+            capabilities: Default::default(),
             local: true,
         }
     }

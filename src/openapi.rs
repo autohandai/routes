@@ -626,6 +626,7 @@ fn schemas() -> Value {
                 "input": { "type": "string" },
                 "allowed_models": { "type": "array", "items": { "type": "string" } },
                 "allowed_providers": { "type": "array", "items": { "type": "string" } },
+                "required_capabilities": { "type": "array", "items": { "$ref": "#/components/schemas/ModelCapability" } },
                 "policy": { "$ref": "#/components/schemas/RouterPolicy" },
                 "default_model": { "type": ["string", "null"] },
                 "max_output_tokens": { "type": ["integer", "null"], "minimum": 1 }
@@ -664,11 +665,29 @@ fn schemas() -> Value {
                 "routing_priority": { "type": "number" },
                 "latency_penalty": { "type": "number" },
                 "health_penalty": { "type": "number" },
+                "capability_eligible": { "type": "boolean" },
+                "missing_capabilities": { "type": "array", "items": { "$ref": "#/components/schemas/ModelCapability" } },
                 "context_window": { "type": ["integer", "null"] },
                 "context_required": { "type": "integer" },
                 "context_eligible": { "type": "boolean" }
             },
-            "required": ["model", "provider", "score", "capability", "estimated_cost", "domain_match", "routing_priority", "latency_penalty", "health_penalty", "context_required", "context_eligible"]
+            "required": ["model", "provider", "score", "capability", "estimated_cost", "domain_match", "routing_priority", "latency_penalty", "health_penalty", "capability_eligible", "missing_capabilities", "context_required", "context_eligible"]
+        },
+        "ModelCapability": {
+            "type": "string",
+            "enum": ["vision", "audio", "tools", "json", "code", "web_apps", "long_context"]
+        },
+        "ModelCapabilities": {
+            "type": "object",
+            "properties": {
+                "supports_vision": { "type": "boolean" },
+                "supports_audio": { "type": "boolean" },
+                "supports_tools": { "type": "boolean" },
+                "supports_json": { "type": "boolean" },
+                "supports_code": { "type": "boolean" },
+                "supports_web_apps": { "type": "boolean" },
+                "supports_long_context": { "type": "boolean" }
+            }
         },
         "RouterPolicy": {
             "type": "string",
@@ -776,9 +795,10 @@ fn schemas() -> Value {
                 "owned_by": { "type": "string" },
                 "aliases": { "type": "array", "items": { "type": "string" } },
                 "local": { "type": "boolean" },
-                "context_window": { "type": ["integer", "null"] }
+                "context_window": { "type": ["integer", "null"] },
+                "capabilities": { "$ref": "#/components/schemas/ModelCapabilities" }
             },
-            "required": ["id", "object", "owned_by", "aliases", "local"]
+            "required": ["id", "object", "owned_by", "aliases", "local", "capabilities"]
         },
         "ProviderHealth": {
             "type": "object",

@@ -64,7 +64,7 @@ curl -s http://127.0.0.1:8080/v1/router/multimodel \
 ```
 
 The response includes `model`, `provider`, `difficulty`, `ambiguity`, `domain`, confidence fields, policy, reason, and whether fallback was used.
-It also includes estimated input tokens, requested output tokens, and per-candidate context eligibility so oversized prompts do not route to models that cannot fit them.
+It also includes estimated input tokens, requested output tokens, per-candidate context eligibility, and per-candidate capability eligibility so oversized or modality-specific prompts do not route to models that cannot fit or satisfy them.
 When `default_model` is provided with `allowed_models` or `allowed_providers`, the default must satisfy those filters. The router will not silently return an out-of-filter fallback.
 
 Legacy Morph clients can call `/v1/router/raw` for a difficulty-only response:
@@ -196,7 +196,27 @@ cargo run -- --config examples/router.yaml optimize examples/eval.jsonl --write-
 
 ## Configuration
 
-Configuration is YAML-driven. Providers define OpenAI-compatible upstreams. Models define capability, cost, domain strengths, aliases, context windows, and whether they are local.
+Configuration is YAML-driven. Providers define OpenAI-compatible upstreams. Models define capability, cost, domain strengths, aliases, context windows, capability tags, and whether they are local.
+
+Model capability tags let the router reason about modality and feature requirements without collapsing everything into one capability score:
+
+```yaml
+models:
+  - id: gemma4:12b-mlx
+    provider: ollama
+    capability: 0.62
+    domains: [general, summary, coding]
+    context_window: 128000
+    capabilities:
+      supports_vision: true
+      supports_tools: true
+      supports_json: true
+      supports_code: true
+      supports_web_apps: true
+      supports_long_context: true
+```
+
+`/v1/router/multimodel` accepts `required_capabilities` such as `vision`, `audio`, `tools`, `json`, `code`, `web_apps`, and `long_context`. Automatic chat and Responses routing infer `vision`, `tools`, and `json` from OpenAI request payloads; automatic audio speech/transcription/translation routes require `audio`. Candidate diagnostics include `capability_eligible` and `missing_capabilities`.
 
 Startup validation rejects ambiguous configs: provider names, model IDs, and aliases must be unique; provider URLs and paths must be valid HTTP-style values; timeouts and concurrency limits must be positive. This prevents silent routing drift when many local and hosted providers are configured together.
 

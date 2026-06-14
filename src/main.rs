@@ -220,6 +220,7 @@ async fn main() -> Result<()> {
                     input,
                     allowed_models,
                     allowed_providers,
+                    required_capabilities: Vec::new(),
                     policy: policy.map(Into::into).unwrap_or(config.policy),
                     default_model: None,
                     max_output_tokens: None,

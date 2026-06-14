@@ -6,6 +6,7 @@ use crate::{
     types::{
         Classifications, DifficultyLabel, DomainLabel, LatencySensitivityLabel, ModelCapability,
         ModelConfig, MultimodelRequest, MultimodelResponse, ReasoningDepthLabel, RouteCandidate,
+        RouteCandidateRejection, RouteDecisionTrace, RoutePolicyWeights, RouteScoreComponents,
         RouterPolicy,
     },
 };
@@ -125,6 +126,15 @@ where
         };
 
         if !candidate_selectable(best) {
+            let decision_trace = decision_trace(
+                classifications.clone(),
+                request.policy,
+                &self.config,
+                token_budget,
+                &request.required_capabilities,
+                &scored,
+                None,
+            );
             return match allowed_default.filter(|model| {
                 context_eligible(
                     model,
@@ -139,18 +149,29 @@ where
                     "no eligible candidate matched required capabilities/context; using allowed default",
                     true,
                     token_budget,
-                ),
+                )
+                .with_decision_trace(decision_trace),
                 None => self.response_for_unknown(
                     classifications,
                     request.policy,
                     "no eligible candidate matched required capabilities/context",
                     true,
                     token_budget,
-                ),
+                )
+                .with_decision_trace(decision_trace),
             };
         }
 
         let best = best;
+        let decision_trace = decision_trace(
+            classifications.clone(),
+            request.policy,
+            &self.config,
+            token_budget,
+            &request.required_capabilities,
+            &scored,
+            Some(best),
+        );
         let reason = format!(
             "selected by {:?} policy from {} candidate(s)",
             request.policy,
@@ -165,6 +186,7 @@ where
             token_budget,
         )
         .with_candidates(scored)
+        .with_decision_trace(decision_trace)
     }
 
     fn candidates<'a>(
@@ -294,6 +316,7 @@ where
             fallback,
             estimated_input_tokens: token_budget.estimated_input_tokens,
             requested_output_tokens: token_budget.requested_output_tokens,
+            decision_trace: None,
             candidates: Vec::new(),
         }
     }
@@ -386,6 +409,7 @@ where
             fallback,
             estimated_input_tokens: token_budget.estimated_input_tokens,
             requested_output_tokens: token_budget.requested_output_tokens,
+            decision_trace: None,
             candidates: Vec::new(),
         }
     }
@@ -408,6 +432,11 @@ fn model_allowed_by_request(model: &ModelConfig, request: &MultimodelRequest) ->
 impl MultimodelResponse {
     fn with_candidates(mut self, candidates: Vec<RouteCandidate>) -> Self {
         self.candidates = candidates;
+        self
+    }
+
+    fn with_decision_trace(mut self, decision_trace: RouteDecisionTrace) -> Self {
+        self.decision_trace = Some(decision_trace);
         self
     }
 }
@@ -433,8 +462,10 @@ fn scored_candidates(
             let context_eligible = context_eligible(model, context_required);
             let missing_capabilities = missing_capabilities(model, required_capabilities);
             let capability_eligible = missing_capabilities.is_empty();
-            let mut score = score_model(model, classifications, policy, config);
             let weights = config.scoring.weights_for(policy);
+            let mut score_components =
+                score_model_components(model, classifications, policy, config);
+            let mut score = score_components.final_score;
             let routing_priority = routing_priority(model, config);
             let latency_penalty = provider.map_or(0.0, |provider| {
                 latency_penalty(provider, config, provider_health)
@@ -444,15 +475,22 @@ fn scored_candidates(
             });
             let latency_weight = weights.latency
                 * latency_sensitivity_multiplier(&classifications.latency_sensitivity.label);
-            score += routing_priority * config.scoring.priority_weight;
-            score -= latency_penalty * latency_weight;
-            score -= health_penalty * weights.health;
+            score_components.routing_priority_boost =
+                routing_priority * config.scoring.priority_weight;
+            score_components.latency_penalty = latency_penalty * latency_weight;
+            score_components.health_penalty = health_penalty * weights.health;
+            score += score_components.routing_priority_boost;
+            score -= score_components.latency_penalty;
+            score -= score_components.health_penalty;
             if !capability_eligible {
+                score_components.capability_exclusion_penalty = 10.0;
                 score -= 10.0;
             }
             if !context_eligible {
+                score_components.context_exclusion_penalty = 10.0;
                 score -= 10.0;
             }
+            score_components.final_score = score;
             RouteCandidate {
                 model: model.id.clone(),
                 provider: model.provider.clone(),
@@ -468,6 +506,7 @@ fn scored_candidates(
                 context_window: model.context_window,
                 context_required,
                 context_eligible,
+                score_components,
             }
         })
         .collect::<Vec<_>>();
@@ -482,6 +521,74 @@ fn scored_candidates(
 
 fn candidate_selectable(candidate: &RouteCandidate) -> bool {
     candidate.capability_eligible && candidate.context_eligible
+}
+
+fn decision_trace(
+    classifications: Classifications,
+    policy: RouterPolicy,
+    config: &RouterConfig,
+    token_budget: TokenBudget,
+    required_capabilities: &[ModelCapability],
+    candidates: &[RouteCandidate],
+    selected: Option<&RouteCandidate>,
+) -> RouteDecisionTrace {
+    RouteDecisionTrace {
+        classifier: classifications,
+        policy,
+        policy_weights: config.scoring.weights_for(&policy).into(),
+        required_capabilities: required_capabilities.to_vec(),
+        context_required: token_budget
+            .estimated_input_tokens
+            .saturating_add(token_budget.requested_output_tokens),
+        selected_model: selected.map(|candidate| candidate.model.clone()),
+        selected_provider: selected.map(|candidate| candidate.provider.clone()),
+        selected_score: selected.map(|candidate| candidate.score),
+        rejected_candidates: candidates.iter().filter_map(candidate_rejection).collect(),
+    }
+}
+
+fn candidate_rejection(candidate: &RouteCandidate) -> Option<RouteCandidateRejection> {
+    let mut reasons = Vec::new();
+    if !candidate.capability_eligible {
+        reasons.push(format!(
+            "missing capabilities: {}",
+            candidate
+                .missing_capabilities
+                .iter()
+                .map(|capability| format!("{capability:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !candidate.context_eligible {
+        reasons.push(format!(
+            "context required {} exceeds window {}",
+            candidate.context_required,
+            candidate
+                .context_window
+                .map(|window| window.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ));
+    }
+    (!reasons.is_empty()).then(|| RouteCandidateRejection {
+        model: candidate.model.clone(),
+        provider: candidate.provider.clone(),
+        reasons,
+    })
+}
+
+impl From<crate::config::PolicyWeights> for RoutePolicyWeights {
+    fn from(weights: crate::config::PolicyWeights) -> Self {
+        Self {
+            capability_fit: weights.capability_fit,
+            domain_bonus: weights.domain_bonus,
+            cost: weights.cost,
+            overkill: weights.overkill,
+            raw_capability: weights.raw_capability,
+            latency: weights.latency,
+            health: weights.health,
+        }
+    }
 }
 
 fn context_eligible(model: &ModelConfig, context_required: u32) -> bool {
@@ -513,6 +620,15 @@ pub fn score_model(
     policy: &RouterPolicy,
     config: &RouterConfig,
 ) -> f32 {
+    score_model_components(model, classifications, policy, config).final_score
+}
+
+fn score_model_components(
+    model: &ModelConfig,
+    classifications: &Classifications,
+    policy: &RouterPolicy,
+    config: &RouterConfig,
+) -> RouteScoreComponents {
     let required = required_capability_for_classifications(classifications);
     let capability_fit = 1.0 - (required - model.capability).max(0.0);
     let overkill_penalty = (model.capability - required).max(0.0) * 0.12;
@@ -520,11 +636,30 @@ pub fn score_model(
     let domain_bonus = domain_bonus(model, classifications.domain.label.clone());
     let weights = config.scoring.weights_for(policy);
 
-    capability_fit * weights.capability_fit
-        + domain_bonus * weights.domain_bonus
-        + model.capability * weights.raw_capability
-        - cost * weights.cost
-        - overkill_penalty * weights.overkill
+    let capability_fit_score = capability_fit * weights.capability_fit;
+    let domain_bonus_score = domain_bonus * weights.domain_bonus;
+    let raw_capability_score = model.capability * weights.raw_capability;
+    let cost_penalty = cost * weights.cost;
+    let overkill_penalty = overkill_penalty * weights.overkill;
+    let final_score = capability_fit_score + domain_bonus_score + raw_capability_score
+        - cost_penalty
+        - overkill_penalty;
+
+    RouteScoreComponents {
+        capability_fit,
+        capability_fit_score,
+        domain_bonus,
+        domain_bonus_score,
+        raw_capability_score,
+        cost_penalty,
+        overkill_penalty,
+        routing_priority_boost: 0.0,
+        latency_penalty: 0.0,
+        health_penalty: 0.0,
+        capability_exclusion_penalty: 0.0,
+        context_exclusion_penalty: 0.0,
+        final_score,
+    }
 }
 
 pub fn required_capability(difficulty: &DifficultyLabel) -> f32 {
@@ -1184,6 +1319,19 @@ mod tests {
                 .iter()
                 .any(|candidate| candidate.model == "small-context" && !candidate.context_eligible)
         );
+        let trace = route.decision_trace.as_ref().expect("decision trace");
+        assert_eq!(trace.selected_model.as_deref(), Some("large-context"));
+        assert_eq!(trace.context_required, route.estimated_input_tokens + 512);
+        assert!(trace.rejected_candidates.iter().any(|rejection| {
+            rejection.model == "small-context"
+                && rejection
+                    .reasons
+                    .iter()
+                    .any(|reason| reason.contains("context required"))
+        }));
+        for candidate in &route.candidates {
+            assert!((candidate.score_components.final_score - candidate.score).abs() < 0.0001);
+        }
     }
 
     #[tokio::test]

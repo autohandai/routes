@@ -679,6 +679,7 @@ fn schemas() -> Value {
                 "fallback": { "type": "boolean" },
                 "estimated_input_tokens": { "type": "integer" },
                 "requested_output_tokens": { "type": "integer" },
+                "decision_trace": { "$ref": "#/components/schemas/RouteDecisionTrace" },
                 "candidates": { "type": "array", "items": { "$ref": "#/components/schemas/RouteCandidate" } }
             },
             "required": ["model", "provider", "difficulty", "confidence", "policy", "reason", "fallback", "estimated_input_tokens", "requested_output_tokens"]
@@ -699,9 +700,66 @@ fn schemas() -> Value {
                 "missing_capabilities": { "type": "array", "items": { "$ref": "#/components/schemas/ModelCapability" } },
                 "context_window": { "type": ["integer", "null"] },
                 "context_required": { "type": "integer" },
-                "context_eligible": { "type": "boolean" }
+                "context_eligible": { "type": "boolean" },
+                "score_components": { "$ref": "#/components/schemas/RouteScoreComponents" }
             },
-            "required": ["model", "provider", "score", "capability", "estimated_cost", "domain_match", "routing_priority", "latency_penalty", "health_penalty", "capability_eligible", "missing_capabilities", "context_required", "context_eligible"]
+            "required": ["model", "provider", "score", "capability", "estimated_cost", "domain_match", "routing_priority", "latency_penalty", "health_penalty", "capability_eligible", "missing_capabilities", "context_required", "context_eligible", "score_components"]
+        },
+        "RouteDecisionTrace": {
+            "type": "object",
+            "properties": {
+                "classifier": { "$ref": "#/components/schemas/Classifications" },
+                "policy": { "$ref": "#/components/schemas/RouterPolicy" },
+                "policy_weights": { "$ref": "#/components/schemas/RoutePolicyWeights" },
+                "required_capabilities": { "type": "array", "items": { "$ref": "#/components/schemas/ModelCapability" } },
+                "context_required": { "type": "integer" },
+                "selected_model": { "type": ["string", "null"] },
+                "selected_provider": { "type": ["string", "null"] },
+                "selected_score": { "type": ["number", "null"] },
+                "rejected_candidates": { "type": "array", "items": { "$ref": "#/components/schemas/RouteCandidateRejection" } }
+            },
+            "required": ["classifier", "policy", "policy_weights", "required_capabilities", "context_required", "rejected_candidates"]
+        },
+        "RoutePolicyWeights": {
+            "type": "object",
+            "properties": {
+                "capability_fit": { "type": "number" },
+                "domain_bonus": { "type": "number" },
+                "cost": { "type": "number" },
+                "overkill": { "type": "number" },
+                "raw_capability": { "type": "number" },
+                "latency": { "type": "number" },
+                "health": { "type": "number" }
+            },
+            "required": ["capability_fit", "domain_bonus", "cost", "overkill", "raw_capability", "latency", "health"]
+        },
+        "RouteCandidateRejection": {
+            "type": "object",
+            "properties": {
+                "model": { "type": "string" },
+                "provider": { "type": "string" },
+                "reasons": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["model", "provider", "reasons"]
+        },
+        "RouteScoreComponents": {
+            "type": "object",
+            "properties": {
+                "capability_fit": { "type": "number" },
+                "capability_fit_score": { "type": "number" },
+                "domain_bonus": { "type": "number" },
+                "domain_bonus_score": { "type": "number" },
+                "raw_capability_score": { "type": "number" },
+                "cost_penalty": { "type": "number" },
+                "overkill_penalty": { "type": "number" },
+                "routing_priority_boost": { "type": "number" },
+                "latency_penalty": { "type": "number" },
+                "health_penalty": { "type": "number" },
+                "capability_exclusion_penalty": { "type": "number" },
+                "context_exclusion_penalty": { "type": "number" },
+                "final_score": { "type": "number" }
+            },
+            "required": ["capability_fit", "capability_fit_score", "domain_bonus", "domain_bonus_score", "raw_capability_score", "cost_penalty", "overkill_penalty", "routing_priority_boost", "latency_penalty", "health_penalty", "capability_exclusion_penalty", "context_exclusion_penalty", "final_score"]
         },
         "ModelCapability": {
             "type": "string",

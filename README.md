@@ -66,6 +66,7 @@ curl -s http://127.0.0.1:8080/v1/router/multimodel \
 
 The response includes `model`, `provider`, `difficulty`, `ambiguity`, `domain`, `modality`, `safety`, `cacheability`, `latency_sensitivity`, `reasoning_depth`, confidence fields, policy, reason, and whether fallback was used.
 It also includes estimated input tokens, requested output tokens, per-candidate context eligibility, and per-candidate capability eligibility so oversized or modality-specific prompts do not route to models that cannot fit or satisfy them.
+`decision_trace` includes the classifier labels, selected policy weights, required capabilities, selected score, rejected candidates, and per-candidate score components for debugging routing decisions.
 Reasoning depth raises or lowers the capability target, and latency sensitivity changes how strongly observed/static provider latency affects candidate scores.
 Policy presets are config-driven: `balanced` is the default tradeoff, `floor` selects the cheapest acceptable candidate, `nitro` emphasizes fast healthy providers, and `quality` favors the strongest candidate. Legacy policy names `cost_efficient`, `capability_heavy`, and `domain_skills` remain supported.
 When `default_model` is provided with `allowed_models` or `allowed_providers`, the default must satisfy those filters. The router will not silently return an out-of-filter fallback.

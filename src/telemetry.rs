@@ -47,9 +47,20 @@ impl DecisionLogger {
             "ambiguity_confidence": response.ambiguity_confidence,
             "domain": response.domain,
             "domain_confidence": response.domain_confidence,
+            "modality": response.modality,
+            "modality_confidence": response.modality_confidence,
+            "safety": response.safety,
+            "safety_confidence": response.safety_confidence,
+            "cacheability": response.cacheability,
+            "cacheability_confidence": response.cacheability_confidence,
+            "latency_sensitivity": response.latency_sensitivity,
+            "latency_sensitivity_confidence": response.latency_sensitivity_confidence,
+            "reasoning_depth": response.reasoning_depth,
+            "reasoning_depth_confidence": response.reasoning_depth_confidence,
             "policy": response.policy,
             "fallback": response.fallback,
             "reason": response.reason,
+            "decision_trace": response.decision_trace,
             "candidates": response.candidates,
         });
         if self.include_inputs {
@@ -128,6 +139,7 @@ mod tests {
                     fallback: false,
                     estimated_input_tokens: 3,
                     requested_output_tokens: 5,
+                    decision_trace: None,
                     candidates: vec![],
                 },
             )

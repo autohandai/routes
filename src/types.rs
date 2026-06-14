@@ -84,7 +84,7 @@ pub enum ModelCapability {
     LongContext,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RouterPolicy {
     Balanced,
@@ -456,6 +456,8 @@ pub struct MultimodelResponse {
     pub fallback: bool,
     pub estimated_input_tokens: u32,
     pub requested_output_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_trace: Option<RouteDecisionTrace>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub candidates: Vec<RouteCandidate>,
 }
@@ -476,6 +478,55 @@ pub struct RouteCandidate {
     pub context_window: Option<u32>,
     pub context_required: u32,
     pub context_eligible: bool,
+    pub score_components: RouteScoreComponents,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteDecisionTrace {
+    pub classifier: Classifications,
+    pub policy: RouterPolicy,
+    pub policy_weights: RoutePolicyWeights,
+    pub required_capabilities: Vec<ModelCapability>,
+    pub context_required: u32,
+    pub selected_model: Option<String>,
+    pub selected_provider: Option<String>,
+    pub selected_score: Option<f32>,
+    pub rejected_candidates: Vec<RouteCandidateRejection>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RoutePolicyWeights {
+    pub capability_fit: f32,
+    pub domain_bonus: f32,
+    pub cost: f32,
+    pub overkill: f32,
+    pub raw_capability: f32,
+    pub latency: f32,
+    pub health: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteCandidateRejection {
+    pub model: String,
+    pub provider: String,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RouteScoreComponents {
+    pub capability_fit: f32,
+    pub capability_fit_score: f32,
+    pub domain_bonus: f32,
+    pub domain_bonus_score: f32,
+    pub raw_capability_score: f32,
+    pub cost_penalty: f32,
+    pub overkill_penalty: f32,
+    pub routing_priority_boost: f32,
+    pub latency_penalty: f32,
+    pub health_penalty: f32,
+    pub capability_exclusion_penalty: f32,
+    pub context_exclusion_penalty: f32,
+    pub final_score: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

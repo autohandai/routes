@@ -4875,6 +4875,7 @@ mod tests {
                 output_path: Some(output_path.to_string_lossy().to_string()),
                 include_bodies: false,
                 max_body_chars: 256,
+                judge: Default::default(),
             },
             safety: Default::default(),
             sticky_routing: Default::default(),

@@ -19,6 +19,15 @@ telemetry:
   decision_log_path:
   include_inputs: false
 
+shadow_eval:
+  enabled: false
+  sample_rate: 0.01
+  output_path: router.shadow-eval.jsonl
+  include_bodies: false
+  max_body_chars: 4096
+  judge:
+    enabled: true
+
 runtime:
   graceful_shutdown_timeout_ms: 30000
 

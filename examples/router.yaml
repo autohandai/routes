@@ -50,6 +50,9 @@ shadow_eval:
   output_path: router.shadow-eval.jsonl
   include_bodies: false
   max_body_chars: 4096
+  judge:
+    # Deterministic local judge for status/content/latency winner labels in JSONL records.
+    enabled: true
 
 safety:
   # Opt-in automatic safety routing for auto/router-* chat and Responses requests.

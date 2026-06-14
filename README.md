@@ -135,9 +135,11 @@ shadow_eval:
   sample_rate: 0.01
   output_path: router.shadow-eval.jsonl
   include_bodies: false
+  judge:
+    enabled: true
 ```
 
-For sampled automatic non-stream chat and Responses requests, the router returns the selected model response normally, then sends the same prompt to the next scored candidate in the background. The JSONL artifact records selected/shadow model IDs, providers, HTTP status, latency, body sizes, and optional truncated bodies for later judge/eval workflows. Bodies are redacted by default.
+For sampled automatic non-stream chat and Responses requests, the router returns the selected model response normally, then sends the same prompt to the next scored candidate in the background. The JSONL artifact records selected/shadow model IDs, providers, HTTP status, latency, body sizes, optional truncated bodies, and an optional deterministic local `winner` judgement with status/content/latency scores. Bodies are redacted by default.
 
 To enforce safety routing on automatic chat and Responses requests:
 

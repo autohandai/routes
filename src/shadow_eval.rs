@@ -45,6 +45,22 @@ pub struct ShadowEvalRecord {
     pub shadow_body: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shadow_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub winner: Option<ShadowEvalWinner>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadow_score: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ShadowEvalWinner {
+    Selected,
+    Shadow,
+    Tie,
 }
 
 pub struct ShadowEvalRecordInput<'a> {
@@ -97,6 +113,7 @@ impl ShadowEvalLogger {
         };
         let selected_body_text = self.body_for_log(input.selected_body);
         let shadow_body_text = input.shadow_body.and_then(|body| self.body_for_log(body));
+        let judgement = self.config.judge.enabled.then(|| judge_shadow_eval(&input));
         let record = ShadowEvalRecord {
             timestamp_ms: unix_timestamp_ms(),
             source: input.source.to_string(),
@@ -115,6 +132,10 @@ impl ShadowEvalLogger {
             selected_body: selected_body_text,
             shadow_body: shadow_body_text,
             shadow_error: input.shadow_error,
+            winner: judgement.as_ref().map(|judgement| judgement.winner),
+            judge_reason: judgement.as_ref().map(|judgement| judgement.reason.clone()),
+            selected_score: judgement.as_ref().map(|judgement| judgement.selected_score),
+            shadow_score: judgement.as_ref().map(|judgement| judgement.shadow_score),
         };
         let value = serde_json::to_value(record).expect("shadow eval record serializes");
         if let Err(error) = append_jsonl(path, value).await {
@@ -129,6 +150,107 @@ impl ShadowEvalLogger {
         let raw = String::from_utf8_lossy(body);
         Some(raw.chars().take(self.config.max_body_chars).collect())
     }
+}
+
+struct ShadowEvalJudgement {
+    winner: ShadowEvalWinner,
+    reason: String,
+    selected_score: f32,
+    shadow_score: f32,
+}
+
+fn judge_shadow_eval(input: &ShadowEvalRecordInput<'_>) -> ShadowEvalJudgement {
+    let selected_score = response_score(
+        Some(input.selected_status),
+        Some(input.selected_body),
+        Some(input.selected_latency_ms),
+    );
+    let shadow_score = response_score(
+        input.shadow_status,
+        input.shadow_body,
+        input.shadow_latency_ms,
+    );
+    let delta = selected_score - shadow_score;
+    let (winner, reason) = if input.shadow_error.is_some() {
+        (
+            ShadowEvalWinner::Selected,
+            "selected: shadow request failed",
+        )
+    } else if is_success(input.selected_status) && !input.shadow_status.is_some_and(is_success) {
+        (
+            ShadowEvalWinner::Selected,
+            "selected: only selected response succeeded",
+        )
+    } else if input.shadow_status.is_some_and(is_success) && !is_success(input.selected_status) {
+        (
+            ShadowEvalWinner::Shadow,
+            "shadow: only shadow response succeeded",
+        )
+    } else if delta.abs() <= 0.05 {
+        (ShadowEvalWinner::Tie, "tie: heuristic scores are close")
+    } else if delta > 0.0 {
+        (
+            ShadowEvalWinner::Selected,
+            "selected: higher heuristic status/content/latency score",
+        )
+    } else {
+        (
+            ShadowEvalWinner::Shadow,
+            "shadow: higher heuristic status/content/latency score",
+        )
+    };
+
+    ShadowEvalJudgement {
+        winner,
+        reason: reason.to_string(),
+        selected_score,
+        shadow_score,
+    }
+}
+
+fn response_score(status: Option<u16>, body: Option<&[u8]>, latency_ms: Option<u32>) -> f32 {
+    let status_score = match status {
+        Some(status) if is_success(status) => 1.0,
+        Some(status) if status < 500 => 0.35,
+        Some(_) => 0.15,
+        None => 0.0,
+    };
+    let content_score = body.map(content_quality_score).unwrap_or(0.0);
+    let latency_score = latency_ms.map(latency_quality_score).unwrap_or(0.0);
+    (status_score * 0.70) + (content_score * 0.22) + (latency_score * 0.08)
+}
+
+fn is_success(status: u16) -> bool {
+    (200..300).contains(&status)
+}
+
+fn content_quality_score(body: &[u8]) -> f32 {
+    let chars = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| extracted_text_chars(&value))
+        .unwrap_or_else(|| String::from_utf8_lossy(body).trim().chars().count());
+    ((chars as f32) / 200.0).clamp(0.0, 1.0)
+}
+
+fn extracted_text_chars(value: &Value) -> Option<usize> {
+    let count = match value {
+        Value::String(text) => text.trim().chars().count(),
+        Value::Array(items) => items.iter().filter_map(extracted_text_chars).sum(),
+        Value::Object(object) => {
+            for key in ["content", "text", "output_text", "message"] {
+                if let Some(count) = object.get(key).and_then(extracted_text_chars) {
+                    return Some(count);
+                }
+            }
+            object.values().filter_map(extracted_text_chars).sum()
+        }
+        _ => 0,
+    };
+    (count > 0).then_some(count)
+}
+
+fn latency_quality_score(latency_ms: u32) -> f32 {
+    (1_000.0 / (latency_ms as f32 + 1_000.0)).clamp(0.0, 1.0)
 }
 
 fn body_chars(body: &[u8]) -> usize {
@@ -182,6 +304,7 @@ mod tests {
             output_path: Some(path.to_string_lossy().to_string()),
             include_bodies: false,
             max_body_chars: 128,
+            judge: Default::default(),
         });
 
         logger
@@ -206,8 +329,54 @@ mod tests {
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("\"selected_model\":\"selected\""));
         assert!(raw.contains("\"shadow_model\":\"shadow\""));
+        assert!(raw.contains("\"winner\":\"tie\""));
+        assert!(raw.contains("\"judge_reason\":\"tie: heuristic scores are close\""));
         assert!(!raw.contains("selected secret"));
         assert!(!raw.contains("shadow secret"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn shadow_eval_judge_prefers_successful_shadow_response() {
+        let path = std::env::temp_dir().join(format!(
+            "autohand-router-shadow-judge-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let logger = ShadowEvalLogger::new(&ShadowEvalConfig {
+            enabled: true,
+            sample_rate: 1.0,
+            output_path: Some(path.to_string_lossy().to_string()),
+            include_bodies: true,
+            max_body_chars: 512,
+            judge: Default::default(),
+        });
+
+        logger
+            .record(ShadowEvalRecordInput {
+                source: "chat.auto",
+                endpoint: ShadowEvalEndpoint::Chat,
+                input: "compare answers",
+                selected_model: "selected",
+                selected_provider: "primary",
+                shadow_model: "shadow",
+                shadow_provider: "secondary",
+                selected_status: 503,
+                shadow_status: Some(200),
+                selected_latency_ms: 8,
+                shadow_latency_ms: Some(20),
+                selected_body: br#"{"error":"busy"}"#,
+                shadow_body: Some(
+                    br#"{"choices":[{"message":{"content":"complete useful answer"}}]}"#,
+                ),
+                shadow_error: None,
+            })
+            .await;
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"winner\":\"shadow\""));
+        assert!(raw.contains("\"judge_reason\":\"shadow: only shadow response succeeded\""));
+        assert!(raw.contains("\"selected_score\""));
+        assert!(raw.contains("\"shadow_score\""));
         let _ = std::fs::remove_file(path);
     }
 }

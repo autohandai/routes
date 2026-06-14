@@ -148,6 +148,14 @@ pub struct ShadowEvalConfig {
     pub include_bodies: bool,
     #[serde(default = "default_shadow_eval_max_body_chars")]
     pub max_body_chars: usize,
+    #[serde(default)]
+    pub judge: ShadowEvalJudgeConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShadowEvalJudgeConfig {
+    #[serde(default = "default_shadow_eval_judge_enabled")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -432,6 +440,15 @@ impl Default for ShadowEvalConfig {
             output_path: None,
             include_bodies: false,
             max_body_chars: default_shadow_eval_max_body_chars(),
+            judge: ShadowEvalJudgeConfig::default(),
+        }
+    }
+}
+
+impl Default for ShadowEvalJudgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_shadow_eval_judge_enabled(),
         }
     }
 }
@@ -522,6 +539,10 @@ fn default_shadow_eval_sample_rate() -> f32 {
 
 fn default_shadow_eval_max_body_chars() -> usize {
     4_096
+}
+
+fn default_shadow_eval_judge_enabled() -> bool {
+    true
 }
 
 fn default_safety_unsafe_action() -> SafetyRoutingAction {
@@ -1456,6 +1477,7 @@ mod tests {
             output_path: None,
             include_bodies: false,
             max_body_chars: 128,
+            judge: Default::default(),
         };
 
         let error = config

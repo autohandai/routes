@@ -939,6 +939,8 @@ fn schemas() -> Value {
                 "safety_rejections": { "type": "integer" },
                 "safety_redactions": { "type": "integer" },
                 "safety_force_routes": { "type": "integer" },
+                "sticky_routing_hits": { "type": "integer" },
+                "sticky_routing_writes": { "type": "integer" },
                 "selected_models": { "type": "integer" },
                 "prompt_tokens": { "type": "integer" },
                 "completion_tokens": { "type": "integer" },

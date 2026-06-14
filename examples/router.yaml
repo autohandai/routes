@@ -60,6 +60,12 @@ safety:
   force_model:
   redaction_replacement: "[redacted]"
 
+sticky_routing:
+  # Opt-in process-local affinity for auto/router-* chat and Responses requests.
+  enabled: false
+  ttl_seconds: 1800
+  prefer_model: true
+
 classifier:
   # heuristic is local deterministic fallback. Set backend to llm_judge or route_llm
   # to call a configured small classifier model such as Qwen3.527B.

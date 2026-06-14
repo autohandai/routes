@@ -70,6 +70,44 @@ pub struct AppState {
     pub telemetry: DecisionLogger,
     pub semantic_cache: SemanticCache,
     pub shadow_eval: ShadowEvalLogger,
+    pub sticky_routing: StickyRoutingStore,
+}
+
+#[derive(Clone, Default)]
+pub struct StickyRoutingStore {
+    inner: Arc<Mutex<HashMap<String, StickyRoute>>>,
+}
+
+#[derive(Clone)]
+struct StickyRoute {
+    model: String,
+    provider: String,
+    expires_at: Instant,
+}
+
+impl StickyRoutingStore {
+    fn get(&self, key: &str) -> Option<StickyRoute> {
+        let mut routes = self.inner.lock().ok()?;
+        let route = routes.get(key).cloned()?;
+        if route.expires_at <= Instant::now() {
+            routes.remove(key);
+            return None;
+        }
+        Some(route)
+    }
+
+    fn record(&self, key: String, model: &ModelConfig, ttl: Duration) {
+        if let Ok(mut routes) = self.inner.lock() {
+            routes.insert(
+                key,
+                StickyRoute {
+                    model: model.id.clone(),
+                    provider: model.provider.clone(),
+                    expires_at: Instant::now() + ttl,
+                },
+            );
+        }
+    }
 }
 
 #[derive(Default)]
@@ -97,6 +135,8 @@ pub struct RouterMetrics {
     safety_rejections: AtomicU64,
     safety_redactions: AtomicU64,
     safety_force_routes: AtomicU64,
+    sticky_routing_hits: AtomicU64,
+    sticky_routing_writes: AtomicU64,
     selected_models: AtomicU64,
     prompt_tokens: AtomicU64,
     completion_tokens: AtomicU64,
@@ -131,6 +171,8 @@ struct MetricsSnapshot {
     safety_rejections: u64,
     safety_redactions: u64,
     safety_force_routes: u64,
+    sticky_routing_hits: u64,
+    sticky_routing_writes: u64,
     selected_models: u64,
     prompt_tokens: u64,
     completion_tokens: u64,
@@ -209,6 +251,8 @@ impl RouterMetrics {
             safety_rejections: self.safety_rejections.load(Ordering::Relaxed),
             safety_redactions: self.safety_redactions.load(Ordering::Relaxed),
             safety_force_routes: self.safety_force_routes.load(Ordering::Relaxed),
+            sticky_routing_hits: self.sticky_routing_hits.load(Ordering::Relaxed),
+            sticky_routing_writes: self.sticky_routing_writes.load(Ordering::Relaxed),
             selected_models: self.selected_models.load(Ordering::Relaxed),
             prompt_tokens: self.prompt_tokens.load(Ordering::Relaxed),
             completion_tokens: self.completion_tokens.load(Ordering::Relaxed),
@@ -779,6 +823,18 @@ fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     push_labeled_metric(
         &mut output,
         "autohand_router_events_total",
+        &[("event", "sticky_routing_hits")],
+        snapshot.sticky_routing_hits,
+    );
+    push_labeled_metric(
+        &mut output,
+        "autohand_router_events_total",
+        &[("event", "sticky_routing_writes")],
+        snapshot.sticky_routing_writes,
+    );
+    push_labeled_metric(
+        &mut output,
+        "autohand_router_events_total",
         &[("event", "selected_models")],
         snapshot.selected_models,
     );
@@ -1203,6 +1259,7 @@ async fn chat_completions(
     let requested_model = request.model.clone();
     let config = state.engine.config();
     let automatic = requested_model.starts_with("router-") || requested_model == "auto";
+    let sticky_key = automatic.then(|| chat_sticky_key(&request)).flatten();
     let (
         models,
         estimated_input_tokens,
@@ -1263,6 +1320,10 @@ async fn chat_completions(
             if let Some(model) = config.find_model(&candidate.model).cloned() {
                 models.push(model);
             }
+        }
+        apply_sticky_routing(&state, &config, sticky_key.as_deref(), &mut models);
+        if let Some(selected_model) = models.first() {
+            record_sticky_routing(&state, &config, sticky_key.clone(), selected_model);
         }
         let shadow_eval_dispatch = shadow_eval_request_for_chat(
             &state,
@@ -1327,6 +1388,7 @@ async fn responses(
     let requested_model = request.model.clone();
     let config = state.engine.config();
     let automatic = requested_model.starts_with("router-") || requested_model == "auto";
+    let sticky_key = automatic.then(|| responses_sticky_key(&request)).flatten();
     let (
         models,
         estimated_input_tokens,
@@ -1391,6 +1453,10 @@ async fn responses(
             if let Some(model) = config.find_model(&candidate.model).cloned() {
                 models.push(model);
             }
+        }
+        apply_sticky_routing(&state, &config, sticky_key.as_deref(), &mut models);
+        if let Some(selected_model) = models.first() {
+            record_sticky_routing(&state, &config, sticky_key.clone(), selected_model);
         }
         let shadow_eval_dispatch = shadow_eval_request_for_responses(
             &state,
@@ -1611,6 +1677,96 @@ fn safety_label_name(label: SafetyLabel) -> &'static str {
         SafetyLabel::Sensitive => "sensitive",
         SafetyLabel::Unsafe => "unsafe",
     }
+}
+
+fn chat_sticky_key(request: &OpenAiChatRequest) -> Option<String> {
+    sticky_key_from_extra(&request.extra)
+}
+
+fn responses_sticky_key(request: &OpenAiResponsesRequest) -> Option<String> {
+    sticky_key_from_extra(&request.extra)
+}
+
+fn sticky_key_from_extra(extra: &serde_json::Map<String, Value>) -> Option<String> {
+    string_field(extra.get("user"))
+        .or_else(|| {
+            extra
+                .get("metadata")
+                .and_then(Value::as_object)
+                .and_then(|metadata| {
+                    string_field(metadata.get("session_id"))
+                        .or_else(|| string_field(metadata.get("conversation_id")))
+                        .or_else(|| string_field(metadata.get("thread_id")))
+                })
+        })
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("v1:{value}"))
+}
+
+fn string_field(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn apply_sticky_routing(
+    state: &Arc<AppState>,
+    config: &RouterConfig,
+    sticky_key: Option<&str>,
+    models: &mut [ModelConfig],
+) {
+    if !config.sticky_routing.enabled || models.len() < 2 {
+        return;
+    }
+    let Some(key) = sticky_key else {
+        return;
+    };
+    let Some(route) = state.sticky_routing.get(key) else {
+        return;
+    };
+    let exact_idx = config.sticky_routing.prefer_model.then(|| {
+        models
+            .iter()
+            .position(|model| model.id == route.model && model.provider == route.provider)
+    });
+    let provider_idx = models
+        .iter()
+        .position(|model| model.provider == route.provider);
+    let Some(idx) = exact_idx.flatten().or(provider_idx) else {
+        return;
+    };
+    if idx > 0 {
+        models.swap(0, idx);
+    }
+    state
+        .metrics
+        .sticky_routing_hits
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_sticky_routing(
+    state: &Arc<AppState>,
+    config: &RouterConfig,
+    sticky_key: Option<String>,
+    selected_model: &ModelConfig,
+) {
+    if !config.sticky_routing.enabled {
+        return;
+    }
+    let Some(key) = sticky_key else {
+        return;
+    };
+    state.sticky_routing.record(
+        key,
+        selected_model,
+        Duration::from_secs(config.sticky_routing.ttl_seconds),
+    );
+    state
+        .metrics
+        .sticky_routing_writes
+        .fetch_add(1, Ordering::Relaxed);
 }
 
 async fn embeddings(
@@ -3353,7 +3509,7 @@ mod tests {
             AuthConfig, BudgetAccountingBackend, BudgetAccountingConfig, BudgetConfig,
             ClassifierConfig, RouterConfig, RuntimeConfig, SafetyRoutingAction,
             SafetyRoutingConfig, ScoringConfig, SemanticCacheConfig, ShadowEvalConfig,
-            TelemetryConfig,
+            StickyRoutingConfig, TelemetryConfig,
         },
         provider::ProviderClient,
         router::RoutingEngine,
@@ -3702,6 +3858,79 @@ mod tests {
         assert_eq!(metrics["shadow_eval_successes"], 1);
         assert_eq!(metrics["shadow_eval_errors"], 0);
         let _ = std::fs::remove_file(shadow_path);
+    }
+
+    #[tokio::test]
+    async fn automatic_chat_sticks_session_to_prior_selected_model() {
+        let (upstream_url, calls) = spawn_echo_chat_upstream().await;
+        let config = sticky_routing_config(upstream_url);
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let first = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&OpenAiChatRequest {
+                model: "auto".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String(
+                        "Design a production architecture with distributed systems and security tradeoffs"
+                            .to_string(),
+                    ),
+                }],
+                extra: serde_json::Map::from_iter([(
+                    "user".to_string(),
+                    Value::String("sticky-session".to_string()),
+                )]),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert!(first.status().is_success());
+        assert_eq!(
+            first
+                .headers()
+                .get("x-autohand-router-model")
+                .and_then(|value| value.to_str().ok()),
+            Some("strong-sticky")
+        );
+
+        let second = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&OpenAiChatRequest {
+                model: "auto".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String("Fix this typo".to_string()),
+                }],
+                extra: serde_json::Map::from_iter([(
+                    "user".to_string(),
+                    Value::String("sticky-session".to_string()),
+                )]),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert!(second.status().is_success());
+        assert_eq!(
+            second
+                .headers()
+                .get("x-autohand-router-model")
+                .and_then(|value| value.to_str().ok()),
+            Some("strong-sticky")
+        );
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 2);
+
+        let metrics = client
+            .get(format!("{router_url}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(metrics["sticky_routing_hits"], 1);
+        assert_eq!(metrics["sticky_routing_writes"], 2);
     }
 
     #[tokio::test]
@@ -4373,6 +4602,7 @@ mod tests {
             telemetry: DecisionLogger::new(&config.telemetry),
             semantic_cache: Default::default(),
             shadow_eval: crate::shadow_eval::ShadowEvalLogger::new(&config.shadow_eval),
+            sticky_routing: Default::default(),
         };
         tokio::spawn(async move {
             axum::serve(listener, app(state)).await.unwrap();
@@ -4462,6 +4692,7 @@ mod tests {
             cache: Default::default(),
             shadow_eval: Default::default(),
             safety: Default::default(),
+            sticky_routing: Default::default(),
         }
     }
 
@@ -4514,6 +4745,7 @@ mod tests {
             cache: Default::default(),
             shadow_eval: Default::default(),
             safety: Default::default(),
+            sticky_routing: Default::default(),
         }
     }
 
@@ -4571,6 +4803,7 @@ mod tests {
             },
             shadow_eval: Default::default(),
             safety: Default::default(),
+            sticky_routing: Default::default(),
         }
     }
 
@@ -4644,6 +4877,7 @@ mod tests {
                 max_body_chars: 256,
             },
             safety: Default::default(),
+            sticky_routing: Default::default(),
         }
     }
 
@@ -4718,6 +4952,79 @@ mod tests {
                 force_model,
                 redaction_replacement: "[redacted]".to_string(),
             },
+            sticky_routing: Default::default(),
+        }
+    }
+
+    fn sticky_routing_config(base_url: String) -> RouterConfig {
+        RouterConfig {
+            bind: "127.0.0.1:0".to_string(),
+            default_model: "cheap-sticky".to_string(),
+            policy: RouterPolicy::Balanced,
+            providers: vec![ProviderConfig {
+                name: "sticky-provider".to_string(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url,
+                api_key_env: None,
+                api_key: None,
+                chat_path: "/v1/chat/completions".to_string(),
+                responses_path: Some("/v1/responses".to_string()),
+                embeddings_path: Some("/v1/embeddings".to_string()),
+                images_path: Some("/v1/images/generations".to_string()),
+                speech_path: Some("/v1/audio/speech".to_string()),
+                audio_transcriptions_path: Some("/v1/audio/transcriptions".to_string()),
+                audio_translations_path: Some("/v1/audio/translations".to_string()),
+                health_path: None,
+                timeout_ms: 1_000,
+                retries: 0,
+                max_concurrency: None,
+                queue_timeout_ms: None,
+                extra_headers: Default::default(),
+            }],
+            models: vec![
+                ModelConfig {
+                    id: "cheap-sticky".to_string(),
+                    provider: "sticky-provider".to_string(),
+                    aliases: vec![],
+                    capability: 0.35,
+                    cost_per_million_input: 0.05,
+                    cost_per_million_output: 0.05,
+                    domains: vec![DomainLabel::General],
+                    context_window: Some(4096),
+                    capabilities: Default::default(),
+                    local: true,
+                },
+                ModelConfig {
+                    id: "strong-sticky".to_string(),
+                    provider: "sticky-provider".to_string(),
+                    aliases: vec![],
+                    capability: 0.95,
+                    cost_per_million_input: 2.0,
+                    cost_per_million_output: 2.0,
+                    domains: vec![
+                        DomainLabel::Coding,
+                        DomainLabel::Design,
+                        DomainLabel::General,
+                    ],
+                    context_window: Some(32768),
+                    capabilities: Default::default(),
+                    local: true,
+                },
+            ],
+            classifier: ClassifierConfig::default(),
+            auth: AuthConfig::default(),
+            scoring: ScoringConfig::default(),
+            budget: BudgetConfig::default(),
+            telemetry: TelemetryConfig::default(),
+            runtime: RuntimeConfig::default(),
+            cache: Default::default(),
+            shadow_eval: Default::default(),
+            safety: Default::default(),
+            sticky_routing: StickyRoutingConfig {
+                enabled: true,
+                ttl_seconds: 60,
+                prefer_model: true,
+            },
         }
     }
 
@@ -4776,6 +5083,7 @@ mod tests {
             cache: Default::default(),
             shadow_eval: Default::default(),
             safety: Default::default(),
+            sticky_routing: Default::default(),
         }
     }
 

@@ -199,6 +199,7 @@ async fn main() -> Result<()> {
                 telemetry: DecisionLogger::new(&config.telemetry),
                 semantic_cache: Default::default(),
                 shadow_eval: ShadowEvalLogger::new(&config.shadow_eval),
+                sticky_routing: Default::default(),
             };
             server::serve(state, &bind).await
         }

@@ -885,6 +885,7 @@ mod tests {
             cache: Default::default(),
             shadow_eval: Default::default(),
             safety: Default::default(),
+            sticky_routing: Default::default(),
         }
     }
 }

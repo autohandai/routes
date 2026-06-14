@@ -845,6 +845,7 @@ mod tests {
             cache: Default::default(),
             shadow_eval: Default::default(),
             safety: Default::default(),
+            sticky_routing: Default::default(),
         };
         RoutingEngine::new(config, HeuristicClassifier::default())
     }
@@ -909,6 +910,7 @@ mod tests {
             cache: Default::default(),
             shadow_eval: Default::default(),
             safety: Default::default(),
+            sticky_routing: Default::default(),
         };
         RoutingEngine::new(config, HeuristicClassifier::default())
     }
@@ -978,6 +980,7 @@ mod tests {
             cache: Default::default(),
             shadow_eval: Default::default(),
             safety: Default::default(),
+            sticky_routing: Default::default(),
         };
         RoutingEngine::new(config, HeuristicClassifier::default())
     }
@@ -1084,6 +1087,7 @@ mod tests {
             cache: Default::default(),
             shadow_eval: Default::default(),
             safety: Default::default(),
+            sticky_routing: Default::default(),
         };
         RoutingEngine::new(config, HeuristicClassifier::default())
     }
@@ -1178,6 +1182,7 @@ mod tests {
             cache: Default::default(),
             shadow_eval: Default::default(),
             safety: Default::default(),
+            sticky_routing: Default::default(),
         };
         RoutingEngine::new(config, HeuristicClassifier::default())
     }

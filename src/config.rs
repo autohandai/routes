@@ -36,6 +36,8 @@ pub struct RouterConfig {
     pub shadow_eval: ShadowEvalConfig,
     #[serde(default)]
     pub safety: SafetyRoutingConfig,
+    #[serde(default)]
+    pub sticky_routing: StickyRoutingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +162,16 @@ pub struct SafetyRoutingConfig {
     pub force_model: Option<String>,
     #[serde(default = "default_safety_redaction_replacement")]
     pub redaction_replacement: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StickyRoutingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_sticky_routing_ttl_seconds")]
+    pub ttl_seconds: u64,
+    #[serde(default)]
+    pub prefer_model: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -436,6 +448,16 @@ impl Default for SafetyRoutingConfig {
     }
 }
 
+impl Default for StickyRoutingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ttl_seconds: default_sticky_routing_ttl_seconds(),
+            prefer_model: true,
+        }
+    }
+}
+
 impl Default for ProviderHealthSamplerConfig {
     fn default() -> Self {
         Self {
@@ -508,6 +530,10 @@ fn default_safety_unsafe_action() -> SafetyRoutingAction {
 
 fn default_safety_redaction_replacement() -> String {
     "[redacted]".to_string()
+}
+
+fn default_sticky_routing_ttl_seconds() -> u64 {
+    1_800
 }
 
 fn default_budget_lock_timeout_ms() -> u64 {
@@ -606,6 +632,7 @@ impl RouterConfig {
         self.cache.validate()?;
         self.shadow_eval.validate()?;
         self.safety.validate(self)?;
+        self.sticky_routing.validate()?;
         Ok(())
     }
 
@@ -1024,6 +1051,16 @@ impl SafetyRoutingConfig {
     }
 }
 
+impl StickyRoutingConfig {
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.ttl_seconds > 0,
+            "sticky_routing.ttl_seconds must be greater than zero"
+        );
+        Ok(())
+    }
+}
+
 impl BudgetConfig {
     fn validate(&self) -> Result<()> {
         if let Some(value) = self.max_chat_requests {
@@ -1149,7 +1186,7 @@ mod tests {
         AuthConfig, BudgetConfig, ClassifierBackend, ClassifierConfig,
         ClassifierModelAdapterConfig, ProviderHealthSamplerConfig, RouterConfig, RuntimeConfig,
         SafetyRoutingAction, SafetyRoutingConfig, ScoringConfig, SemanticCacheConfig,
-        ShadowEvalConfig, TelemetryConfig,
+        ShadowEvalConfig, StickyRoutingConfig, TelemetryConfig,
     };
     use crate::types::{ModelConfig, ProviderConfig, ProviderKind, RouterPolicy};
 
@@ -1199,6 +1236,7 @@ mod tests {
             cache: Default::default(),
             shadow_eval: Default::default(),
             safety: Default::default(),
+            sticky_routing: Default::default(),
         }
     }
 
@@ -1424,6 +1462,21 @@ mod tests {
             .validate()
             .expect_err("enabled shadow eval requires output path");
         assert!(error.to_string().contains("shadow_eval.output_path"));
+    }
+
+    #[test]
+    fn rejects_zero_sticky_routing_ttl() {
+        let mut config = valid_config();
+        config.sticky_routing = StickyRoutingConfig {
+            enabled: true,
+            ttl_seconds: 0,
+            prefer_model: true,
+        };
+
+        let error = config
+            .validate()
+            .expect_err("zero sticky routing ttl rejected");
+        assert!(error.to_string().contains("sticky_routing.ttl_seconds"));
     }
 
     #[test]

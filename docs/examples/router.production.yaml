@@ -29,6 +29,11 @@ safety:
   force_model:
   redaction_replacement: "[redacted]"
 
+sticky_routing:
+  enabled: false
+  ttl_seconds: 1800
+  prefer_model: true
+
 classifier:
   backend: heuristic
   confidence_threshold: 0.62

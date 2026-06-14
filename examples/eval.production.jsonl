@@ -1,0 +1,24 @@
+{"input":"Fix this typo in a Rust doc comment","expected_tier":"cheap","expected_domain":"coding","policy":"cost_efficient"}
+{"input":"Rename this local variable in a small TypeScript function","expected_tier":"cheap","expected_domain":"coding","policy":"cost_efficient"}
+{"input":"Format this short JSON response and keep the same fields","expected_tier":"cheap","expected_domain":"general","policy":"cost_efficient"}
+{"input":"Summarize this changelog into five bullets","expected_tier":"cheap","expected_domain":"summary","policy":"cost_efficient"}
+{"input":"Extract the action items from this support transcript","expected_tier":"cheap","expected_domain":"summary","policy":"cost_efficient"}
+{"input":"Write a two sentence recap of this release note","expected_tier":"cheap","expected_domain":"summary","policy":"cost_efficient"}
+{"input":"Add error handling to this async Rust API client and include tests","expected_tier":"balanced","expected_domain":"coding","policy":"balanced"}
+{"input":"Debug this Rust compile error in a module and explain the fix","expected_tier":"balanced","expected_domain":"coding","policy":"balanced"}
+{"input":"Refactor this TypeScript API client to reduce duplicated request parsing","expected_tier":"balanced","expected_domain":"coding","policy":"balanced"}
+{"input":"Add tests for a retrying HTTP client with timeout behavior","expected_tier":"balanced","expected_domain":"coding","policy":"balanced"}
+{"input":"Analyze this SQL warehouse query plan and propose indexes","expected_tier":"balanced","expected_domain":"data","policy":"domain_skills"}
+{"input":"Review these analytics metric definitions for inconsistent data joins","expected_tier":"balanced","expected_domain":"data","policy":"domain_skills"}
+{"input":"Design a small dashboard data model for revenue and retention metrics","expected_tier":"balanced","expected_domain":"data","policy":"domain_skills"}
+{"input":"Compare two implementation options for a queue worker retry policy","expected_tier":"balanced","expected_domain":"design","policy":"balanced"}
+{"input":"Design a production multi tenant event sourcing architecture with migration and security tradeoffs","expected_tier":"strong","expected_domain":"design","policy":"capability_heavy"}
+{"input":"Debug a distributed Rust agent runtime with concurrency races, retries, telemetry, and benchmark regressions","expected_tier":"strong","expected_domain":"coding","policy":"capability_heavy"}
+{"input":"Design a zero downtime database migration plan for a multi region SaaS system","expected_tier":"strong","expected_domain":"design","policy":"capability_heavy"}
+{"input":"Create a security threat model for an LLM gateway with provider keys and tenant budgets","expected_tier":"strong","expected_domain":"design","policy":"capability_heavy"}
+{"input":"Optimize a high throughput async Rust router under production benchmark regressions","expected_tier":"strong","expected_domain":"coding","policy":"capability_heavy"}
+{"input":"Design a data retention architecture with warehouse backfills, audit trails, and privacy constraints","expected_tier":"strong","expected_domain":"data","policy":"capability_heavy"}
+{"input":"Plan a formal rollout for provider failover, budget accounting, and incident rollback","expected_tier":"strong","expected_domain":"design","policy":"capability_heavy"}
+{"input":"Analyze a cross service outage involving database saturation, queue lag, and retry storms","expected_tier":"strong","expected_domain":"design","policy":"capability_heavy"}
+{"input":"Architect an open weight model deployment strategy with local inference queues and fallback providers","expected_tier":"strong","expected_domain":"design","policy":"capability_heavy"}
+{"input":"Design a benchmark suite for an LLM router with concurrency, latency, cost, and correctness metrics","expected_tier":"strong","expected_domain":"design","policy":"capability_heavy"}

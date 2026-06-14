@@ -1,0 +1,6 @@
+{"input":"Fix this typo in the Rust docs","expected_tier":"cheap","expected_domain":"coding","policy":"cost_efficient"}
+{"input":"Summarize this changelog into five bullets","expected_tier":"cheap","expected_domain":"summary","policy":"cost_efficient"}
+{"input":"Add error handling to this async Rust API client and include tests","expected_tier":"balanced","expected_domain":"coding","policy":"balanced"}
+{"input":"Analyze this SQL warehouse query plan and propose indexes","expected_tier":"balanced","expected_domain":"data","policy":"domain_skills"}
+{"input":"Design a production multi tenant event sourcing architecture with migration and security tradeoffs","expected_tier":"strong","expected_domain":"design","policy":"capability_heavy"}
+{"input":"Debug a distributed Rust agent runtime with concurrency races, retries, telemetry, and benchmark regressions","expected_tier":"strong","expected_domain":"coding","policy":"capability_heavy"}

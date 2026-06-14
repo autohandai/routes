@@ -1,0 +1,115 @@
+bind: 0.0.0.0:8080
+default_model: open-weight-coder
+policy: balanced
+
+auth:
+  bearer_tokens: []
+  bearer_token_env: [AUTOHAND_ROUTER_TOKEN]
+
+budget:
+  max_chat_requests:
+  max_total_tokens:
+  max_estimated_cost_micros:
+  accounting:
+    backend: process
+    file_path:
+    lock_timeout_ms: 1000
+
+telemetry:
+  decision_log_path:
+  include_inputs: false
+
+runtime:
+  graceful_shutdown_timeout_ms: 30000
+
+classifier:
+  confidence_threshold: 0.62
+  easy_threshold: 0.28
+  hard_threshold: 0.79
+  llm_judge_model:
+  llm_judge_timeout_ms: 2500
+
+scoring:
+  balanced:
+    capability_fit: 0.60
+    domain_bonus: 0.20
+    cost: 0.20
+    overkill: 1.0
+    raw_capability: 0.0
+  cost_efficient:
+    capability_fit: 0.42
+    domain_bonus: 0.16
+    cost: 0.42
+    overkill: 1.4
+    raw_capability: 0.0
+  capability_heavy:
+    capability_fit: 0.20
+    domain_bonus: 0.08
+    cost: 0.05
+    overkill: 0.0
+    raw_capability: 0.72
+  domain_skills:
+    capability_fit: 0.38
+    domain_bonus: 0.48
+    cost: 0.10
+    overkill: 0.0
+    raw_capability: 0.10
+
+providers:
+  - name: vllm
+    kind: vllm
+    base_url: http://vllm.internal:8000
+    chat_path: /v1/chat/completions
+    responses_path: /v1/responses
+    embeddings_path: /v1/embeddings
+    images_path:
+    speech_path:
+    audio_transcriptions_path: /v1/audio/transcriptions
+    audio_translations_path: /v1/audio/translations
+    health_path: /health
+    timeout_ms: 120000
+    retries: 1
+    max_concurrency: 8
+    queue_timeout_ms: 10000
+
+  - name: openrouter
+    kind: openrouter
+    base_url: https://openrouter.ai/api
+    chat_path: /v1/chat/completions
+    responses_path: /v1/responses
+    embeddings_path: /v1/embeddings
+    images_path: /v1/images/generations
+    speech_path: /v1/audio/speech
+    audio_transcriptions_path: /v1/audio/transcriptions
+    audio_translations_path: /v1/audio/translations
+    health_path: /v1/models
+    api_key_env: OPENROUTER_API_KEY
+    timeout_ms: 120000
+    retries: 2
+    max_concurrency: 32
+    queue_timeout_ms: 10000
+    extra_headers:
+      HTTP-Referer: https://autohand.ai
+      X-Title: Autohand Router
+
+models:
+  - id: Qwen/Qwen2.5-Coder-32B-Instruct
+    provider: vllm
+    aliases: [open-weight-coder, vllm-coder]
+    capability: 0.74
+    cost_per_million_input: 0.04
+    cost_per_million_output: 0.04
+    domains: [coding, data, general]
+    context_window: 32768
+    local: true
+
+  - id: openrouter/anthropic/claude-sonnet-4.5
+    provider: openrouter
+    aliases: [sonnet, default-strong]
+    capability: 0.88
+    cost_per_million_input: 3.0
+    cost_per_million_output: 15.0
+    domains: [coding, design, general]
+    context_window: 200000
+    local: false
+

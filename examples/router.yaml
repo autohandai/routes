@@ -1,0 +1,263 @@
+bind: 127.0.0.1:8080
+default_model: llama3.1:8b
+policy: balanced
+
+auth:
+  # Disabled when both lists are empty. Prefer env-backed tokens outside local dev.
+  bearer_tokens: []
+  bearer_token_env: [AUTOHAND_ROUTER_TOKEN]
+
+budget:
+  # Disabled when null. Set accounting.backend=file for shared local multi-process enforcement.
+  max_chat_requests:
+  max_total_tokens:
+  max_estimated_cost_micros:
+  accounting:
+    backend: process
+    file_path:
+    lock_timeout_ms: 1000
+
+telemetry:
+  # Disabled when null. Writes route/chat.auto decision traces as JSONL.
+  decision_log_path:
+  # Keep false unless you explicitly want raw prompts in trace files.
+  include_inputs: false
+
+runtime:
+  # After Ctrl-C, stop accepting new requests and wait this long for in-flight work.
+  graceful_shutdown_timeout_ms: 30000
+
+classifier:
+  confidence_threshold: 0.62
+  easy_threshold: 0.28
+  hard_threshold: 0.79
+  # Optional: set to any configured model id/alias to use a live LLM judge.
+  # The judge must return JSON labels; router falls back to heuristic on error.
+  # llm_judge_model: local-coder
+  llm_judge_timeout_ms: 2500
+
+scoring:
+  # Optional operator hints inspired by OpenRouter/LiteLLM routing controls.
+  # Values are deterministic config inputs, so they can come from manual tuning,
+  # health samplers, or future control-plane automation without changing routes.
+  model_priorities: {}
+  provider_priorities: {}
+  provider_latency_p95_ms: {}
+  provider_health_penalties: {}
+  priority_weight: 0.08
+  latency_weight: 0.05
+  health_weight: 1.0
+  balanced:
+    capability_fit: 0.60
+    domain_bonus: 0.20
+    cost: 0.20
+    overkill: 1.0
+    raw_capability: 0.0
+  cost_efficient:
+    capability_fit: 0.42
+    domain_bonus: 0.16
+    cost: 0.42
+    overkill: 1.4
+    raw_capability: 0.0
+  capability_heavy:
+    capability_fit: 0.20
+    domain_bonus: 0.08
+    cost: 0.05
+    overkill: 0.0
+    raw_capability: 0.72
+  domain_skills:
+    capability_fit: 0.38
+    domain_bonus: 0.48
+    cost: 0.10
+    overkill: 0.0
+    raw_capability: 0.10
+
+providers:
+  - name: ollama
+    kind: ollama
+    base_url: http://localhost:11434
+    chat_path: /v1/chat/completions
+    responses_path: /v1/responses
+    embeddings_path: /v1/embeddings
+    images_path: /v1/images/generations
+    speech_path: /v1/audio/speech
+    audio_transcriptions_path: /v1/audio/transcriptions
+    audio_translations_path: /v1/audio/translations
+    health_path: /api/tags
+    timeout_ms: 120000
+    retries: 1
+    max_concurrency: 2
+    queue_timeout_ms: 5000
+
+  - name: ollama-native
+    kind: ollama_native
+    base_url: http://localhost:11434
+    chat_path: /api/chat
+    responses_path:
+    embeddings_path:
+    images_path:
+    speech_path:
+    audio_transcriptions_path:
+    audio_translations_path:
+    health_path: /api/tags
+    timeout_ms: 120000
+    retries: 1
+    max_concurrency: 2
+    queue_timeout_ms: 5000
+
+  - name: llamacpp
+    kind: llama_cpp
+    base_url: http://localhost:8081
+    chat_path: /v1/chat/completions
+    responses_path: /v1/responses
+    embeddings_path: /v1/embeddings
+    images_path: /v1/images/generations
+    speech_path: /v1/audio/speech
+    audio_transcriptions_path: /v1/audio/transcriptions
+    audio_translations_path: /v1/audio/translations
+    health_path: /health
+    timeout_ms: 120000
+    retries: 1
+    max_concurrency: 1
+    queue_timeout_ms: 5000
+
+  - name: llamacpp-native
+    kind: llama_cpp_native
+    base_url: http://localhost:8082
+    # Native llama.cpp server completion endpoint. Use kind: llama_cpp for its OpenAI-compatible server.
+    chat_path: /completion
+    responses_path:
+    embeddings_path:
+    images_path:
+    speech_path:
+    audio_transcriptions_path:
+    audio_translations_path:
+    health_path: /health
+    timeout_ms: 120000
+    retries: 1
+    max_concurrency: 1
+    queue_timeout_ms: 5000
+
+  - name: vllm
+    kind: vllm
+    base_url: http://localhost:8000
+    chat_path: /v1/chat/completions
+    responses_path: /v1/responses
+    embeddings_path: /v1/embeddings
+    images_path:
+    speech_path:
+    audio_transcriptions_path: /v1/audio/transcriptions
+    audio_translations_path: /v1/audio/translations
+    health_path: /health
+    timeout_ms: 120000
+    retries: 1
+    max_concurrency: 8
+    queue_timeout_ms: 10000
+
+  - name: openrouter
+    kind: openrouter
+    base_url: https://openrouter.ai/api
+    chat_path: /v1/chat/completions
+    responses_path: /v1/responses
+    embeddings_path: /v1/embeddings
+    images_path: /v1/images/generations
+    speech_path: /v1/audio/speech
+    audio_transcriptions_path: /v1/audio/transcriptions
+    audio_translations_path: /v1/audio/translations
+    health_path: /v1/models
+    api_key_env: OPENROUTER_API_KEY
+    timeout_ms: 120000
+    retries: 2
+    max_concurrency: 8
+    queue_timeout_ms: 10000
+    extra_headers:
+      HTTP-Referer: https://autohand.ai
+      X-Title: Autohand Router
+
+  - name: cloudflare
+    kind: cloudflare_ai_gateway
+    # Example for Cloudflare AI Gateway OpenAI-compatible routing:
+    # https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai
+    base_url: https://gateway.ai.cloudflare.com/v1/ACCOUNT_ID/GATEWAY_ID/openai
+    chat_path: /v1/chat/completions
+    responses_path: /v1/responses
+    embeddings_path: /v1/embeddings
+    images_path: /v1/images/generations
+    speech_path: /v1/audio/speech
+    audio_transcriptions_path: /v1/audio/transcriptions
+    audio_translations_path: /v1/audio/translations
+    health_path: /v1/models
+    api_key_env: CLOUDFLARE_API_TOKEN
+    timeout_ms: 120000
+    retries: 2
+    max_concurrency: 8
+    queue_timeout_ms: 10000
+
+models:
+  - id: llama3.1:8b
+    provider: ollama
+    aliases: [local-fast, cheap]
+    capability: 0.35
+    cost_per_million_input: 0.05
+    cost_per_million_output: 0.05
+    domains: [general, summary, coding]
+    context_window: 128000
+    local: true
+
+  - id: qwen2.5-coder:32b
+    provider: ollama
+    aliases: [local-coder]
+    capability: 0.66
+    cost_per_million_input: 0.10
+    cost_per_million_output: 0.10
+    domains: [coding, data]
+    context_window: 128000
+    local: true
+
+  - id: gemma4:12b-mlx
+    provider: ollama
+    aliases: [local-installed, gemma]
+    capability: 0.62
+    cost_per_million_input: 0.08
+    cost_per_million_output: 0.08
+    domains: [general, summary, coding]
+    context_window: 128000
+    local: true
+
+  - id: llama-cpp-native-q4
+    provider: llamacpp-native
+    aliases: [local-llamacpp-native]
+    capability: 0.58
+    cost_per_million_input: 0.06
+    cost_per_million_output: 0.06
+    domains: [general, coding]
+    context_window: 8192
+    local: true
+
+  - id: Qwen/Qwen2.5-Coder-32B-Instruct
+    provider: vllm
+    aliases: [vllm-coder, open-weight-coder]
+    capability: 0.74
+    cost_per_million_input: 0.04
+    cost_per_million_output: 0.04
+    domains: [coding, data, general]
+    context_window: 32768
+    local: true
+
+  - id: openrouter/anthropic/claude-sonnet-4.5
+    provider: openrouter
+    aliases: [sonnet, default-strong]
+    capability: 0.88
+    cost_per_million_input: 3.0
+    cost_per_million_output: 15.0
+    domains: [coding, design, general]
+    context_window: 200000
+
+  - id: openrouter/anthropic/claude-opus-4.1
+    provider: openrouter
+    aliases: [opus, strongest]
+    capability: 0.98
+    cost_per_million_input: 15.0
+    cost_per_million_output: 75.0
+    domains: [coding, design, data, general]
+    context_window: 200000

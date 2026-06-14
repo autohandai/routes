@@ -137,6 +137,9 @@ enum Command {
 #[derive(Debug, Clone, clap::ValueEnum)]
 enum RouterPolicyArg {
     Balanced,
+    Floor,
+    Nitro,
+    Quality,
     CostEfficient,
     CapabilityHeavy,
     DomainSkills,
@@ -146,6 +149,9 @@ impl From<RouterPolicyArg> for RouterPolicy {
     fn from(value: RouterPolicyArg) -> Self {
         match value {
             RouterPolicyArg::Balanced => Self::Balanced,
+            RouterPolicyArg::Floor => Self::Floor,
+            RouterPolicyArg::Nitro => Self::Nitro,
+            RouterPolicyArg::Quality => Self::Quality,
             RouterPolicyArg::CostEfficient => Self::CostEfficient,
             RouterPolicyArg::CapabilityHeavy => Self::CapabilityHeavy,
             RouterPolicyArg::DomainSkills => Self::DomainSkills,

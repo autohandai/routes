@@ -88,8 +88,14 @@ pub enum ModelCapability {
 #[serde(rename_all = "snake_case")]
 pub enum RouterPolicy {
     Balanced,
+    Floor,
+    Nitro,
+    Quality,
+    #[serde(alias = "cost")]
     CostEfficient,
+    #[serde(alias = "capability")]
     CapabilityHeavy,
+    #[serde(alias = "domain")]
     DomainSkills,
 }
 

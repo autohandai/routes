@@ -151,6 +151,12 @@ pub struct ProviderHealthSamplerConfig {
 pub struct ScoringConfig {
     #[serde(default = "default_balanced_weights")]
     pub balanced: PolicyWeights,
+    #[serde(default = "default_floor_weights")]
+    pub floor: PolicyWeights,
+    #[serde(default = "default_nitro_weights")]
+    pub nitro: PolicyWeights,
+    #[serde(default = "default_quality_weights")]
+    pub quality: PolicyWeights,
     #[serde(default = "default_cost_efficient_weights")]
     pub cost_efficient: PolicyWeights,
     #[serde(default = "default_capability_heavy_weights")]
@@ -181,12 +187,19 @@ pub struct PolicyWeights {
     pub overkill: f32,
     #[serde(default)]
     pub raw_capability: f32,
+    #[serde(default)]
+    pub latency: f32,
+    #[serde(default)]
+    pub health: f32,
 }
 
 impl Default for ScoringConfig {
     fn default() -> Self {
         Self {
             balanced: default_balanced_weights(),
+            floor: default_floor_weights(),
+            nitro: default_nitro_weights(),
+            quality: default_quality_weights(),
             cost_efficient: default_cost_efficient_weights(),
             capability_heavy: default_capability_heavy_weights(),
             domain_skills: default_domain_skills_weights(),
@@ -208,6 +221,44 @@ fn default_balanced_weights() -> PolicyWeights {
         cost: 0.20,
         overkill: 1.0,
         raw_capability: 0.0,
+        latency: default_latency_weight(),
+        health: default_health_weight(),
+    }
+}
+
+fn default_floor_weights() -> PolicyWeights {
+    PolicyWeights {
+        capability_fit: 0.34,
+        domain_bonus: 0.10,
+        cost: 0.56,
+        overkill: 1.8,
+        raw_capability: 0.0,
+        latency: default_latency_weight() * 0.8,
+        health: default_health_weight(),
+    }
+}
+
+fn default_nitro_weights() -> PolicyWeights {
+    PolicyWeights {
+        capability_fit: 0.44,
+        domain_bonus: 0.12,
+        cost: 0.12,
+        overkill: 0.6,
+        raw_capability: 0.08,
+        latency: 0.42,
+        health: 1.25,
+    }
+}
+
+fn default_quality_weights() -> PolicyWeights {
+    PolicyWeights {
+        capability_fit: 0.16,
+        domain_bonus: 0.10,
+        cost: 0.02,
+        overkill: 0.0,
+        raw_capability: 0.82,
+        latency: default_latency_weight() * 0.6,
+        health: default_health_weight(),
     }
 }
 
@@ -218,6 +269,8 @@ fn default_cost_efficient_weights() -> PolicyWeights {
         cost: 0.42,
         overkill: 1.4,
         raw_capability: 0.0,
+        latency: default_latency_weight(),
+        health: default_health_weight(),
     }
 }
 
@@ -228,6 +281,8 @@ fn default_capability_heavy_weights() -> PolicyWeights {
         cost: 0.05,
         overkill: 0.0,
         raw_capability: 0.72,
+        latency: default_latency_weight(),
+        health: default_health_weight(),
     }
 }
 
@@ -238,6 +293,8 @@ fn default_domain_skills_weights() -> PolicyWeights {
         cost: 0.10,
         overkill: 0.0,
         raw_capability: 0.10,
+        latency: default_latency_weight(),
+        health: default_health_weight(),
     }
 }
 
@@ -803,6 +860,9 @@ impl ScoringConfig {
     pub fn weights_for(&self, policy: &RouterPolicy) -> PolicyWeights {
         match policy {
             RouterPolicy::Balanced => self.balanced,
+            RouterPolicy::Floor => self.floor,
+            RouterPolicy::Nitro => self.nitro,
+            RouterPolicy::Quality => self.quality,
             RouterPolicy::CostEfficient => self.cost_efficient,
             RouterPolicy::CapabilityHeavy => self.capability_heavy,
             RouterPolicy::DomainSkills => self.domain_skills,
@@ -821,6 +881,9 @@ impl ScoringConfig {
         );
         for (name, weights) in [
             ("balanced", self.balanced),
+            ("floor", self.floor),
+            ("nitro", self.nitro),
+            ("quality", self.quality),
             ("cost_efficient", self.cost_efficient),
             ("capability_heavy", self.capability_heavy),
             ("domain_skills", self.domain_skills),
@@ -830,8 +893,20 @@ impl ScoringConfig {
                     && weights.domain_bonus >= 0.0
                     && weights.cost >= 0.0
                     && weights.overkill >= 0.0
-                    && weights.raw_capability >= 0.0,
+                    && weights.raw_capability >= 0.0
+                    && weights.latency >= 0.0
+                    && weights.health >= 0.0,
                 "scoring.{name} weights must be non-negative"
+            );
+            anyhow::ensure!(
+                weights.capability_fit.is_finite()
+                    && weights.domain_bonus.is_finite()
+                    && weights.cost.is_finite()
+                    && weights.overkill.is_finite()
+                    && weights.raw_capability.is_finite()
+                    && weights.latency.is_finite()
+                    && weights.health.is_finite(),
+                "scoring.{name} weights must be finite"
             );
         }
         for (name, priority) in self

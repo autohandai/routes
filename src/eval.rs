@@ -606,6 +606,8 @@ fn balanced_weight_candidates() -> Vec<PolicyWeights> {
             cost: 0.20,
             overkill: 1.0,
             raw_capability: 0.0,
+            latency: 0.05,
+            health: 1.0,
         },
         PolicyWeights {
             capability_fit: 0.58,
@@ -613,6 +615,8 @@ fn balanced_weight_candidates() -> Vec<PolicyWeights> {
             cost: 0.28,
             overkill: 1.2,
             raw_capability: 0.0,
+            latency: 0.05,
+            health: 1.0,
         },
         PolicyWeights {
             capability_fit: 0.64,
@@ -620,6 +624,8 @@ fn balanced_weight_candidates() -> Vec<PolicyWeights> {
             cost: 0.12,
             overkill: 0.8,
             raw_capability: 0.0,
+            latency: 0.05,
+            health: 1.0,
         },
         PolicyWeights {
             capability_fit: 0.52,
@@ -627,6 +633,8 @@ fn balanced_weight_candidates() -> Vec<PolicyWeights> {
             cost: 0.22,
             overkill: 1.0,
             raw_capability: 0.0,
+            latency: 0.05,
+            health: 1.0,
         },
         PolicyWeights {
             capability_fit: 0.44,
@@ -634,6 +642,8 @@ fn balanced_weight_candidates() -> Vec<PolicyWeights> {
             cost: 0.46,
             overkill: 1.6,
             raw_capability: 0.0,
+            latency: 0.05,
+            health: 1.0,
         },
     ]
 }

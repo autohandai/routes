@@ -434,6 +434,7 @@ fn scored_candidates(
             let missing_capabilities = missing_capabilities(model, required_capabilities);
             let capability_eligible = missing_capabilities.is_empty();
             let mut score = score_model(model, classifications, policy, config);
+            let weights = config.scoring.weights_for(policy);
             let routing_priority = routing_priority(model, config);
             let latency_penalty = provider.map_or(0.0, |provider| {
                 latency_penalty(provider, config, provider_health)
@@ -441,11 +442,11 @@ fn scored_candidates(
             let health_penalty = provider.map_or(0.0, |provider| {
                 health_penalty(provider, config, provider_health)
             });
-            let latency_weight = config.scoring.latency_weight
+            let latency_weight = weights.latency
                 * latency_sensitivity_multiplier(&classifications.latency_sensitivity.label);
             score += routing_priority * config.scoring.priority_weight;
             score -= latency_penalty * latency_weight;
-            score -= health_penalty * config.scoring.health_weight;
+            score -= health_penalty * weights.health;
             if !capability_eligible {
                 score -= 10.0;
             }
@@ -948,6 +949,99 @@ mod tests {
         RoutingEngine::new(config, HeuristicClassifier::default())
     }
 
+    fn latency_policy_engine() -> RoutingEngine<HeuristicClassifier> {
+        let mut scoring = crate::config::ScoringConfig::default();
+        scoring
+            .provider_latency_p95_ms
+            .insert("fast".to_string(), 100);
+        scoring
+            .provider_latency_p95_ms
+            .insert("slow".to_string(), 4_000);
+
+        let config = RouterConfig {
+            bind: "127.0.0.1:0".to_string(),
+            default_model: "fast-balanced".to_string(),
+            policy: RouterPolicy::Balanced,
+            providers: vec![
+                ProviderConfig {
+                    name: "fast".to_string(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: "http://localhost:11434".to_string(),
+                    api_key_env: None,
+                    api_key: None,
+                    chat_path: "/v1/chat/completions".to_string(),
+                    responses_path: Some("/v1/responses".to_string()),
+                    embeddings_path: Some("/v1/embeddings".to_string()),
+                    images_path: Some("/v1/images/generations".to_string()),
+                    speech_path: Some("/v1/audio/speech".to_string()),
+                    audio_transcriptions_path: Some("/v1/audio/transcriptions".to_string()),
+                    audio_translations_path: Some("/v1/audio/translations".to_string()),
+                    health_path: None,
+                    timeout_ms: 120_000,
+                    retries: 1,
+                    max_concurrency: None,
+                    queue_timeout_ms: None,
+                    extra_headers: HashMap::new(),
+                },
+                ProviderConfig {
+                    name: "slow".to_string(),
+                    kind: ProviderKind::OpenAiCompatible,
+                    base_url: "http://localhost:11435".to_string(),
+                    api_key_env: None,
+                    api_key: None,
+                    chat_path: "/v1/chat/completions".to_string(),
+                    responses_path: Some("/v1/responses".to_string()),
+                    embeddings_path: Some("/v1/embeddings".to_string()),
+                    images_path: Some("/v1/images/generations".to_string()),
+                    speech_path: Some("/v1/audio/speech".to_string()),
+                    audio_transcriptions_path: Some("/v1/audio/transcriptions".to_string()),
+                    audio_translations_path: Some("/v1/audio/translations".to_string()),
+                    health_path: None,
+                    timeout_ms: 120_000,
+                    retries: 1,
+                    max_concurrency: None,
+                    queue_timeout_ms: None,
+                    extra_headers: HashMap::new(),
+                },
+            ],
+            models: vec![
+                ModelConfig {
+                    id: "fast-balanced".to_string(),
+                    provider: "fast".to_string(),
+                    aliases: vec![],
+                    capability: 0.70,
+                    cost_per_million_input: 10.0,
+                    cost_per_million_output: 10.0,
+                    domains: vec![DomainLabel::Coding, DomainLabel::Design],
+                    context_window: None,
+                    capabilities: Default::default(),
+                    local: true,
+                },
+                ModelConfig {
+                    id: "slow-strong".to_string(),
+                    provider: "slow".to_string(),
+                    aliases: vec![],
+                    capability: 0.95,
+                    cost_per_million_input: 0.1,
+                    cost_per_million_output: 0.1,
+                    domains: vec![DomainLabel::Coding, DomainLabel::Design],
+                    context_window: None,
+                    capabilities: Default::default(),
+                    local: true,
+                },
+            ],
+            classifier: Default::default(),
+            auth: Default::default(),
+            scoring,
+            budget: Default::default(),
+            telemetry: Default::default(),
+            runtime: Default::default(),
+            cache: Default::default(),
+            shadow_eval: Default::default(),
+        };
+        RoutingEngine::new(config, HeuristicClassifier::default())
+    }
+
     #[tokio::test]
     async fn routes_easy_work_to_cheaper_model() {
         let route = engine()
@@ -966,6 +1060,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn floor_policy_selects_cheapest_acceptable_model() {
+        let route = engine()
+            .route(MultimodelRequest {
+                input: "Fix this typo in the Rust comment".to_string(),
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+                policy: RouterPolicy::Floor,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(route.model, "cheap");
+        assert_eq!(route.policy, RouterPolicy::Floor);
+    }
+
+    #[tokio::test]
     async fn routes_hard_architecture_work_to_strong_model() {
         let route = engine()
             .route(MultimodelRequest {
@@ -979,6 +1091,48 @@ mod tests {
             })
             .await;
         assert_eq!(route.model, "strong");
+    }
+
+    #[tokio::test]
+    async fn quality_policy_selects_strongest_model() {
+        let route = engine()
+            .route(MultimodelRequest {
+                input: "Design a production multi tenant event sourcing architecture with concurrency, migration, benchmark, and security tradeoffs".to_string(),
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+                policy: RouterPolicy::Quality,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(route.model, "strong");
+        assert_eq!(route.policy, RouterPolicy::Quality);
+    }
+
+    #[tokio::test]
+    async fn nitro_policy_prefers_fast_healthy_provider() {
+        let route = latency_policy_engine()
+            .route(MultimodelRequest {
+                input: "ASAP fast instant realtime: design a production architecture with concurrency, benchmark, and security tradeoffs".to_string(),
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+                policy: RouterPolicy::Nitro,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(route.model, "fast-balanced");
+        assert_eq!(route.provider, "fast");
+        assert_eq!(route.policy, RouterPolicy::Nitro);
+        assert!(
+            route.candidates.iter().any(
+                |candidate| candidate.model == "slow-strong" && candidate.latency_penalty > 0.7
+            )
+        );
     }
 
     #[tokio::test]

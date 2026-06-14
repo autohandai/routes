@@ -3105,7 +3105,13 @@ fn cached_upstream_response(
 }
 
 fn parse_router_model_policy(model: &str) -> RouterPolicy {
-    if model.contains("cost") {
+    if model.contains("floor") {
+        RouterPolicy::Floor
+    } else if model.contains("nitro") || model.contains("fast") {
+        RouterPolicy::Nitro
+    } else if model.contains("quality") {
+        RouterPolicy::Quality
+    } else if model.contains("cost") {
         RouterPolicy::CostEfficient
     } else if model.contains("capability") || model.contains("heavy") {
         RouterPolicy::CapabilityHeavy
@@ -3124,7 +3130,7 @@ fn elapsed_millis_u32(started: Instant) -> u32 {
 mod tests {
     use super::{
         AppState, RouterMetrics, UsageAccounting, app, budget_violation, constant_time_eq,
-        legacy_raw_difficulty, prometheus_escape, usage_from_value,
+        legacy_raw_difficulty, parse_router_model_policy, prometheus_escape, usage_from_value,
     };
     use crate::{
         classifier::SmartClassifier,
@@ -3699,6 +3705,43 @@ mod tests {
         assert_eq!(
             legacy_raw_difficulty(LegacyRouterMode::Aggressive, confident),
             DifficultyLabel::Medium
+        );
+    }
+
+    #[test]
+    fn router_model_shortcuts_map_to_policy_presets() {
+        assert_eq!(parse_router_model_policy("auto"), RouterPolicy::Balanced);
+        assert_eq!(
+            parse_router_model_policy("router-balanced"),
+            RouterPolicy::Balanced
+        );
+        assert_eq!(
+            parse_router_model_policy("router-floor"),
+            RouterPolicy::Floor
+        );
+        assert_eq!(
+            parse_router_model_policy("router-nitro"),
+            RouterPolicy::Nitro
+        );
+        assert_eq!(
+            parse_router_model_policy("router-fast"),
+            RouterPolicy::Nitro
+        );
+        assert_eq!(
+            parse_router_model_policy("router-quality"),
+            RouterPolicy::Quality
+        );
+        assert_eq!(
+            parse_router_model_policy("router-cost"),
+            RouterPolicy::CostEfficient
+        );
+        assert_eq!(
+            parse_router_model_policy("router-capability"),
+            RouterPolicy::CapabilityHeavy
+        );
+        assert_eq!(
+            parse_router_model_policy("router-domain"),
+            RouterPolicy::DomainSkills
         );
     }
 

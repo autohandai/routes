@@ -32,7 +32,7 @@ http://127.0.0.1:8080/v1/audio/transcriptions
 http://127.0.0.1:8080/v1/audio/translations
 ```
 
-Use model `auto`, `router-balanced`, `router-cost`, `router-capability`, or `router-domain` to let the router select the upstream model. Passing a configured model id or alias forwards to that model.
+Use model `auto`, `router-balanced`, `router-floor`, `router-nitro`, `router-quality`, `router-cost`, `router-capability`, or `router-domain` to let the router select the upstream model. Passing a configured model id or alias forwards to that model.
 
 Proxied responses include:
 
@@ -67,6 +67,7 @@ curl -s http://127.0.0.1:8080/v1/router/multimodel \
 The response includes `model`, `provider`, `difficulty`, `ambiguity`, `domain`, `modality`, `safety`, `cacheability`, `latency_sensitivity`, `reasoning_depth`, confidence fields, policy, reason, and whether fallback was used.
 It also includes estimated input tokens, requested output tokens, per-candidate context eligibility, and per-candidate capability eligibility so oversized or modality-specific prompts do not route to models that cannot fit or satisfy them.
 Reasoning depth raises or lowers the capability target, and latency sensitivity changes how strongly observed/static provider latency affects candidate scores.
+Policy presets are config-driven: `balanced` is the default tradeoff, `floor` selects the cheapest acceptable candidate, `nitro` emphasizes fast healthy providers, and `quality` favors the strongest candidate. Legacy policy names `cost_efficient`, `capability_heavy`, and `domain_skills` remain supported.
 When `default_model` is provided with `allowed_models` or `allowed_providers`, the default must satisfy those filters. The router will not silently return an out-of-filter fallback.
 
 Legacy Morph clients can call `/v1/router/raw` for a difficulty-only response:

@@ -721,7 +721,7 @@ fn schemas() -> Value {
         },
         "RouterPolicy": {
             "type": "string",
-            "enum": ["balanced", "cost_efficient", "capability_heavy", "domain_skills"]
+            "enum": ["balanced", "floor", "nitro", "quality", "cost_efficient", "capability_heavy", "domain_skills"]
         },
         "OpenAiChatRequest": {
             "type": "object",

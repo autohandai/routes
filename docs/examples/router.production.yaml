@@ -27,6 +27,11 @@ shadow_eval:
   max_body_chars: 4096
   judge:
     enabled: true
+    # Omit model for deterministic local labels; set a configured model id or
+    # alias for LLM answer-quality judgements.
+    model:
+    timeout_ms: 5000
+    prompt_template:
 
 runtime:
   graceful_shutdown_timeout_ms: 30000

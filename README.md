@@ -137,9 +137,12 @@ shadow_eval:
   include_bodies: false
   judge:
     enabled: true
+    # Optional. Omit for deterministic local judging.
+    model: qwen-classifier
+    timeout_ms: 5000
 ```
 
-For sampled automatic non-stream chat and Responses requests, the router returns the selected model response normally, then sends the same prompt to the next scored candidate in the background. The JSONL artifact records selected/shadow model IDs, providers, HTTP status, latency, body sizes, optional truncated bodies, and an optional deterministic local `winner` judgement with status/content/latency scores. Bodies are redacted by default.
+For sampled automatic non-stream chat and Responses requests, the router returns the selected model response normally, then sends the same prompt to the next scored candidate in the background. The JSONL artifact records selected/shadow model IDs, providers, HTTP status, latency, body sizes, optional truncated bodies, and a `winner` judgement. Without `judge.model`, the judgement is deterministic and local, using status/content/latency scores. With `judge.model`, the router asks the configured model for JSON answer-quality scores and falls back to local judging if the model times out, errors, or returns invalid output. Bodies are redacted by default.
 
 To enforce safety routing on automatic chat and Responses requests:
 

@@ -1,5 +1,6 @@
 use crate::config::ShadowEvalConfig;
-use serde::Serialize;
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::hash_map::DefaultHasher,
@@ -55,7 +56,7 @@ pub struct ShadowEvalRecord {
     pub shadow_score: Option<f32>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ShadowEvalWinner {
     Selected,
@@ -78,6 +79,7 @@ pub struct ShadowEvalRecordInput<'a> {
     pub selected_body: &'a [u8],
     pub shadow_body: Option<&'a [u8]>,
     pub shadow_error: Option<String>,
+    pub judgement: Option<ShadowEvalJudgement>,
 }
 
 impl ShadowEvalLogger {
@@ -113,7 +115,10 @@ impl ShadowEvalLogger {
         };
         let selected_body_text = self.body_for_log(input.selected_body);
         let shadow_body_text = input.shadow_body.and_then(|body| self.body_for_log(body));
-        let judgement = self.config.judge.enabled.then(|| judge_shadow_eval(&input));
+        let judgement = input
+            .judgement
+            .clone()
+            .or_else(|| self.config.judge.enabled.then(|| judge_shadow_eval(&input)));
         let record = ShadowEvalRecord {
             timestamp_ms: unix_timestamp_ms(),
             source: input.source.to_string(),
@@ -152,14 +157,15 @@ impl ShadowEvalLogger {
     }
 }
 
-struct ShadowEvalJudgement {
-    winner: ShadowEvalWinner,
-    reason: String,
-    selected_score: f32,
-    shadow_score: f32,
+#[derive(Debug, Clone)]
+pub struct ShadowEvalJudgement {
+    pub winner: ShadowEvalWinner,
+    pub reason: String,
+    pub selected_score: f32,
+    pub shadow_score: f32,
 }
 
-fn judge_shadow_eval(input: &ShadowEvalRecordInput<'_>) -> ShadowEvalJudgement {
+pub fn judge_shadow_eval(input: &ShadowEvalRecordInput<'_>) -> ShadowEvalJudgement {
     let selected_score = response_score(
         Some(input.selected_status),
         Some(input.selected_body),
@@ -206,6 +212,49 @@ fn judge_shadow_eval(input: &ShadowEvalRecordInput<'_>) -> ShadowEvalJudgement {
         selected_score,
         shadow_score,
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct LlmShadowEvalJudgement {
+    winner: ShadowEvalWinner,
+    #[serde(default)]
+    reason: String,
+    selected_score: Option<f32>,
+    shadow_score: Option<f32>,
+}
+
+pub fn parse_llm_shadow_eval_judgement(content: &str) -> Result<ShadowEvalJudgement> {
+    let json =
+        extract_json_object(content).context("LLM shadow judge content did not contain JSON")?;
+    let parsed: LlmShadowEvalJudgement =
+        serde_json::from_str(json).context("LLM shadow judge JSON was invalid")?;
+    let selected_score = validate_llm_score("selected_score", parsed.selected_score)?;
+    let shadow_score = validate_llm_score("shadow_score", parsed.shadow_score)?;
+    Ok(ShadowEvalJudgement {
+        winner: parsed.winner,
+        reason: if parsed.reason.trim().is_empty() {
+            "llm_judge: no reason provided".to_string()
+        } else {
+            format!("llm_judge: {}", parsed.reason.trim())
+        },
+        selected_score,
+        shadow_score,
+    })
+}
+
+fn validate_llm_score(name: &str, score: Option<f32>) -> Result<f32> {
+    let score = score.unwrap_or(0.5);
+    anyhow::ensure!(
+        score.is_finite() && (0.0..=1.0).contains(&score),
+        "LLM shadow judge {name} must be between 0.0 and 1.0"
+    );
+    Ok(score)
+}
+
+fn extract_json_object(content: &str) -> Option<&str> {
+    let start = content.find('{')?;
+    let end = content.rfind('}')?;
+    (end > start).then_some(&content[start..=end])
 }
 
 fn response_score(status: Option<u16>, body: Option<&[u8]>, latency_ms: Option<u32>) -> f32 {
@@ -323,6 +372,7 @@ mod tests {
                 selected_body: br#"{"content":"selected secret"}"#,
                 shadow_body: Some(br#"{"content":"shadow secret"}"#),
                 shadow_error: None,
+                judgement: None,
             })
             .await;
 
@@ -369,6 +419,7 @@ mod tests {
                     br#"{"choices":[{"message":{"content":"complete useful answer"}}]}"#,
                 ),
                 shadow_error: None,
+                judgement: None,
             })
             .await;
 
@@ -378,5 +429,28 @@ mod tests {
         assert!(raw.contains("\"selected_score\""));
         assert!(raw.contains("\"shadow_score\""));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn parses_llm_shadow_eval_judgement_from_json_noise() {
+        let judgement = parse_llm_shadow_eval_judgement(
+            "Result:\n{\"winner\":\"shadow\",\"reason\":\"more complete\",\"selected_score\":0.4,\"shadow_score\":0.9}",
+        )
+        .unwrap();
+
+        assert_eq!(judgement.winner, ShadowEvalWinner::Shadow);
+        assert_eq!(judgement.reason, "llm_judge: more complete");
+        assert_eq!(judgement.selected_score, 0.4);
+        assert_eq!(judgement.shadow_score, 0.9);
+    }
+
+    #[test]
+    fn rejects_out_of_range_llm_shadow_eval_score() {
+        let error = parse_llm_shadow_eval_judgement(
+            "{\"winner\":\"selected\",\"reason\":\"bad score\",\"selected_score\":1.5,\"shadow_score\":0.2}",
+        )
+        .expect_err("invalid score rejected");
+
+        assert!(error.to_string().contains("selected_score"));
     }
 }

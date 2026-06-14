@@ -156,6 +156,12 @@ pub struct ShadowEvalConfig {
 pub struct ShadowEvalJudgeConfig {
     #[serde(default = "default_shadow_eval_judge_enabled")]
     pub enabled: bool,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default = "default_shadow_eval_judge_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub prompt_template: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -449,6 +455,9 @@ impl Default for ShadowEvalJudgeConfig {
     fn default() -> Self {
         Self {
             enabled: default_shadow_eval_judge_enabled(),
+            model: None,
+            timeout_ms: default_shadow_eval_judge_timeout_ms(),
+            prompt_template: None,
         }
     }
 }
@@ -543,6 +552,10 @@ fn default_shadow_eval_max_body_chars() -> usize {
 
 fn default_shadow_eval_judge_enabled() -> bool {
     true
+}
+
+fn default_shadow_eval_judge_timeout_ms() -> u64 {
+    5_000
 }
 
 fn default_safety_unsafe_action() -> SafetyRoutingAction {
@@ -651,7 +664,7 @@ impl RouterConfig {
         self.telemetry.validate()?;
         self.runtime.validate()?;
         self.cache.validate(self)?;
-        self.shadow_eval.validate()?;
+        self.shadow_eval.validate(self)?;
         self.safety.validate(self)?;
         self.sticky_routing.validate()?;
         Ok(())
@@ -1051,7 +1064,7 @@ impl SemanticCacheConfig {
 }
 
 impl ShadowEvalConfig {
-    fn validate(&self) -> Result<()> {
+    fn validate(&self, config: &RouterConfig) -> Result<()> {
         anyhow::ensure!(
             self.sample_rate.is_finite() && (0.0..=1.0).contains(&self.sample_rate),
             "shadow_eval.sample_rate must be between 0.0 and 1.0"
@@ -1066,6 +1079,36 @@ impl ShadowEvalConfig {
             self.max_body_chars > 0,
             "shadow_eval.max_body_chars must be greater than zero"
         );
+        self.judge.validate(config)?;
+        Ok(())
+    }
+}
+
+impl ShadowEvalJudgeConfig {
+    fn validate(&self, config: &RouterConfig) -> Result<()> {
+        anyhow::ensure!(
+            self.timeout_ms > 0,
+            "shadow_eval.judge.timeout_ms must be greater than zero"
+        );
+        if let Some(model) = self
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        {
+            anyhow::ensure!(
+                config.find_model(model).is_some(),
+                "shadow_eval.judge.model {model} does not match a configured model id or alias"
+            );
+        }
+        if let Some(template) = &self.prompt_template {
+            anyhow::ensure!(
+                template.contains("{input}")
+                    && template.contains("{selected_answer}")
+                    && template.contains("{shadow_answer}"),
+                "shadow_eval.judge.prompt_template must contain {{input}}, {{selected_answer}}, and {{shadow_answer}}"
+            );
+        }
         Ok(())
     }
 }
@@ -1231,7 +1274,7 @@ mod tests {
         AuthConfig, BudgetConfig, ClassifierBackend, ClassifierConfig,
         ClassifierModelAdapterConfig, ProviderHealthSamplerConfig, RouterConfig, RuntimeConfig,
         SafetyRoutingAction, SafetyRoutingConfig, ScoringConfig, SemanticCacheConfig,
-        ShadowEvalConfig, StickyRoutingConfig, TelemetryConfig,
+        ShadowEvalConfig, ShadowEvalJudgeConfig, StickyRoutingConfig, TelemetryConfig,
     };
     use crate::types::{ModelConfig, ProviderConfig, ProviderKind, RouterPolicy};
 
@@ -1559,6 +1602,66 @@ mod tests {
             .validate()
             .expect_err("enabled shadow eval requires output path");
         assert!(error.to_string().contains("shadow_eval.output_path"));
+    }
+
+    #[test]
+    fn accepts_shadow_eval_judge_model_alias() {
+        let mut config = valid_config();
+        config.shadow_eval = ShadowEvalConfig {
+            enabled: true,
+            sample_rate: 1.0,
+            output_path: Some("shadow.jsonl".to_string()),
+            include_bodies: false,
+            max_body_chars: 128,
+            judge: ShadowEvalJudgeConfig {
+                enabled: true,
+                model: Some("alias-a".to_string()),
+                timeout_ms: 250,
+                prompt_template: Some(
+                    "{input}\n{selected_model}\n{selected_answer}\n{shadow_model}\n{shadow_answer}"
+                        .to_string(),
+                ),
+            },
+        };
+
+        config.validate().expect("judge alias is accepted");
+    }
+
+    #[test]
+    fn rejects_unknown_shadow_eval_judge_model() {
+        let mut config = valid_config();
+        config.shadow_eval.judge.model = Some("missing-judge".to_string());
+
+        let error = config
+            .validate()
+            .expect_err("unknown shadow eval judge model rejected");
+        assert!(error.to_string().contains("shadow_eval.judge.model"));
+    }
+
+    #[test]
+    fn rejects_zero_shadow_eval_judge_timeout() {
+        let mut config = valid_config();
+        config.shadow_eval.judge.timeout_ms = 0;
+
+        let error = config
+            .validate()
+            .expect_err("zero shadow eval judge timeout rejected");
+        assert!(error.to_string().contains("shadow_eval.judge.timeout_ms"));
+    }
+
+    #[test]
+    fn rejects_shadow_eval_judge_template_missing_required_slots() {
+        let mut config = valid_config();
+        config.shadow_eval.judge.prompt_template = Some("{input}\n{selected_answer}".to_string());
+
+        let error = config
+            .validate()
+            .expect_err("shadow eval judge template slots are required");
+        assert!(
+            error
+                .to_string()
+                .contains("shadow_eval.judge.prompt_template")
+        );
     }
 
     #[test]

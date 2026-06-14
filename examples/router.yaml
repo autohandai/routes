@@ -52,8 +52,12 @@ shadow_eval:
   include_bodies: false
   max_body_chars: 4096
   judge:
-    # Deterministic local judge for status/content/latency winner labels in JSONL records.
+    # Omit model for deterministic local status/content/latency labels.
+    # Set to a configured model id or alias for LLM answer-quality judgements.
     enabled: true
+    model:
+    timeout_ms: 5000
+    prompt_template:
 
 safety:
   # Opt-in automatic safety routing for auto/router-* chat and Responses requests.

@@ -9,14 +9,17 @@ use crate::{
         SemanticCache, SemanticCacheEmbedding, SemanticCacheEndpoint, SemanticCacheHit,
         SemanticCacheRequest, SemanticCacheWrite,
     },
-    shadow_eval::{ShadowEvalEndpoint, ShadowEvalLogger, ShadowEvalRecordInput},
+    shadow_eval::{
+        ShadowEvalEndpoint, ShadowEvalJudgement, ShadowEvalLogger, ShadowEvalRecordInput,
+        parse_llm_shadow_eval_judgement,
+    },
     telemetry::DecisionLogger,
     tokens::estimate_tokens,
     types::{
-        CacheabilityLabel, ClassifyRequest, ClassifyResponse, ModelCapability, ModelConfig,
-        MultimodelRequest, MultimodelResponse, OpenAiAudioMultipartRequest, OpenAiChatRequest,
-        OpenAiEmbeddingsRequest, OpenAiImagesRequest, OpenAiMultipartPart, OpenAiResponsesRequest,
-        OpenAiSpeechRequest, RouterPolicy, SafetyLabel,
+        CacheabilityLabel, ChatMessage, ClassifyRequest, ClassifyResponse, ModelCapability,
+        ModelConfig, MultimodelRequest, MultimodelResponse, OpenAiAudioMultipartRequest,
+        OpenAiChatRequest, OpenAiEmbeddingsRequest, OpenAiImagesRequest, OpenAiMultipartPart,
+        OpenAiResponsesRequest, OpenAiSpeechRequest, RouterPolicy, SafetyLabel,
     },
 };
 use anyhow::Result;
@@ -41,7 +44,11 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::{net::TcpListener, sync::oneshot, time::sleep};
+use tokio::{
+    net::TcpListener,
+    sync::oneshot,
+    time::{sleep, timeout},
+};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{info, warn};
 
@@ -3543,6 +3550,18 @@ fn spawn_shadow_eval(
             }
         };
 
+        let judgement = llm_shadow_eval_judgement(
+            &state,
+            &config,
+            &input,
+            &selected_model_id,
+            &shadow_model.id,
+            &selected_body,
+            shadow_body.as_deref(),
+            shadow_error.as_deref(),
+        )
+        .await;
+
         state
             .shadow_eval
             .record(ShadowEvalRecordInput {
@@ -3560,10 +3579,165 @@ fn spawn_shadow_eval(
                 selected_body: &selected_body,
                 shadow_body: shadow_body.as_deref(),
                 shadow_error,
+                judgement,
             })
             .await;
     });
 }
+
+async fn llm_shadow_eval_judgement(
+    state: &Arc<AppState>,
+    config: &RouterConfig,
+    input: &str,
+    selected_model: &str,
+    shadow_model: &str,
+    selected_body: &[u8],
+    shadow_body: Option<&[u8]>,
+    shadow_error: Option<&str>,
+) -> Option<ShadowEvalJudgement> {
+    let judge = &config.shadow_eval.judge;
+    let model_id = judge
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())?;
+    let model = match config.find_model(model_id).cloned() {
+        Some(model) => model,
+        None => {
+            warn!(
+                model = model_id,
+                "shadow eval judge model is not configured"
+            );
+            return None;
+        }
+    };
+    let prompt = shadow_eval_judge_prompt(
+        config,
+        input,
+        selected_model,
+        shadow_model,
+        selected_body,
+        shadow_body,
+        shadow_error,
+    );
+    let request = OpenAiChatRequest {
+        model: model.id.clone(),
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: Value::String(prompt),
+        }],
+        extra: Default::default(),
+    };
+    let result = timeout(
+        Duration::from_millis(judge.timeout_ms),
+        state.providers.send_chat(config, &model, request),
+    )
+    .await;
+    let response = match result {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            warn!(?error, "shadow eval LLM judge request failed");
+            return None;
+        }
+        Err(_) => {
+            warn!("shadow eval LLM judge request timed out");
+            return None;
+        }
+    };
+    let status = response.status();
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(error) => {
+            warn!(?error, "failed to read shadow eval LLM judge response");
+            return None;
+        }
+    };
+    if !status.is_success() {
+        warn!(
+            status = status.as_u16(),
+            "shadow eval LLM judge returned non-success status"
+        );
+        return None;
+    }
+    let value = match serde_json::from_slice::<Value>(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(?error, "shadow eval LLM judge response was not JSON");
+            return None;
+        }
+    };
+    let Some(content) = value
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+    else {
+        warn!("shadow eval LLM judge response did not include choices[0].message.content");
+        return None;
+    };
+    match parse_llm_shadow_eval_judgement(content) {
+        Ok(judgement) => Some(judgement),
+        Err(error) => {
+            warn!(?error, "shadow eval LLM judge output was invalid");
+            None
+        }
+    }
+}
+
+fn shadow_eval_judge_prompt(
+    config: &RouterConfig,
+    input: &str,
+    selected_model: &str,
+    shadow_model: &str,
+    selected_body: &[u8],
+    shadow_body: Option<&[u8]>,
+    shadow_error: Option<&str>,
+) -> String {
+    let selected_answer = truncate_chars(
+        &String::from_utf8_lossy(selected_body),
+        config.shadow_eval.max_body_chars,
+    );
+    let shadow_answer = shadow_body
+        .map(|body| {
+            truncate_chars(
+                &String::from_utf8_lossy(body),
+                config.shadow_eval.max_body_chars,
+            )
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "ERROR: {}",
+                shadow_error.unwrap_or("no shadow response body")
+            )
+        });
+    let template = config
+        .shadow_eval
+        .judge
+        .prompt_template
+        .as_deref()
+        .unwrap_or(DEFAULT_SHADOW_EVAL_JUDGE_PROMPT);
+    template
+        .replace("{input}", input)
+        .replace("{selected_model}", selected_model)
+        .replace("{shadow_model}", shadow_model)
+        .replace("{selected_answer}", &selected_answer)
+        .replace("{shadow_answer}", &shadow_answer)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
+const DEFAULT_SHADOW_EVAL_JUDGE_PROMPT: &str = r#"You are judging two model answers for the same user request.
+Return only JSON with:
+{"winner":"selected|shadow|tie","reason":"short reason","selected_score":0.0,"shadow_score":0.0}
+
+User request:
+{input}
+
+Selected model ({selected_model}) answer:
+{selected_answer}
+
+Shadow model ({shadow_model}) answer:
+{shadow_answer}"#;
 
 fn cached_upstream_response(
     hit: SemanticCacheHit,
@@ -4092,6 +4266,76 @@ mod tests {
         assert_eq!(metrics["shadow_eval_samples"], 1);
         assert_eq!(metrics["shadow_eval_successes"], 1);
         assert_eq!(metrics["shadow_eval_errors"], 0);
+        let _ = std::fs::remove_file(shadow_path);
+    }
+
+    #[tokio::test]
+    async fn automatic_chat_records_llm_shadow_eval_judgement() {
+        let (upstream_url, calls) = spawn_shadow_judge_chat_upstream().await;
+        let shadow_path = std::env::temp_dir().join(format!(
+            "autohand-router-shadow-llm-judge-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let mut config = shadow_eval_config(upstream_url, shadow_path.clone());
+        config.models.push(ModelConfig {
+            id: "judge-shadow".to_string(),
+            provider: "shadow-provider".to_string(),
+            aliases: vec!["shadow-judge".to_string()],
+            capability: 0.05,
+            cost_per_million_input: 1.0,
+            cost_per_million_output: 1.0,
+            domains: vec![DomainLabel::General],
+            context_window: Some(4096),
+            capabilities: Default::default(),
+            local: true,
+        });
+        config.shadow_eval.judge.model = Some("shadow-judge".to_string());
+        config.shadow_eval.judge.timeout_ms = 500;
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&OpenAiChatRequest {
+                model: "auto".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String(
+                        "Design a production architecture with routing tradeoffs".to_string(),
+                    ),
+                }],
+                extra: Default::default(),
+            })
+            .send()
+            .await
+            .unwrap();
+
+        assert!(response.status().is_success());
+        for _ in 0..40 {
+            if calls.load(AtomicOrdering::Relaxed) >= 3 && shadow_path.exists() {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 3);
+        let raw = std::fs::read_to_string(&shadow_path).unwrap();
+        let record: Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+        assert_eq!(record["selected_model"], "primary-shadow");
+        assert_eq!(record["shadow_model"], "secondary-shadow");
+        assert_eq!(record["winner"], "shadow");
+        assert_eq!(
+            record["judge_reason"],
+            "llm_judge: shadow answer is clearer"
+        );
+        assert!(
+            (record["selected_score"].as_f64().unwrap() - 0.3).abs() < 0.001,
+            "{record}"
+        );
+        assert!(
+            (record["shadow_score"].as_f64().unwrap() - 0.9).abs() < 0.001,
+            "{record}"
+        );
         let _ = std::fs::remove_file(shadow_path);
     }
 
@@ -4767,6 +5011,63 @@ mod tests {
                         "message": {
                             "role": "assistant",
                             "content": format!("ok from {model}")
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 2,
+                        "total_tokens": 12
+                    }
+                })),
+            )
+                .into_response()
+        }
+
+        let calls = Arc::new(AtomicU64::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(chat))
+            .with_state(calls.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), calls)
+    }
+
+    async fn spawn_shadow_judge_chat_upstream() -> (String, Arc<AtomicU64>) {
+        async fn chat(
+            axum::extract::State(calls): axum::extract::State<Arc<AtomicU64>>,
+            Json(request): Json<Value>,
+        ) -> axum::response::Response {
+            calls.fetch_add(1, AtomicOrdering::Relaxed);
+            let model = request["model"]
+                .as_str()
+                .unwrap_or("unknown-model")
+                .to_string();
+            let content = if model == "judge-shadow" {
+                serde_json::json!({
+                    "winner": "shadow",
+                    "reason": "shadow answer is clearer",
+                    "selected_score": 0.3,
+                    "shadow_score": 0.9
+                })
+                .to_string()
+            } else {
+                format!("ok from {model}")
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": "chatcmpl-shadow-judge-test",
+                    "object": "chat.completion",
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": content
                         },
                         "finish_reason": "stop"
                     }],

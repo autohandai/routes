@@ -22,6 +22,13 @@ telemetry:
 runtime:
   graceful_shutdown_timeout_ms: 30000
 
+safety:
+  enabled: false
+  unsafe_action: reject
+  sensitive_action: allow
+  force_model:
+  redaction_replacement: "[redacted]"
+
 classifier:
   confidence_threshold: 0.62
   easy_threshold: 0.28

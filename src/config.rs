@@ -34,6 +34,8 @@ pub struct RouterConfig {
     pub cache: CacheConfig,
     #[serde(default)]
     pub shadow_eval: ShadowEvalConfig,
+    #[serde(default)]
+    pub safety: SafetyRoutingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +115,30 @@ pub struct ShadowEvalConfig {
     pub include_bodies: bool,
     #[serde(default = "default_shadow_eval_max_body_chars")]
     pub max_body_chars: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SafetyRoutingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_safety_unsafe_action")]
+    pub unsafe_action: SafetyRoutingAction,
+    #[serde(default)]
+    pub sensitive_action: SafetyRoutingAction,
+    #[serde(default)]
+    pub force_model: Option<String>,
+    #[serde(default = "default_safety_redaction_replacement")]
+    pub redaction_replacement: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SafetyRoutingAction {
+    #[default]
+    Allow,
+    Reject,
+    Redact,
+    ForceRoute,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -355,6 +381,18 @@ impl Default for ShadowEvalConfig {
     }
 }
 
+impl Default for SafetyRoutingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            unsafe_action: default_safety_unsafe_action(),
+            sensitive_action: SafetyRoutingAction::Allow,
+            force_model: None,
+            redaction_replacement: default_safety_redaction_replacement(),
+        }
+    }
+}
+
 impl Default for ProviderHealthSamplerConfig {
     fn default() -> Self {
         Self {
@@ -419,6 +457,14 @@ fn default_shadow_eval_sample_rate() -> f32 {
 
 fn default_shadow_eval_max_body_chars() -> usize {
     4_096
+}
+
+fn default_safety_unsafe_action() -> SafetyRoutingAction {
+    SafetyRoutingAction::Reject
+}
+
+fn default_safety_redaction_replacement() -> String {
+    "[redacted]".to_string()
 }
 
 fn default_budget_lock_timeout_ms() -> u64 {
@@ -521,6 +567,7 @@ impl RouterConfig {
         self.runtime.validate()?;
         self.cache.validate()?;
         self.shadow_eval.validate()?;
+        self.safety.validate(self)?;
         Ok(())
     }
 
@@ -816,6 +863,32 @@ impl ShadowEvalConfig {
     }
 }
 
+impl SafetyRoutingConfig {
+    fn validate(&self, config: &RouterConfig) -> Result<()> {
+        anyhow::ensure!(
+            !self.redaction_replacement.trim().is_empty(),
+            "safety.redaction_replacement cannot be empty"
+        );
+        if self.enabled
+            && matches!(
+                (self.unsafe_action, self.sensitive_action),
+                (SafetyRoutingAction::ForceRoute, _) | (_, SafetyRoutingAction::ForceRoute)
+            )
+        {
+            let force_model = self.force_model.as_deref().unwrap_or_default().trim();
+            anyhow::ensure!(
+                !force_model.is_empty(),
+                "safety.force_model is required when a safety action is force_route"
+            );
+            anyhow::ensure!(
+                config.find_model(force_model).is_some(),
+                "safety.force_model {force_model} does not match a configured model id or alias"
+            );
+        }
+        Ok(())
+    }
+}
+
 impl BudgetConfig {
     fn validate(&self) -> Result<()> {
         if let Some(value) = self.max_chat_requests {
@@ -939,7 +1012,8 @@ impl ScoringConfig {
 mod tests {
     use super::{
         AuthConfig, BudgetConfig, ClassifierConfig, ProviderHealthSamplerConfig, RouterConfig,
-        RuntimeConfig, ScoringConfig, SemanticCacheConfig, ShadowEvalConfig, TelemetryConfig,
+        RuntimeConfig, SafetyRoutingAction, SafetyRoutingConfig, ScoringConfig,
+        SemanticCacheConfig, ShadowEvalConfig, TelemetryConfig,
     };
     use crate::types::{ModelConfig, ProviderConfig, ProviderKind, RouterPolicy};
 
@@ -988,6 +1062,7 @@ mod tests {
             runtime: RuntimeConfig::default(),
             cache: Default::default(),
             shadow_eval: Default::default(),
+            safety: Default::default(),
         }
     }
 
@@ -1164,5 +1239,20 @@ mod tests {
             .validate()
             .expect_err("enabled shadow eval requires output path");
         assert!(error.to_string().contains("shadow_eval.output_path"));
+    }
+
+    #[test]
+    fn rejects_safety_force_route_without_force_model() {
+        let mut config = valid_config();
+        config.safety = SafetyRoutingConfig {
+            enabled: true,
+            unsafe_action: SafetyRoutingAction::ForceRoute,
+            sensitive_action: SafetyRoutingAction::Allow,
+            force_model: None,
+            redaction_replacement: "[redacted]".to_string(),
+        };
+
+        let error = config.validate().expect_err("safety force model required");
+        assert!(error.to_string().contains("safety.force_model"));
     }
 }

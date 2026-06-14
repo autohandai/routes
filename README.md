@@ -139,13 +139,26 @@ shadow_eval:
 
 For sampled automatic non-stream chat and Responses requests, the router returns the selected model response normally, then sends the same prompt to the next scored candidate in the background. The JSONL artifact records selected/shadow model IDs, providers, HTTP status, latency, body sizes, and optional truncated bodies for later judge/eval workflows. Bodies are redacted by default.
 
+To enforce safety routing on automatic chat and Responses requests:
+
+```yaml
+safety:
+  enabled: true
+  unsafe_action: reject
+  sensitive_action: redact
+  force_model: safer-local-model
+  redaction_replacement: "[redacted]"
+```
+
+Actions are `allow`, `reject`, `redact`, or `force_route`. `force_route` requires `force_model` to reference a configured model id or alias. Unsafe prompts include jailbreak/prompt-injection and abuse markers; sensitive prompts include PII, secrets, credentials, and regulated-workflow markers. Safety actions are exposed through JSON and Prometheus counters.
+
 Use `kind: ollama` for Ollama's OpenAI-compatible surface. Use `kind: ollama_native` with `chat_path: /api/chat` to transform native Ollama chat responses into OpenAI-compatible `/v1/chat/completions` responses for local open-weight models. Use `kind: llama_cpp` for llama.cpp's OpenAI-compatible server and `kind: llama_cpp_native` with `chat_path: /completion` for the native completion server. Use `kind: vllm` for vLLM's OpenAI-compatible server; vLLM currently belongs on the OpenAI-compatible adapter path, with explicit provider identity for health, metrics, and conformance artifacts.
 
 `serve` handles Ctrl-C by stopping new accepts and giving in-flight work `runtime.graceful_shutdown_timeout_ms` to finish before the server future is forced to stop.
 
 For `auto` and `router-*` chat, responses, embeddings, image-generation, speech, transcription, or translation requests, the router also fails over across the scored candidate list. Explicit model requests stay strict and do not silently switch models.
 
-`/metrics` includes request counters, selected model/provider counters, semantic cache hit/miss counters, shadow-eval sample/success/error counters, LLM-judge success/fallback counters, parsed upstream token usage for non-stream responses, and estimated cost from configured per-million token prices. `/metrics/prometheus` exposes the same snapshot in Prometheus text exposition format for fleet scraping. Streaming responses are passed through without buffering, so token usage is only counted when the upstream sends it in a buffered JSON response.
+`/metrics` includes request counters, selected model/provider counters, semantic cache hit/miss counters, shadow-eval sample/success/error counters, safety reject/redact/force-route counters, LLM-judge success/fallback counters, parsed upstream token usage for non-stream responses, and estimated cost from configured per-million token prices. `/metrics/prometheus` exposes the same snapshot in Prometheus text exposition format for fleet scraping. Streaming responses are passed through without buffering, so token usage is only counted when the upstream sends it in a buffered JSON response.
 
 ## Load Testing
 

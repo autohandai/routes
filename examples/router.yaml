@@ -51,6 +51,15 @@ shadow_eval:
   include_bodies: false
   max_body_chars: 4096
 
+safety:
+  # Opt-in automatic safety routing for auto/router-* chat and Responses requests.
+  enabled: false
+  unsafe_action: reject
+  sensitive_action: allow
+  # Required when either action is force_route.
+  force_model:
+  redaction_replacement: "[redacted]"
+
 classifier:
   confidence_threshold: 0.62
   easy_threshold: 0.28

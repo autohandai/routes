@@ -179,6 +179,7 @@ mod tests {
             runtime: RuntimeConfig::default(),
             cache: Default::default(),
             shadow_eval: Default::default(),
+            safety: Default::default(),
         }
     }
 }

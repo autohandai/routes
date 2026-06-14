@@ -9,6 +9,7 @@ use crate::{
         SemanticCache, SemanticCacheEndpoint, SemanticCacheHit, SemanticCacheRequest,
         SemanticCacheWrite,
     },
+    shadow_eval::{ShadowEvalEndpoint, ShadowEvalLogger, ShadowEvalRecordInput},
     telemetry::DecisionLogger,
     tokens::estimate_tokens,
     types::{
@@ -28,6 +29,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use bytes::Bytes;
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -44,6 +46,22 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{info, warn};
 
 #[derive(Clone)]
+enum ShadowEvalDispatch {
+    Chat {
+        source: String,
+        input: String,
+        request: OpenAiChatRequest,
+        shadow_model: ModelConfig,
+    },
+    Responses {
+        source: String,
+        input: String,
+        request: OpenAiResponsesRequest,
+        shadow_model: ModelConfig,
+    },
+}
+
+#[derive(Clone)]
 pub struct AppState {
     pub engine: RoutingEngine<SmartClassifier>,
     pub providers: ProviderClient,
@@ -51,6 +69,7 @@ pub struct AppState {
     pub accounting: BudgetAccounting,
     pub telemetry: DecisionLogger,
     pub semantic_cache: SemanticCache,
+    pub shadow_eval: ShadowEvalLogger,
 }
 
 #[derive(Default)]
@@ -72,6 +91,9 @@ pub struct RouterMetrics {
     budget_rejections: AtomicU64,
     semantic_cache_hits: AtomicU64,
     semantic_cache_misses: AtomicU64,
+    shadow_eval_samples: AtomicU64,
+    shadow_eval_successes: AtomicU64,
+    shadow_eval_errors: AtomicU64,
     selected_models: AtomicU64,
     prompt_tokens: AtomicU64,
     completion_tokens: AtomicU64,
@@ -100,6 +122,9 @@ struct MetricsSnapshot {
     budget_rejections: u64,
     semantic_cache_hits: u64,
     semantic_cache_misses: u64,
+    shadow_eval_samples: u64,
+    shadow_eval_successes: u64,
+    shadow_eval_errors: u64,
     selected_models: u64,
     prompt_tokens: u64,
     completion_tokens: u64,
@@ -172,6 +197,9 @@ impl RouterMetrics {
             budget_rejections: self.budget_rejections.load(Ordering::Relaxed),
             semantic_cache_hits: self.semantic_cache_hits.load(Ordering::Relaxed),
             semantic_cache_misses: self.semantic_cache_misses.load(Ordering::Relaxed),
+            shadow_eval_samples: self.shadow_eval_samples.load(Ordering::Relaxed),
+            shadow_eval_successes: self.shadow_eval_successes.load(Ordering::Relaxed),
+            shadow_eval_errors: self.shadow_eval_errors.load(Ordering::Relaxed),
             selected_models: self.selected_models.load(Ordering::Relaxed),
             prompt_tokens: self.prompt_tokens.load(Ordering::Relaxed),
             completion_tokens: self.completion_tokens.load(Ordering::Relaxed),
@@ -706,6 +734,24 @@ fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     push_labeled_metric(
         &mut output,
         "autohand_router_events_total",
+        &[("event", "shadow_eval_samples")],
+        snapshot.shadow_eval_samples,
+    );
+    push_labeled_metric(
+        &mut output,
+        "autohand_router_events_total",
+        &[("event", "shadow_eval_successes")],
+        snapshot.shadow_eval_successes,
+    );
+    push_labeled_metric(
+        &mut output,
+        "autohand_router_events_total",
+        &[("event", "shadow_eval_errors")],
+        snapshot.shadow_eval_errors,
+    );
+    push_labeled_metric(
+        &mut output,
+        "autohand_router_events_total",
         &[("event", "selected_models")],
         snapshot.selected_models,
     );
@@ -1130,82 +1176,98 @@ async fn chat_completions(
     let requested_model = request.model.clone();
     let config = state.engine.config();
     let automatic = requested_model.starts_with("router-") || requested_model == "auto";
-    let (models, estimated_input_tokens, requested_output_tokens, semantic_cache_request) =
-        if automatic {
-            let policy = parse_router_model_policy(&requested_model);
-            let route_input = prompt.clone();
-            let required_capabilities = request.required_capabilities();
-            let route = state
-                .engine
-                .route(MultimodelRequest {
-                    input: route_input.clone(),
-                    allowed_models: vec![],
-                    allowed_providers: vec![],
-                    required_capabilities,
-                    policy,
-                    default_model: None,
-                    max_output_tokens: request.max_output_tokens(),
-                })
-                .await;
-            state.metrics.route_requests.fetch_add(1, Ordering::Relaxed);
-            if route.fallback {
-                state
-                    .metrics
-                    .fallback_routes
-                    .fetch_add(1, Ordering::Relaxed);
-            }
+    let (
+        models,
+        estimated_input_tokens,
+        requested_output_tokens,
+        semantic_cache_request,
+        shadow_eval_dispatch,
+    ) = if automatic {
+        let policy = parse_router_model_policy(&requested_model);
+        let route_input = prompt.clone();
+        let required_capabilities = request.required_capabilities();
+        let route = state
+            .engine
+            .route(MultimodelRequest {
+                input: route_input.clone(),
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities,
+                policy,
+                default_model: None,
+                max_output_tokens: request.max_output_tokens(),
+            })
+            .await;
+        state.metrics.route_requests.fetch_add(1, Ordering::Relaxed);
+        if route.fallback {
             state
-                .telemetry
-                .record_route("chat.auto", &route_input, &route)
-                .await;
-            let Some(model) = config.find_model(&route.model).cloned() else {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(ProviderClient::error_json(format!(
-                        "routed model {} is not configured",
-                        route.model
-                    ))),
-                )
-                    .into_response();
-            };
-            let mut models = vec![model];
-            for candidate in route.candidates {
-                if models.iter().any(|model| model.id == candidate.model) {
-                    continue;
-                }
-                if let Some(model) = config.find_model(&candidate.model).cloned() {
-                    models.push(model);
-                }
-            }
-            (
-                models,
-                route.estimated_input_tokens,
-                route.requested_output_tokens,
-                semantic_cache_request_for_route(
-                    &config,
-                    SemanticCacheEndpoint::Chat,
-                    route.cacheability.as_ref(),
-                    request.stream(),
-                    route_input,
-                ),
+                .metrics
+                .fallback_routes
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        state
+            .telemetry
+            .record_route("chat.auto", &route_input, &route)
+            .await;
+        let Some(model) = config.find_model(&route.model).cloned() else {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(ProviderClient::error_json(format!(
+                    "routed model {} is not configured",
+                    route.model
+                ))),
             )
-        } else {
-            let Some(model) = config.find_model(&requested_model).cloned() else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ProviderClient::error_json(format!(
-                        "model {requested_model} is not configured"
-                    ))),
-                )
-                    .into_response();
-            };
-            (
-                vec![model],
-                estimate_tokens(&prompt),
-                request.max_output_tokens().unwrap_or(1024),
-                None,
-            )
+                .into_response();
         };
+        let mut models = vec![model];
+        for candidate in route.candidates {
+            if models.iter().any(|model| model.id == candidate.model) {
+                continue;
+            }
+            if let Some(model) = config.find_model(&candidate.model).cloned() {
+                models.push(model);
+            }
+        }
+        let shadow_eval_dispatch = shadow_eval_request_for_chat(
+            &state,
+            &config,
+            "chat.auto",
+            &route_input,
+            request.clone(),
+            request.stream(),
+            &models,
+        );
+        (
+            models,
+            route.estimated_input_tokens,
+            route.requested_output_tokens,
+            semantic_cache_request_for_route(
+                &config,
+                SemanticCacheEndpoint::Chat,
+                route.cacheability.as_ref(),
+                request.stream(),
+                route_input,
+            ),
+            shadow_eval_dispatch,
+        )
+    } else {
+        let Some(model) = config.find_model(&requested_model).cloned() else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ProviderClient::error_json(format!(
+                    "model {requested_model} is not configured"
+                ))),
+            )
+                .into_response();
+        };
+        (
+            vec![model],
+            estimate_tokens(&prompt),
+            request.max_output_tokens().unwrap_or(1024),
+            None,
+            None,
+        )
+    };
 
     dispatch_chat(
         state,
@@ -1216,6 +1278,7 @@ async fn chat_completions(
         estimated_input_tokens,
         requested_output_tokens,
         semantic_cache_request,
+        shadow_eval_dispatch,
     )
     .await
 }
@@ -1228,82 +1291,98 @@ async fn responses(
     let requested_model = request.model.clone();
     let config = state.engine.config();
     let automatic = requested_model.starts_with("router-") || requested_model == "auto";
-    let (models, estimated_input_tokens, requested_output_tokens, semantic_cache_request) =
-        if automatic {
-            let policy = parse_router_model_policy(&requested_model);
-            let route_input = prompt.clone();
-            let required_capabilities = request.required_capabilities();
-            let route = state
-                .engine
-                .route(MultimodelRequest {
-                    input: route_input.clone(),
-                    allowed_models: vec![],
-                    allowed_providers: vec![],
-                    required_capabilities,
-                    policy,
-                    default_model: None,
-                    max_output_tokens: request.max_output_tokens(),
-                })
-                .await;
-            state.metrics.route_requests.fetch_add(1, Ordering::Relaxed);
-            if route.fallback {
-                state
-                    .metrics
-                    .fallback_routes
-                    .fetch_add(1, Ordering::Relaxed);
-            }
+    let (
+        models,
+        estimated_input_tokens,
+        requested_output_tokens,
+        semantic_cache_request,
+        shadow_eval_dispatch,
+    ) = if automatic {
+        let policy = parse_router_model_policy(&requested_model);
+        let route_input = prompt.clone();
+        let required_capabilities = request.required_capabilities();
+        let route = state
+            .engine
+            .route(MultimodelRequest {
+                input: route_input.clone(),
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities,
+                policy,
+                default_model: None,
+                max_output_tokens: request.max_output_tokens(),
+            })
+            .await;
+        state.metrics.route_requests.fetch_add(1, Ordering::Relaxed);
+        if route.fallback {
             state
-                .telemetry
-                .record_route("responses.auto", &route_input, &route)
-                .await;
-            let Some(model) = config.find_model(&route.model).cloned() else {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(ProviderClient::error_json(format!(
-                        "routed model {} is not configured",
-                        route.model
-                    ))),
-                )
-                    .into_response();
-            };
-            let mut models = vec![model];
-            for candidate in route.candidates {
-                if models.iter().any(|model| model.id == candidate.model) {
-                    continue;
-                }
-                if let Some(model) = config.find_model(&candidate.model).cloned() {
-                    models.push(model);
-                }
-            }
-            (
-                models,
-                route.estimated_input_tokens,
-                route.requested_output_tokens,
-                semantic_cache_request_for_route(
-                    &config,
-                    SemanticCacheEndpoint::Responses,
-                    route.cacheability.as_ref(),
-                    request.stream(),
-                    route_input,
-                ),
+                .metrics
+                .fallback_routes
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        state
+            .telemetry
+            .record_route("responses.auto", &route_input, &route)
+            .await;
+        let Some(model) = config.find_model(&route.model).cloned() else {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(ProviderClient::error_json(format!(
+                    "routed model {} is not configured",
+                    route.model
+                ))),
             )
-        } else {
-            let Some(model) = config.find_model(&requested_model).cloned() else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ProviderClient::error_json(format!(
-                        "model {requested_model} is not configured"
-                    ))),
-                )
-                    .into_response();
-            };
-            (
-                vec![model],
-                estimate_tokens(&prompt),
-                request.max_output_tokens().unwrap_or(1024),
-                None,
-            )
+                .into_response();
         };
+        let mut models = vec![model];
+        for candidate in route.candidates {
+            if models.iter().any(|model| model.id == candidate.model) {
+                continue;
+            }
+            if let Some(model) = config.find_model(&candidate.model).cloned() {
+                models.push(model);
+            }
+        }
+        let shadow_eval_dispatch = shadow_eval_request_for_responses(
+            &state,
+            &config,
+            "responses.auto",
+            &route_input,
+            request.clone(),
+            request.stream(),
+            &models,
+        );
+        (
+            models,
+            route.estimated_input_tokens,
+            route.requested_output_tokens,
+            semantic_cache_request_for_route(
+                &config,
+                SemanticCacheEndpoint::Responses,
+                route.cacheability.as_ref(),
+                request.stream(),
+                route_input,
+            ),
+            shadow_eval_dispatch,
+        )
+    } else {
+        let Some(model) = config.find_model(&requested_model).cloned() else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ProviderClient::error_json(format!(
+                    "model {requested_model} is not configured"
+                ))),
+            )
+                .into_response();
+        };
+        (
+            vec![model],
+            estimate_tokens(&prompt),
+            request.max_output_tokens().unwrap_or(1024),
+            None,
+            None,
+        )
+    };
 
     dispatch_responses(
         state,
@@ -1314,6 +1393,7 @@ async fn responses(
         estimated_input_tokens,
         requested_output_tokens,
         semantic_cache_request,
+        shadow_eval_dispatch,
     )
     .await
 }
@@ -1773,6 +1853,70 @@ fn semantic_cache_request_for_route(
     Some(SemanticCacheRequest { endpoint, prompt })
 }
 
+fn shadow_eval_request_for_chat(
+    state: &AppState,
+    config: &RouterConfig,
+    source: &str,
+    input: &str,
+    request: OpenAiChatRequest,
+    stream: bool,
+    models: &[ModelConfig],
+) -> Option<ShadowEvalDispatch> {
+    if stream || !state.shadow_eval.should_sample(source, input) {
+        return None;
+    }
+    let shadow_model = models.get(1)?.clone();
+    if !provider_supports_chat(config, &shadow_model.provider) {
+        return None;
+    }
+    Some(ShadowEvalDispatch::Chat {
+        source: source.to_string(),
+        input: input.to_string(),
+        request,
+        shadow_model,
+    })
+}
+
+fn shadow_eval_request_for_responses(
+    state: &AppState,
+    config: &RouterConfig,
+    source: &str,
+    input: &str,
+    request: OpenAiResponsesRequest,
+    stream: bool,
+    models: &[ModelConfig],
+) -> Option<ShadowEvalDispatch> {
+    if stream || !state.shadow_eval.should_sample(source, input) {
+        return None;
+    }
+    let shadow_model = models.get(1)?.clone();
+    if !provider_supports_responses(config, &shadow_model.provider) {
+        return None;
+    }
+    Some(ShadowEvalDispatch::Responses {
+        source: source.to_string(),
+        input: input.to_string(),
+        request,
+        shadow_model,
+    })
+}
+
+fn provider_supports_chat(config: &RouterConfig, provider_name: &str) -> bool {
+    config
+        .providers
+        .iter()
+        .any(|provider| provider.name == provider_name)
+}
+
+fn provider_supports_responses(config: &RouterConfig, provider_name: &str) -> bool {
+    config
+        .providers
+        .iter()
+        .find(|provider| provider.name == provider_name)
+        .and_then(|provider| provider.responses_path.as_ref())
+        .is_some()
+}
+
 async fn dispatch_chat(
     state: Arc<AppState>,
     config: Arc<RouterConfig>,
@@ -1782,6 +1926,7 @@ async fn dispatch_chat(
     estimated_input_tokens: u32,
     requested_output_tokens: u32,
     semantic_cache_request: Option<SemanticCacheRequest>,
+    shadow_eval_dispatch: Option<ShadowEvalDispatch>,
 ) -> Response {
     let Some(first_model) = models.first() else {
         state
@@ -1848,6 +1993,7 @@ async fn dispatch_chat(
     let mut failovers = 0_u32;
 
     for (index, model) in models.iter().enumerate() {
+        let started = Instant::now();
         match state
             .providers
             .send_chat(&config, model, request.clone())
@@ -1866,6 +2012,7 @@ async fn dispatch_chat(
                 continue;
             }
             Ok(response) => {
+                let selected_latency_ms = elapsed_millis_u32(started);
                 if failovers > 0 {
                     state
                         .metrics
@@ -1874,19 +2021,21 @@ async fn dispatch_chat(
                 }
                 state.metrics.record_selection(model);
                 return upstream_response(
-                    &state,
+                    state.clone(),
                     response,
                     model,
                     request.stream(),
                     failovers,
                     estimated_input_tokens,
                     requested_output_tokens,
+                    selected_latency_ms,
                     semantic_cache_request
                         .as_ref()
                         .map(|request| SemanticCacheWrite {
                             endpoint: request.endpoint,
                             prompt: request.prompt.clone(),
                         }),
+                    shadow_eval_dispatch.clone(),
                 )
                 .await;
             }
@@ -1934,6 +2083,7 @@ async fn dispatch_responses(
     estimated_input_tokens: u32,
     requested_output_tokens: u32,
     semantic_cache_request: Option<SemanticCacheRequest>,
+    shadow_eval_dispatch: Option<ShadowEvalDispatch>,
 ) -> Response {
     let Some(first_model) = models.first() else {
         state
@@ -2003,6 +2153,7 @@ async fn dispatch_responses(
     let mut failovers = 0_u32;
 
     for (index, model) in models.iter().enumerate() {
+        let started = Instant::now();
         match state
             .providers
             .send_responses(&config, model, request.clone())
@@ -2021,6 +2172,7 @@ async fn dispatch_responses(
                 continue;
             }
             Ok(response) => {
+                let selected_latency_ms = elapsed_millis_u32(started);
                 if failovers > 0 {
                     state
                         .metrics
@@ -2029,19 +2181,21 @@ async fn dispatch_responses(
                 }
                 state.metrics.record_selection(model);
                 return upstream_response(
-                    &state,
+                    state.clone(),
                     response,
                     model,
                     request.stream(),
                     failovers,
                     estimated_input_tokens,
                     requested_output_tokens,
+                    selected_latency_ms,
                     semantic_cache_request
                         .as_ref()
                         .map(|request| SemanticCacheWrite {
                             endpoint: request.endpoint,
                             prompt: request.prompt.clone(),
                         }),
+                    shadow_eval_dispatch.clone(),
                 )
                 .await;
             }
@@ -2152,13 +2306,15 @@ async fn dispatch_embeddings(
                 }
                 state.metrics.record_selection(model);
                 return upstream_response(
-                    &state,
+                    state.clone(),
                     response,
                     model,
                     false,
                     failovers,
                     estimated_input_tokens,
                     0,
+                    0,
+                    None,
                     None,
                 )
                 .await;
@@ -2270,13 +2426,15 @@ async fn dispatch_images(
                 }
                 state.metrics.record_selection(model);
                 return upstream_response(
-                    &state,
+                    state.clone(),
                     response,
                     model,
                     false,
                     failovers,
                     estimated_input_tokens,
                     0,
+                    0,
+                    None,
                     None,
                 )
                 .await;
@@ -2388,13 +2546,15 @@ async fn dispatch_speech(
                 }
                 state.metrics.record_selection(model);
                 return upstream_response(
-                    &state,
+                    state.clone(),
                     response,
                     model,
                     false,
                     failovers,
                     estimated_input_tokens,
                     0,
+                    0,
+                    None,
                     None,
                 )
                 .await;
@@ -2528,13 +2688,15 @@ async fn dispatch_audio_multipart(
                 }
                 state.metrics.record_selection(model);
                 return upstream_response(
-                    &state,
+                    state.clone(),
                     response,
                     model,
                     false,
                     failovers,
                     estimated_input_tokens,
                     0,
+                    0,
+                    None,
                     None,
                 )
                 .await;
@@ -2653,14 +2815,16 @@ fn reserve_budget(
 }
 
 async fn upstream_response(
-    state: &AppState,
+    state: Arc<AppState>,
     upstream: ProviderResponse,
     model: &ModelConfig,
     stream: bool,
     failovers: u32,
     estimated_input_tokens: u32,
     requested_output_tokens: u32,
+    selected_latency_ms: u32,
     semantic_cache_write: Option<SemanticCacheWrite>,
+    shadow_eval_dispatch: Option<ShadowEvalDispatch>,
 ) -> Response {
     let status = upstream.status();
     let headers = upstream.headers().clone();
@@ -2694,6 +2858,16 @@ async fn upstream_response(
                             status.as_u16(),
                             content_type.clone(),
                             bytes.clone(),
+                        );
+                    }
+                    if let Some(dispatch) = shadow_eval_dispatch {
+                        spawn_shadow_eval(
+                            state.clone(),
+                            model.clone(),
+                            status.as_u16(),
+                            selected_latency_ms,
+                            bytes.clone(),
+                            dispatch,
                         );
                     }
                 }
@@ -2755,6 +2929,127 @@ async fn upstream_response(
             .insert("x-autohand-router-cache", value);
     }
     response
+}
+
+fn spawn_shadow_eval(
+    state: Arc<AppState>,
+    selected_model: ModelConfig,
+    selected_status: u16,
+    selected_latency_ms: u32,
+    selected_body: Bytes,
+    dispatch: ShadowEvalDispatch,
+) {
+    tokio::spawn(async move {
+        let config = state.engine.config();
+        let selected_provider = selected_model.provider.clone();
+        let selected_model_id = selected_model.id.clone();
+        let (source, input, endpoint, shadow_model, shadow_result, shadow_latency_ms) =
+            match dispatch {
+                ShadowEvalDispatch::Chat {
+                    source,
+                    input,
+                    request,
+                    shadow_model,
+                } => {
+                    if shadow_model.id == selected_model_id {
+                        return;
+                    }
+                    state
+                        .metrics
+                        .shadow_eval_samples
+                        .fetch_add(1, Ordering::Relaxed);
+                    let started = Instant::now();
+                    let result = state
+                        .providers
+                        .send_chat(&config, &shadow_model, request)
+                        .await;
+                    (
+                        source,
+                        input,
+                        ShadowEvalEndpoint::Chat,
+                        shadow_model,
+                        result,
+                        elapsed_millis_u32(started),
+                    )
+                }
+                ShadowEvalDispatch::Responses {
+                    source,
+                    input,
+                    request,
+                    shadow_model,
+                } => {
+                    if shadow_model.id == selected_model_id {
+                        return;
+                    }
+                    state
+                        .metrics
+                        .shadow_eval_samples
+                        .fetch_add(1, Ordering::Relaxed);
+                    let started = Instant::now();
+                    let result = state
+                        .providers
+                        .send_responses(&config, &shadow_model, request)
+                        .await;
+                    (
+                        source,
+                        input,
+                        ShadowEvalEndpoint::Responses,
+                        shadow_model,
+                        result,
+                        elapsed_millis_u32(started),
+                    )
+                }
+            };
+
+        let (shadow_status, shadow_body, shadow_error) = match shadow_result {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                match response.bytes().await {
+                    Ok(body) => {
+                        state
+                            .metrics
+                            .shadow_eval_successes
+                            .fetch_add(1, Ordering::Relaxed);
+                        (Some(status), Some(body), None)
+                    }
+                    Err(error) => {
+                        state
+                            .metrics
+                            .shadow_eval_errors
+                            .fetch_add(1, Ordering::Relaxed);
+                        (Some(status), None, Some(error.to_string()))
+                    }
+                }
+            }
+            Err(error) => {
+                state
+                    .metrics
+                    .shadow_eval_errors
+                    .fetch_add(1, Ordering::Relaxed);
+                (None, None, Some(error.to_string()))
+            }
+        };
+
+        state
+            .shadow_eval
+            .record(ShadowEvalRecordInput {
+                source: &source,
+                endpoint,
+                input: &input,
+                selected_model: &selected_model_id,
+                selected_provider: &selected_provider,
+                shadow_model: &shadow_model.id,
+                shadow_provider: &shadow_model.provider,
+                selected_status,
+                shadow_status,
+                selected_latency_ms,
+                shadow_latency_ms: Some(shadow_latency_ms),
+                selected_body: &selected_body,
+                shadow_body: shadow_body.as_deref(),
+                shadow_error,
+            })
+            .await;
+    });
 }
 
 fn cached_upstream_response(
@@ -2821,6 +3116,10 @@ fn parse_router_model_policy(model: &str) -> RouterPolicy {
     }
 }
 
+fn elapsed_millis_u32(started: Instant) -> u32 {
+    started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2832,7 +3131,7 @@ mod tests {
         config::{
             AuthConfig, BudgetAccountingBackend, BudgetAccountingConfig, BudgetConfig,
             ClassifierConfig, RouterConfig, RuntimeConfig, ScoringConfig, SemanticCacheConfig,
-            TelemetryConfig,
+            ShadowEvalConfig, TelemetryConfig,
         },
         provider::ProviderClient,
         router::RoutingEngine,
@@ -2852,9 +3151,9 @@ mod tests {
             Arc,
             atomic::{AtomicU64, Ordering as AtomicOrdering},
         },
-        time::SystemTime,
+        time::{Duration, SystemTime},
     };
-    use tokio::net::TcpListener;
+    use tokio::{net::TcpListener, time::sleep};
 
     #[test]
     fn constant_time_equality_checks_full_input() {
@@ -3116,6 +3415,71 @@ mod tests {
         assert_eq!(metrics["semantic_cache_misses"], 1);
         assert_eq!(metrics["semantic_cache_hits"], 1);
         assert_eq!(metrics["chat_requests"], 2);
+    }
+
+    #[tokio::test]
+    async fn automatic_chat_writes_pairwise_shadow_eval_record() {
+        let (upstream_url, calls) = spawn_echo_chat_upstream().await;
+        let shadow_path = std::env::temp_dir().join(format!(
+            "autohand-router-shadow-eval-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let config = shadow_eval_config(upstream_url, shadow_path.clone());
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&OpenAiChatRequest {
+                model: "auto".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String(
+                        "Design a production architecture with routing tradeoffs".to_string(),
+                    ),
+                }],
+                extra: Default::default(),
+            })
+            .send()
+            .await
+            .unwrap();
+
+        assert!(response.status().is_success());
+        assert_eq!(
+            response
+                .headers()
+                .get("x-autohand-router-model")
+                .and_then(|value| value.to_str().ok()),
+            Some("primary-shadow")
+        );
+
+        for _ in 0..40 {
+            if calls.load(AtomicOrdering::Relaxed) >= 2 && shadow_path.exists() {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 2);
+        let raw = std::fs::read_to_string(&shadow_path).unwrap();
+        assert!(raw.contains("\"selected_model\":\"primary-shadow\""));
+        assert!(raw.contains("\"shadow_model\":\"secondary-shadow\""));
+        assert!(raw.contains("\"shadow_status\":200"));
+        assert!(!raw.contains("ok from primary-shadow"));
+        assert!(!raw.contains("ok from secondary-shadow"));
+
+        let metrics = client
+            .get(format!("{router_url}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(metrics["shadow_eval_samples"], 1);
+        assert_eq!(metrics["shadow_eval_successes"], 1);
+        assert_eq!(metrics["shadow_eval_errors"], 0);
+        let _ = std::fs::remove_file(shadow_path);
     }
 
     #[test]
@@ -3450,6 +3814,52 @@ mod tests {
         (format!("http://{addr}"), calls)
     }
 
+    async fn spawn_echo_chat_upstream() -> (String, Arc<AtomicU64>) {
+        async fn chat(
+            axum::extract::State(calls): axum::extract::State<Arc<AtomicU64>>,
+            Json(request): Json<Value>,
+        ) -> axum::response::Response {
+            calls.fetch_add(1, AtomicOrdering::Relaxed);
+            let model = request["model"]
+                .as_str()
+                .unwrap_or("unknown-model")
+                .to_string();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": "chatcmpl-shadow-test",
+                    "object": "chat.completion",
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": format!("ok from {model}")
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 2,
+                        "total_tokens": 12
+                    }
+                })),
+            )
+                .into_response()
+        }
+
+        let calls = Arc::new(AtomicU64::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(chat))
+            .with_state(calls.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), calls)
+    }
+
     async fn spawn_speech_upstream() -> String {
         async fn speech(Json(request): Json<Value>) -> Json<Value> {
             Json(serde_json::json!({
@@ -3524,6 +3934,7 @@ mod tests {
                 .unwrap(),
             telemetry: DecisionLogger::new(&config.telemetry),
             semantic_cache: Default::default(),
+            shadow_eval: crate::shadow_eval::ShadowEvalLogger::new(&config.shadow_eval),
         };
         tokio::spawn(async move {
             axum::serve(listener, app(state)).await.unwrap();
@@ -3611,6 +4022,7 @@ mod tests {
             telemetry: TelemetryConfig::default(),
             runtime: RuntimeConfig::default(),
             cache: Default::default(),
+            shadow_eval: Default::default(),
         }
     }
 
@@ -3661,6 +4073,7 @@ mod tests {
             telemetry: TelemetryConfig::default(),
             runtime: RuntimeConfig::default(),
             cache: Default::default(),
+            shadow_eval: Default::default(),
         }
     }
 
@@ -3715,6 +4128,79 @@ mod tests {
                     ttl_seconds: 60,
                     max_entries: 16,
                 },
+            },
+            shadow_eval: Default::default(),
+        }
+    }
+
+    fn shadow_eval_config(base_url: String, output_path: std::path::PathBuf) -> RouterConfig {
+        let mut scoring = ScoringConfig::default();
+        scoring
+            .model_priorities
+            .insert("primary-shadow".to_string(), 1.0);
+        RouterConfig {
+            bind: "127.0.0.1:0".to_string(),
+            default_model: "primary-shadow".to_string(),
+            policy: RouterPolicy::Balanced,
+            providers: vec![ProviderConfig {
+                name: "shadow-provider".to_string(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url,
+                api_key_env: None,
+                api_key: None,
+                chat_path: "/v1/chat/completions".to_string(),
+                responses_path: Some("/v1/responses".to_string()),
+                embeddings_path: Some("/v1/embeddings".to_string()),
+                images_path: Some("/v1/images/generations".to_string()),
+                speech_path: Some("/v1/audio/speech".to_string()),
+                audio_transcriptions_path: Some("/v1/audio/transcriptions".to_string()),
+                audio_translations_path: Some("/v1/audio/translations".to_string()),
+                health_path: None,
+                timeout_ms: 1_000,
+                retries: 0,
+                max_concurrency: None,
+                queue_timeout_ms: None,
+                extra_headers: Default::default(),
+            }],
+            models: vec![
+                ModelConfig {
+                    id: "primary-shadow".to_string(),
+                    provider: "shadow-provider".to_string(),
+                    aliases: vec![],
+                    capability: 0.85,
+                    cost_per_million_input: 1.0,
+                    cost_per_million_output: 1.0,
+                    domains: vec![DomainLabel::Design, DomainLabel::Coding],
+                    context_window: Some(4096),
+                    capabilities: Default::default(),
+                    local: true,
+                },
+                ModelConfig {
+                    id: "secondary-shadow".to_string(),
+                    provider: "shadow-provider".to_string(),
+                    aliases: vec![],
+                    capability: 0.72,
+                    cost_per_million_input: 1.0,
+                    cost_per_million_output: 1.0,
+                    domains: vec![DomainLabel::Design, DomainLabel::Coding],
+                    context_window: Some(4096),
+                    capabilities: Default::default(),
+                    local: true,
+                },
+            ],
+            classifier: ClassifierConfig::default(),
+            auth: AuthConfig::default(),
+            scoring,
+            budget: BudgetConfig::default(),
+            telemetry: TelemetryConfig::default(),
+            runtime: RuntimeConfig::default(),
+            cache: Default::default(),
+            shadow_eval: ShadowEvalConfig {
+                enabled: true,
+                sample_rate: 1.0,
+                output_path: Some(output_path.to_string_lossy().to_string()),
+                include_bodies: false,
+                max_body_chars: 256,
             },
         }
     }
@@ -3772,6 +4258,7 @@ mod tests {
             telemetry: TelemetryConfig::default(),
             runtime: RuntimeConfig::default(),
             cache: Default::default(),
+            shadow_eval: Default::default(),
         }
     }
 

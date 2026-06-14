@@ -32,6 +32,8 @@ pub struct RouterConfig {
     pub runtime: RuntimeConfig,
     #[serde(default)]
     pub cache: CacheConfig,
+    #[serde(default)]
+    pub shadow_eval: ShadowEvalConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +99,20 @@ pub struct TelemetryConfig {
 pub struct CacheConfig {
     #[serde(default)]
     pub semantic: SemanticCacheConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShadowEvalConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_shadow_eval_sample_rate")]
+    pub sample_rate: f32,
+    #[serde(default)]
+    pub output_path: Option<String>,
+    #[serde(default)]
+    pub include_bodies: bool,
+    #[serde(default = "default_shadow_eval_max_body_chars")]
+    pub max_body_chars: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,6 +286,18 @@ impl Default for SemanticCacheConfig {
     }
 }
 
+impl Default for ShadowEvalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sample_rate: default_shadow_eval_sample_rate(),
+            output_path: None,
+            include_bodies: false,
+            max_body_chars: default_shadow_eval_max_body_chars(),
+        }
+    }
+}
+
 impl Default for ProviderHealthSamplerConfig {
     fn default() -> Self {
         Self {
@@ -326,6 +354,14 @@ fn default_semantic_cache_ttl_seconds() -> u64 {
 
 fn default_semantic_cache_max_entries() -> usize {
     1_024
+}
+
+fn default_shadow_eval_sample_rate() -> f32 {
+    0.01
+}
+
+fn default_shadow_eval_max_body_chars() -> usize {
+    4_096
 }
 
 fn default_budget_lock_timeout_ms() -> u64 {
@@ -427,6 +463,7 @@ impl RouterConfig {
         self.telemetry.validate()?;
         self.runtime.validate()?;
         self.cache.validate()?;
+        self.shadow_eval.validate()?;
         Ok(())
     }
 
@@ -702,6 +739,26 @@ impl SemanticCacheConfig {
     }
 }
 
+impl ShadowEvalConfig {
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.sample_rate.is_finite() && (0.0..=1.0).contains(&self.sample_rate),
+            "shadow_eval.sample_rate must be between 0.0 and 1.0"
+        );
+        if self.enabled {
+            anyhow::ensure!(
+                self.output_path.as_deref().unwrap_or_default().trim().len() > 0,
+                "shadow_eval.output_path is required when shadow_eval.enabled is true"
+            );
+        }
+        anyhow::ensure!(
+            self.max_body_chars > 0,
+            "shadow_eval.max_body_chars must be greater than zero"
+        );
+        Ok(())
+    }
+}
+
 impl BudgetConfig {
     fn validate(&self) -> Result<()> {
         if let Some(value) = self.max_chat_requests {
@@ -807,7 +864,7 @@ impl ScoringConfig {
 mod tests {
     use super::{
         AuthConfig, BudgetConfig, ClassifierConfig, ProviderHealthSamplerConfig, RouterConfig,
-        RuntimeConfig, ScoringConfig, SemanticCacheConfig, TelemetryConfig,
+        RuntimeConfig, ScoringConfig, SemanticCacheConfig, ShadowEvalConfig, TelemetryConfig,
     };
     use crate::types::{ModelConfig, ProviderConfig, ProviderKind, RouterPolicy};
 
@@ -855,6 +912,7 @@ mod tests {
             telemetry: TelemetryConfig::default(),
             runtime: RuntimeConfig::default(),
             cache: Default::default(),
+            shadow_eval: Default::default(),
         }
     }
 
@@ -1014,5 +1072,22 @@ mod tests {
                 .to_string()
                 .contains("cache.semantic.similarity_threshold")
         );
+    }
+
+    #[test]
+    fn rejects_enabled_shadow_eval_without_output_path() {
+        let mut config = valid_config();
+        config.shadow_eval = ShadowEvalConfig {
+            enabled: true,
+            sample_rate: 1.0,
+            output_path: None,
+            include_bodies: false,
+            max_body_chars: 128,
+        };
+
+        let error = config
+            .validate()
+            .expect_err("enabled shadow eval requires output path");
+        assert!(error.to_string().contains("shadow_eval.output_path"));
     }
 }

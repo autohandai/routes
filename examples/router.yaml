@@ -43,6 +43,14 @@ cache:
     ttl_seconds: 3600
     max_entries: 1024
 
+shadow_eval:
+  # Opt-in pairwise shadow evaluation for sampled automatic non-stream chat/Responses.
+  enabled: false
+  sample_rate: 0.01
+  output_path: router.shadow-eval.jsonl
+  include_bodies: false
+  max_body_chars: 4096
+
 classifier:
   confidence_threshold: 0.62
   easy_threshold: 0.28

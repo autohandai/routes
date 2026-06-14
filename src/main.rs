@@ -14,6 +14,7 @@ use autohand_router::{
     provider::ProviderClient,
     router::RoutingEngine,
     server::{self, AppState},
+    shadow_eval::ShadowEvalLogger,
     telemetry::DecisionLogger,
     types::{ClassifyResponse, MultimodelRequest, RouterPolicy, SelectedClassifications},
 };
@@ -191,6 +192,7 @@ async fn main() -> Result<()> {
                 accounting: BudgetAccounting::from_budget_config(&config.budget)?,
                 telemetry: DecisionLogger::new(&config.telemetry),
                 semantic_cache: Default::default(),
+                shadow_eval: ShadowEvalLogger::new(&config.shadow_eval),
             };
             server::serve(state, &bind).await
         }

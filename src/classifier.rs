@@ -1262,6 +1262,7 @@ mod tests {
             telemetry: TelemetryConfig::default(),
             runtime: RuntimeConfig::default(),
             cache: Default::default(),
+            shadow_eval: Default::default(),
         }
     }
 }

@@ -125,13 +125,25 @@ cache:
 
 The cache uses deterministic local hashed embeddings and cosine similarity, so it does not require a separate embedding provider. It only stores successful buffered responses for prompts classified as medium/high cacheability, and it skips explicit model requests and streaming passthrough. Cache behavior is visible through `x-autohand-router-cache`, `x-autohand-router-cache-similarity`, JSON metrics, and Prometheus event counters.
 
+To collect pairwise routing data without changing foreground responses, enable shadow evaluation:
+
+```yaml
+shadow_eval:
+  enabled: true
+  sample_rate: 0.01
+  output_path: router.shadow-eval.jsonl
+  include_bodies: false
+```
+
+For sampled automatic non-stream chat and Responses requests, the router returns the selected model response normally, then sends the same prompt to the next scored candidate in the background. The JSONL artifact records selected/shadow model IDs, providers, HTTP status, latency, body sizes, and optional truncated bodies for later judge/eval workflows. Bodies are redacted by default.
+
 Use `kind: ollama` for Ollama's OpenAI-compatible surface. Use `kind: ollama_native` with `chat_path: /api/chat` to transform native Ollama chat responses into OpenAI-compatible `/v1/chat/completions` responses for local open-weight models. Use `kind: llama_cpp` for llama.cpp's OpenAI-compatible server and `kind: llama_cpp_native` with `chat_path: /completion` for the native completion server. Use `kind: vllm` for vLLM's OpenAI-compatible server; vLLM currently belongs on the OpenAI-compatible adapter path, with explicit provider identity for health, metrics, and conformance artifacts.
 
 `serve` handles Ctrl-C by stopping new accepts and giving in-flight work `runtime.graceful_shutdown_timeout_ms` to finish before the server future is forced to stop.
 
 For `auto` and `router-*` chat, responses, embeddings, image-generation, speech, transcription, or translation requests, the router also fails over across the scored candidate list. Explicit model requests stay strict and do not silently switch models.
 
-`/metrics` includes request counters, selected model/provider counters, semantic cache hit/miss counters, LLM-judge success/fallback counters, parsed upstream token usage for non-stream responses, and estimated cost from configured per-million token prices. `/metrics/prometheus` exposes the same snapshot in Prometheus text exposition format for fleet scraping. Streaming responses are passed through without buffering, so token usage is only counted when the upstream sends it in a buffered JSON response.
+`/metrics` includes request counters, selected model/provider counters, semantic cache hit/miss counters, shadow-eval sample/success/error counters, LLM-judge success/fallback counters, parsed upstream token usage for non-stream responses, and estimated cost from configured per-million token prices. `/metrics/prometheus` exposes the same snapshot in Prometheus text exposition format for fleet scraping. Streaming responses are passed through without buffering, so token usage is only counted when the upstream sends it in a buffered JSON response.
 
 ## Load Testing
 

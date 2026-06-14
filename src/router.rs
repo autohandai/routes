@@ -707,6 +707,7 @@ mod tests {
             telemetry: Default::default(),
             runtime: Default::default(),
             cache: Default::default(),
+            shadow_eval: Default::default(),
         };
         RoutingEngine::new(config, HeuristicClassifier::default())
     }
@@ -769,6 +770,7 @@ mod tests {
             telemetry: Default::default(),
             runtime: Default::default(),
             cache: Default::default(),
+            shadow_eval: Default::default(),
         };
         RoutingEngine::new(config, HeuristicClassifier::default())
     }
@@ -836,6 +838,7 @@ mod tests {
             telemetry: Default::default(),
             runtime: Default::default(),
             cache: Default::default(),
+            shadow_eval: Default::default(),
         };
         RoutingEngine::new(config, HeuristicClassifier::default())
     }
@@ -940,6 +943,7 @@ mod tests {
             telemetry: Default::default(),
             runtime: Default::default(),
             cache: Default::default(),
+            shadow_eval: Default::default(),
         };
         RoutingEngine::new(config, HeuristicClassifier::default())
     }

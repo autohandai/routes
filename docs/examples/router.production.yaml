@@ -47,6 +47,10 @@ sticky_routing:
   enabled: false
   ttl_seconds: 1800
   prefer_model: true
+  # Use backend: file with a shared path when running multiple local replicas.
+  backend: memory
+  file_path:
+  lock_timeout_ms: 1000
 
 classifier:
   backend: heuristic

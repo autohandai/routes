@@ -69,10 +69,14 @@ safety:
   redaction_replacement: "[redacted]"
 
 sticky_routing:
-  # Opt-in process-local affinity for auto/router-* chat and Responses requests.
+  # Opt-in affinity for auto/router-* chat and Responses requests.
   enabled: false
   ttl_seconds: 1800
   prefer_model: true
+  # memory is process-local. file shares affinity across local router replicas.
+  backend: memory
+  file_path:
+  lock_timeout_ms: 1000
 
 classifier:
   # heuristic is local deterministic fallback. Set backend to llm_judge or route_llm

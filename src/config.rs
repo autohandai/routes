@@ -186,6 +186,19 @@ pub struct StickyRoutingConfig {
     pub ttl_seconds: u64,
     #[serde(default)]
     pub prefer_model: bool,
+    #[serde(default)]
+    pub backend: StickyRoutingBackend,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default = "default_sticky_routing_lock_timeout_ms")]
+    pub lock_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StickyRoutingBackend {
+    Memory,
+    File,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -480,7 +493,16 @@ impl Default for StickyRoutingConfig {
             enabled: false,
             ttl_seconds: default_sticky_routing_ttl_seconds(),
             prefer_model: true,
+            backend: StickyRoutingBackend::Memory,
+            file_path: None,
+            lock_timeout_ms: default_sticky_routing_lock_timeout_ms(),
         }
+    }
+}
+
+impl Default for StickyRoutingBackend {
+    fn default() -> Self {
+        Self::Memory
     }
 }
 
@@ -568,6 +590,10 @@ fn default_safety_redaction_replacement() -> String {
 
 fn default_sticky_routing_ttl_seconds() -> u64 {
     1_800
+}
+
+fn default_sticky_routing_lock_timeout_ms() -> u64 {
+    1_000
 }
 
 fn default_budget_lock_timeout_ms() -> u64 {
@@ -1145,6 +1171,17 @@ impl StickyRoutingConfig {
             self.ttl_seconds > 0,
             "sticky_routing.ttl_seconds must be greater than zero"
         );
+        anyhow::ensure!(
+            self.lock_timeout_ms > 0,
+            "sticky_routing.lock_timeout_ms must be greater than zero"
+        );
+        if self.backend == StickyRoutingBackend::File {
+            let path = self.file_path.as_deref().unwrap_or_default().trim();
+            anyhow::ensure!(
+                !path.is_empty(),
+                "sticky_routing.file_path is required when backend is file"
+            );
+        }
         Ok(())
     }
 }
@@ -1274,7 +1311,8 @@ mod tests {
         AuthConfig, BudgetConfig, ClassifierBackend, ClassifierConfig,
         ClassifierModelAdapterConfig, ProviderHealthSamplerConfig, RouterConfig, RuntimeConfig,
         SafetyRoutingAction, SafetyRoutingConfig, ScoringConfig, SemanticCacheConfig,
-        ShadowEvalConfig, ShadowEvalJudgeConfig, StickyRoutingConfig, TelemetryConfig,
+        ShadowEvalConfig, ShadowEvalJudgeConfig, StickyRoutingBackend, StickyRoutingConfig,
+        TelemetryConfig,
     };
     use crate::types::{ModelConfig, ProviderConfig, ProviderKind, RouterPolicy};
 
@@ -1671,12 +1709,51 @@ mod tests {
             enabled: true,
             ttl_seconds: 0,
             prefer_model: true,
+            backend: StickyRoutingBackend::Memory,
+            file_path: None,
+            lock_timeout_ms: 1_000,
         };
 
         let error = config
             .validate()
             .expect_err("zero sticky routing ttl rejected");
         assert!(error.to_string().contains("sticky_routing.ttl_seconds"));
+    }
+
+    #[test]
+    fn rejects_file_sticky_routing_without_file_path() {
+        let mut config = valid_config();
+        config.sticky_routing = StickyRoutingConfig {
+            enabled: true,
+            ttl_seconds: 60,
+            prefer_model: true,
+            backend: StickyRoutingBackend::File,
+            file_path: None,
+            lock_timeout_ms: 1_000,
+        };
+
+        let error = config
+            .validate()
+            .expect_err("file sticky routing requires path");
+        assert!(error.to_string().contains("sticky_routing.file_path"));
+    }
+
+    #[test]
+    fn rejects_zero_sticky_routing_lock_timeout() {
+        let mut config = valid_config();
+        config.sticky_routing = StickyRoutingConfig {
+            enabled: true,
+            ttl_seconds: 60,
+            prefer_model: true,
+            backend: StickyRoutingBackend::File,
+            file_path: Some("sticky.json".to_string()),
+            lock_timeout_ms: 0,
+        };
+
+        let error = config
+            .validate()
+            .expect_err("zero sticky routing lock timeout rejected");
+        assert!(error.to_string().contains("sticky_routing.lock_timeout_ms"));
     }
 
     #[test]

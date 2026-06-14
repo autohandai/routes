@@ -13,6 +13,7 @@ use crate::{
         ShadowEvalEndpoint, ShadowEvalJudgement, ShadowEvalLogger, ShadowEvalRecordInput,
         parse_llm_shadow_eval_judgement,
     },
+    sticky::StickyRoutingStore,
     telemetry::DecisionLogger,
     tokens::estimate_tokens,
     types::{
@@ -78,43 +79,6 @@ pub struct AppState {
     pub semantic_cache: SemanticCache,
     pub shadow_eval: ShadowEvalLogger,
     pub sticky_routing: StickyRoutingStore,
-}
-
-#[derive(Clone, Default)]
-pub struct StickyRoutingStore {
-    inner: Arc<Mutex<HashMap<String, StickyRoute>>>,
-}
-
-#[derive(Clone)]
-struct StickyRoute {
-    model: String,
-    provider: String,
-    expires_at: Instant,
-}
-
-impl StickyRoutingStore {
-    fn get(&self, key: &str) -> Option<StickyRoute> {
-        let mut routes = self.inner.lock().ok()?;
-        let route = routes.get(key).cloned()?;
-        if route.expires_at <= Instant::now() {
-            routes.remove(key);
-            return None;
-        }
-        Some(route)
-    }
-
-    fn record(&self, key: String, model: &ModelConfig, ttl: Duration) {
-        if let Ok(mut routes) = self.inner.lock() {
-            routes.insert(
-                key,
-                StickyRoute {
-                    model: model.id.clone(),
-                    provider: model.provider.clone(),
-                    expires_at: Instant::now() + ttl,
-                },
-            );
-        }
-    }
 }
 
 #[derive(Default)]
@@ -3825,7 +3789,7 @@ mod tests {
             AuthConfig, BudgetAccountingBackend, BudgetAccountingConfig, BudgetConfig,
             ClassifierConfig, RouterConfig, RuntimeConfig, SafetyRoutingAction,
             SafetyRoutingConfig, ScoringConfig, SemanticCacheConfig, ShadowEvalConfig,
-            StickyRoutingConfig, TelemetryConfig,
+            StickyRoutingBackend, StickyRoutingConfig, TelemetryConfig,
         },
         provider::ProviderClient,
         router::RoutingEngine,
@@ -4410,6 +4374,89 @@ mod tests {
             .unwrap();
         assert_eq!(metrics["sticky_routing_hits"], 1);
         assert_eq!(metrics["sticky_routing_writes"], 2);
+    }
+
+    #[tokio::test]
+    async fn automatic_chat_uses_file_backed_sticky_routing_across_instances() {
+        let (upstream_url, calls) = spawn_echo_chat_upstream().await;
+        let sticky_path = std::env::temp_dir().join(format!(
+            "autohand-router-shared-sticky-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let mut first_config = sticky_routing_config(upstream_url.clone());
+        first_config.sticky_routing.backend = StickyRoutingBackend::File;
+        first_config.sticky_routing.file_path = Some(sticky_path.to_string_lossy().to_string());
+        let mut second_config = sticky_routing_config(upstream_url);
+        second_config.sticky_routing.backend = StickyRoutingBackend::File;
+        second_config.sticky_routing.file_path = Some(sticky_path.to_string_lossy().to_string());
+        let first_router_url = spawn_router(first_config).await;
+        let second_router_url = spawn_router(second_config).await;
+        let client = reqwest::Client::new();
+
+        let first = client
+            .post(format!("{first_router_url}/v1/chat/completions"))
+            .json(&OpenAiChatRequest {
+                model: "auto".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String(
+                        "Design a production architecture with distributed systems and security tradeoffs"
+                            .to_string(),
+                    ),
+                }],
+                extra: serde_json::Map::from_iter([(
+                    "user".to_string(),
+                    Value::String("shared-sticky-session".to_string()),
+                )]),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert!(first.status().is_success());
+        assert_eq!(
+            first
+                .headers()
+                .get("x-autohand-router-model")
+                .and_then(|value| value.to_str().ok()),
+            Some("strong-sticky")
+        );
+
+        let second = client
+            .post(format!("{second_router_url}/v1/chat/completions"))
+            .json(&OpenAiChatRequest {
+                model: "auto".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String("Fix this typo".to_string()),
+                }],
+                extra: serde_json::Map::from_iter([(
+                    "user".to_string(),
+                    Value::String("shared-sticky-session".to_string()),
+                )]),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert!(second.status().is_success());
+        assert_eq!(
+            second
+                .headers()
+                .get("x-autohand-router-model")
+                .and_then(|value| value.to_str().ok()),
+            Some("strong-sticky")
+        );
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 2);
+
+        let second_metrics = client
+            .get(format!("{second_router_url}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(second_metrics["sticky_routing_hits"], 1);
+        let _ = std::fs::remove_file(sticky_path);
     }
 
     #[tokio::test]
@@ -5214,7 +5261,8 @@ mod tests {
             telemetry: DecisionLogger::new(&config.telemetry),
             semantic_cache: Default::default(),
             shadow_eval: crate::shadow_eval::ShadowEvalLogger::new(&config.shadow_eval),
-            sticky_routing: Default::default(),
+            sticky_routing: crate::sticky::StickyRoutingStore::from_config(&config.sticky_routing)
+                .unwrap(),
         };
         tokio::spawn(async move {
             axum::serve(listener, app(state)).await.unwrap();
@@ -5637,6 +5685,9 @@ mod tests {
                 enabled: true,
                 ttl_seconds: 60,
                 prefer_model: true,
+                backend: StickyRoutingBackend::Memory,
+                file_path: None,
+                lock_timeout_ms: 1_000,
             },
         }
     }

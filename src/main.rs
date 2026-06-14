@@ -15,6 +15,7 @@ use autohand_router::{
     router::RoutingEngine,
     server::{self, AppState},
     shadow_eval::ShadowEvalLogger,
+    sticky::StickyRoutingStore,
     telemetry::DecisionLogger,
     types::{ClassifyResponse, MultimodelRequest, RouterPolicy, SelectedClassifications},
 };
@@ -199,7 +200,7 @@ async fn main() -> Result<()> {
                 telemetry: DecisionLogger::new(&config.telemetry),
                 semantic_cache: Default::default(),
                 shadow_eval: ShadowEvalLogger::new(&config.shadow_eval),
-                sticky_routing: Default::default(),
+                sticky_routing: StickyRoutingStore::from_config(&config.sticky_routing)?,
             };
             server::serve(state, &bind).await
         }

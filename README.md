@@ -164,9 +164,12 @@ sticky_routing:
   enabled: true
   ttl_seconds: 1800
   prefer_model: true
+  backend: file
+  file_path: router.sticky-routes.json
+  lock_timeout_ms: 1000
 ```
 
-Sticky routing is process-local and applies only to `auto`/`router-*` chat and Responses requests. It keys affinity from `user`, `metadata.session_id`, `metadata.conversation_id`, or `metadata.thread_id`, then prefers the previously selected model/provider before dispatching. Explicit model requests remain strict. Affinity activity is visible through `sticky_routing_hits`, `sticky_routing_writes`, and Prometheus event counters.
+Sticky routing applies only to `auto`/`router-*` chat and Responses requests. It keys affinity from `user`, `metadata.session_id`, `metadata.conversation_id`, or `metadata.thread_id`, then prefers the previously selected model/provider before dispatching. `backend: memory` is process-local; `backend: file` stores JSON affinity records behind a lock file so multiple local router replicas can share them. Explicit model requests remain strict. Affinity activity is visible through `sticky_routing_hits`, `sticky_routing_writes`, and Prometheus event counters.
 
 Use `kind: ollama` for Ollama's OpenAI-compatible surface. Use `kind: ollama_native` with `chat_path: /api/chat` to transform native Ollama chat responses into OpenAI-compatible `/v1/chat/completions` responses for local open-weight models. Use `kind: llama_cpp` for llama.cpp's OpenAI-compatible server and `kind: llama_cpp_native` with `chat_path: /completion` for the native completion server. Use `kind: vllm` for vLLM's OpenAI-compatible server; vLLM currently belongs on the OpenAI-compatible adapter path, with explicit provider identity for health, metrics, and conformance artifacts.
 

@@ -52,12 +52,12 @@ It handles the messy parts of multi-model operation:
 
 Routes powers [Autohand Code Enterprise](https://www.autohand.ai/code/enterprise/) across millions of coding sessions. It acts as the model gateway between Autohand Code clients, local inference nodes, hosted providers, and private model pools so teams can route coding work by policy instead of hard-coding one provider into every developer workflow.
 
-Our flagship open-source enterprise version, [Autohand Code CLI](https://github.com/autohandai/code-cli/tree/main/docs) can point at Routes through its OpenAI-compatible provider settings. A typical enterprise setup runs Routes near the available model capacity, such as one router per GPU node, region, or private network segment, then lets Autohand Code choose `auto` or a `router-*` policy model.
+Our open source Coding harness agent [Autohand Code CLI](https://github.com/autohandai/code-cli/tree/main/docs) can point at Routes through its OpenAI-compatible provider settings. A typical enterprise setup runs Routes near the available model capacity, such as one router per GPU node, region, or private network segment, then lets Autohand Code choose `auto` or a `router-*` policy model.
 
 ```json
 {
-  "provider": "openai",
-  "openai": {
+  "provider": "autohandai",
+  "autohandai": {
     "authMode": "api-key",
     "apiKey": "routes-local-dev-or-bearer-token",
     "baseUrl": "http://router.internal:8080/v1",
@@ -77,12 +77,12 @@ The executable is named `routes`. It can be installed from GitHub release archiv
 
 Release tags publish archives for Linux, macOS, and Windows:
 
-| Platform | Release asset |
-| --- | --- |
-| Linux x86_64 | `routes-x86_64-unknown-linux-gnu.tar.gz` |
-| macOS Apple Silicon | `routes-aarch64-apple-darwin.tar.gz` |
-| macOS Intel | `routes-x86_64-apple-darwin.tar.gz` |
-| Windows x86_64 | `routes-x86_64-pc-windows-msvc.zip` |
+| Platform            | Release asset                            |
+| ------------------- | ---------------------------------------- |
+| Linux x86_64        | `routes-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `routes-aarch64-apple-darwin.tar.gz`     |
+| macOS Intel         | `routes-x86_64-apple-darwin.tar.gz`      |
+| Windows x86_64      | `routes-x86_64-pc-windows-msvc.zip`      |
 
 Install on Linux:
 

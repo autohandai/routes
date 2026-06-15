@@ -14,7 +14,7 @@ cargo run -- --config examples/router.yaml validate
 cargo run -- --config examples/router.yaml openapi
 cargo run -- --config examples/router.yaml config-schema
 cargo run -- --config examples/router.yaml serve
-cargo run -- --config examples/router.yaml eval-gate examples/eval.production.jsonl --output router.eval-gate.json
+cargo run -- --config examples/router.yaml eval-gate examples/eval.production.jsonl --min-examples 50 --min-accuracy 0.90 --min-domain-accuracy 0.90 --min-model-accuracy 0.95 --min-provider-accuracy 0.95 --output router.eval-gate.json
 cargo run -- load-test --url http://127.0.0.1:8080 --requests 1000 --concurrency 32 --output router.load.json
 cargo run -- load-suite --url http://127.0.0.1:8080 --requests-per-scenario 1000 --concurrency 32 --output router.load-suite.json
 cargo run -- --config router.with-judge.yaml judge-smoke --output router.judge-smoke.json

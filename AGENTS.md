@@ -36,7 +36,7 @@ This repository is a Rust LLM router intended to sit in front of OpenAI-compatib
 - `cargo run -- --config examples/router.yaml classify "Fix this typo"`
 - `cargo run -- --config examples/router.yaml route "Design an event sourcing system"`
 - `cargo run -- --config examples/router.yaml eval examples/eval.jsonl`
-- `cargo run -- --config examples/router.yaml eval-gate examples/eval.production.jsonl --output router.eval-gate.json`
+- `cargo run -- --config examples/router.yaml eval-gate examples/eval.production.jsonl --min-examples 50 --min-accuracy 0.90 --min-domain-accuracy 0.90 --min-model-accuracy 0.95 --min-provider-accuracy 0.95 --output router.eval-gate.json`
 - `cargo run -- --config examples/router.yaml calibrate examples/eval.jsonl`
 - `cargo run -- --config examples/router.yaml optimize examples/eval.jsonl --write-config router.optimized.yaml --artifact router.optimization.json`
 - `cargo run -- load-test --url http://127.0.0.1:8080 --requests 1000 --concurrency 32 --output router.load.json`

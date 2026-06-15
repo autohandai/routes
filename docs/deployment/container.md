@@ -134,7 +134,7 @@ Run these before cutting traffic over:
 
 ```bash
 cargo run -- --config docs/examples/router.production.yaml validate
-cargo run -- --config docs/examples/router.production.yaml eval-gate examples/eval.production.jsonl --output router.eval-gate.json
+cargo run -- --config examples/router.yaml eval-gate examples/eval.production.jsonl --min-examples 50 --min-accuracy 0.90 --min-domain-accuracy 0.90 --min-model-accuracy 0.95 --min-provider-accuracy 0.95 --output router.eval-gate.json
 cargo run -- --config docs/examples/router.production.yaml provider-conformance-matrix --output router.provider-matrix.json
 cargo run -- load-suite --url https://router.example.com --output router.load-suite.json
 ```

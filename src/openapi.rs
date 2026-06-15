@@ -6,7 +6,7 @@ pub fn spec() -> Value {
         "info": {
             "title": "Autohand Router",
             "version": env!("CARGO_PKG_VERSION"),
-            "description": "OpenAI-compatible Rust LLM router with Morph-style classification and multimodel routing endpoints."
+            "description": "OpenAI-compatible Rust LLM router with classification and multimodel routing endpoints."
         },
         "servers": [
             { "url": "http://127.0.0.1:8080" }
@@ -96,7 +96,7 @@ pub fn spec() -> Value {
             },
             "/v1/router/raw": {
                 "post": {
-                    "summary": "Legacy Morph-compatible difficulty-only router",
+                    "summary": "Compatibility difficulty-only router",
                     "deprecated": true,
                     "requestBody": {
                         "required": true,
@@ -121,7 +121,7 @@ pub fn spec() -> Value {
             },
             "/v1/router/{provider}": {
                 "post": {
-                    "summary": "Legacy provider-specific model selector",
+                    "summary": "Provider-specific model selector",
                     "deprecated": true,
                     "parameters": [
                         {

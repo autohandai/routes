@@ -6,7 +6,7 @@ This repository is a Rust LLM router intended to sit in front of OpenAI-compatib
 
 - Keep the public API OpenAI-compatible wherever possible.
 - For every new user prompt or request, finish the turn by testing and validating the relevant change, then create a focused git commit for the completed work. Keep the commit scoped to the files changed for that request.
-- Keep Morph-compatible router endpoints:
+- Keep router decision endpoints:
   - `POST /v1/router/classify`
   - `POST /v1/router/multimodel`
 - Never hard-code a single provider as the only path. Providers and models must be data driven from config.
@@ -52,7 +52,7 @@ This repository is a Rust LLM router intended to sit in front of OpenAI-compatib
 
 - `src/config.rs`: YAML/env backed runtime config.
 - `src/types.rs`: API contracts, labels, policies, provider/model definitions.
-- `src/classifier.rs`: deterministic prompt classifier with Morph-like labels.
+- `src/classifier.rs`: deterministic prompt classifier with routing labels.
 - `src/router.rs`: candidate filtering, policies, fallback handling, and route explanations.
 - `src/provider.rs`: provider adapter registry and OpenAI-compatible upstream forwarding.
 - `src/server.rs`: axum HTTP API.

@@ -1,10 +1,19 @@
 # Autohand Router
 
-Rust LLM router and OpenAI-compatible proxy for hosted and local inference. It exposes Morph-style routing endpoints and can sit in front of Ollama, llama.cpp, OpenRouter, Cloudflare AI Gateway, or any OpenAI-compatible chat, Responses, or embeddings service.
+Autohand Router is a Rust LLM router and OpenAI-compatible proxy for hosted and local inference. It can sit in front of Ollama, llama.cpp, vLLM, OpenRouter, Cloudflare AI Gateway, or any service that accepts OpenAI-compatible chat, Responses, embeddings, image, speech, transcription, or translation requests.
 
-See [PRODUCTION.md](PRODUCTION.md) for the explicit 100M-user readiness bar and open-weight provider roadmap.
-See [docs/](docs/README.md) for container packaging and deployment examples for AWS, Google Cloud, Azure, and Cloudflare.
-Use `cargo run -- config-schema` to print a JSON Schema for `router.yaml` that can be wired into YAML editors or CI checks.
+The project is built for people running mixed model fleets: small local models for cheap/fast work, stronger hosted models for hard reasoning, and explicit policy controls when quality, cost, latency, safety, context, or modality matter. Routing stays config-driven, inspectable, and fail-closed to a configured fallback model.
+
+## Why It Exists
+
+- Keep one OpenAI-compatible front door while swapping providers and local inference backends.
+- Route automatically by prompt difficulty, domain, modality, safety, cacheability, latency sensitivity, reasoning depth, context window, required capabilities, cost, health, and learned score boosts.
+- Make routing debuggable with candidate traces, score components, Prometheus metrics, provider conformance checks, eval gates, and redacted decision logs.
+- Support practical production workflows: retries, timeouts, concurrency limits, budget rejection before dispatch, semantic cache, sticky routing, shadow eval, safety routing, load tests, dashboards, alerts, and config schemas.
+
+Contributors are welcome. Good first areas include new provider adapters, richer eval corpora, routing policies, dashboard panels, deployment examples, and docs for real local-model setups.
+
+See [PRODUCTION.md](PRODUCTION.md) for the explicit 100M-user readiness bar and open-weight provider roadmap. See [docs/](docs/README.md) for container packaging and deployment examples for AWS, Google Cloud, Azure, and Cloudflare. Use `cargo run -- config-schema` to print a JSON Schema for `router.yaml` that can be wired into YAML editors or CI checks.
 
 ## Run
 
@@ -74,7 +83,7 @@ Policy presets are config-driven: `balanced` is the default tradeoff, `floor` se
 Optional learned scoring is configured under `scoring.learned`; it applies a bounded linear score boost from trainable feature/model weights such as `difficulty.hard`, `domain.coding`, `modality.vision`, `supports_web_apps`, `capability`, `cost`, `provider.<name>`, and `model.<id-or-alias>`. Learned contributions are exposed as `score_components.learned_score_boost`.
 When `default_model` is provided with `allowed_models` or `allowed_providers`, the default must satisfy those filters. The router will not silently return an out-of-filter fallback.
 
-Legacy Morph clients can call `/v1/router/raw` for a difficulty-only response:
+Clients that only need a difficulty label can call `/v1/router/raw` for a compact compatibility response:
 
 ```bash
 curl -s http://127.0.0.1:8080/v1/router/raw \
@@ -82,7 +91,7 @@ curl -s http://127.0.0.1:8080/v1/router/raw \
   -d '{"input":"Add error handling to this Rust function","mode":"balanced"}'
 ```
 
-Provider-specific legacy routes are also supported and internally route through the multimodel engine constrained to that provider:
+Provider-specific compatibility routes are also supported and internally route through the multimodel engine constrained to that provider:
 
 ```bash
 curl -s http://127.0.0.1:8080/v1/router/ollama \
@@ -302,7 +311,7 @@ Startup validation rejects ambiguous configs: provider names, model IDs, and ali
 
 The deterministic local classifier is always available, so routing works without external services. For learned routing, set `classifier.backend` to `llm_judge` or `route_llm` and configure `classifier.adapters.<backend>.model` with any model id or alias, for example a small Qwen classifier model. Adapter requests go through the same provider boundary as chat, so native adapters such as `ollama_native` and `llama_cpp_native` can be used for local open-weight classifiers. `classifier.llm_judge_model` remains a compatibility shortcut for `classifier.backend: llm_judge`.
 
-Classifier adapter output must include difficulty, ambiguity, domain, and their confidence fields with finite values from `0.0` to `1.0`; advanced heads such as modality, safety, cacheability, latency sensitivity, and reasoning depth are accepted when present and otherwise receive conservative defaults. Invalid output, timeout, or provider errors increment classifier fallback counters and automatically fall back to the heuristic classifier. The architecture keeps classifier and scoring boundaries separate so GEPA-style optimizers or remote Morph calls can be added without changing HTTP handlers.
+Classifier adapter output must include difficulty, ambiguity, domain, and their confidence fields with finite values from `0.0` to `1.0`; advanced heads such as modality, safety, cacheability, latency sensitivity, and reasoning depth are accepted when present and otherwise receive conservative defaults. Invalid output, timeout, or provider errors increment classifier fallback counters and automatically fall back to the heuristic classifier. The architecture keeps classifier and scoring boundaries separate so optimizers, trained scorers, or remote classifier services can be added without changing HTTP handlers.
 
 Before enabling an LLM judge in production, run a live smoke against the configured judge model:
 

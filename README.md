@@ -1,6 +1,6 @@
 # Routes
 
-Routes is the Rust LLM routing layer we built inside Autohand to battle-test our model-routing capabilities without manually configuring every provider, fallback, budget, cache, classifier, and point of failure for each experiment. It gives one OpenAI-compatible front door for local and hosted inference across Ollama, llama.cpp, vLLM, OpenRouter, Cloudflare AI Gateway, and any service that accepts OpenAI-compatible chat, Responses, embeddings, image, speech, transcription, or translation requests.
+Routes is the LLM routing layer we built inside Autohand to battle-test our model-routing capabilities without manually configuring every provider, fallback, budget, cache, classifier, and point of failure for each experiment. It gives one OpenAI-compatible front door for local and hosted inference across Ollama, llama.cpp, vLLM, OpenRouter, Cloudflare AI Gateway, and any service that accepts OpenAI-compatible chat, Responses, embeddings, image, speech, transcription, or translation requests.
 
 We built Routes because the hard part of running many LLMs is not just picking a model. It is keeping every routing decision explainable while handling context limits, multimodal requirements, provider health, retries, concurrency, budgets, cache hits, safety policy, local-model affinity, and fallbacks without turning the application into provider-specific glue code.
 

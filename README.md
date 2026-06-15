@@ -71,29 +71,51 @@ Use `router-local` for local-first coding work, `router-privacy` for sensitive r
 
 ## Get started in 10 minutes
 
-1. Validate the example config.
+This path does not require provider API keys. It checks the config, exercises the deterministic classifier, shows a route decision, and confirms the project is healthy before you wire it into an application.
+
+1. Confirm the example config is valid.
 
    ```bash
    cargo run -- --config examples/router.yaml validate
    ```
 
-2. Ask Routes how it would classify a prompt.
+   This catches YAML mistakes, invalid provider/model references, missing fallbacks, and policy errors before the router accepts traffic.
+
+2. See how Routes reads a prompt.
 
    ```bash
    cargo run -- --config examples/router.yaml classify "Build a small multimodal web app from a screenshot"
    ```
 
-3. Ask Routes which model it would choose.
+   The output shows the deterministic labels Routes uses for local routing, such as task type, complexity, modality needs, and safety signals.
+
+3. Ask for a full routing decision.
 
    ```bash
    cargo run -- --config examples/router.yaml route "Design a production event sourcing system" --policy highest-quality
    ```
 
-4. Run the test suite.
+   Look for the selected model/provider, the policy that influenced the score, and any rejected candidates. That is the same decision metadata exposed through the router diagnostics.
+
+4. Start the HTTP router.
+
+   ```bash
+   cargo run -- --config examples/router.yaml serve
+   ```
+
+   In another terminal, verify the OpenAI-compatible surface is live:
+
+   ```bash
+   curl -s http://127.0.0.1:8080/v1/router/providers
+   ```
+
+5. Run the test suite before changing behavior.
 
    ```bash
    cargo test
    ```
+
+After these steps, you have validated the default config, inspected a classification, inspected a policy-driven route choice, and started the local API. To route real chat completions, add your providers and keys to a config file, then point any OpenAI-compatible client at `http://127.0.0.1:8080/v1`.
 
 ## Quickstart
 

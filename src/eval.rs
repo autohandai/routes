@@ -19,6 +19,10 @@ pub struct EvalExample {
     #[serde(default)]
     pub expected_domain: Option<DomainLabel>,
     #[serde(default)]
+    pub expected_model: Option<String>,
+    #[serde(default)]
+    pub expected_provider: Option<String>,
+    #[serde(default)]
     pub policy: RouterPolicy,
     #[serde(default)]
     pub allowed_models: Vec<String>,
@@ -41,12 +45,18 @@ pub struct EvalReport {
     pub total: usize,
     pub exact_tier_matches: usize,
     pub domain_matches: usize,
+    pub model_matches: usize,
+    pub provider_matches: usize,
     pub average_cost: f32,
     pub average_capability: f32,
     pub accuracy: f32,
     pub domain_accuracy: f32,
+    pub model_accuracy: f32,
+    pub provider_accuracy: f32,
     pub misses: Vec<EvalMiss>,
     pub domain_misses: Vec<DomainEvalMiss>,
+    pub model_misses: Vec<ModelEvalMiss>,
+    pub provider_misses: Vec<ProviderEvalMiss>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +66,8 @@ pub struct EvalGateReport {
     pub min_examples: usize,
     pub min_accuracy: f32,
     pub min_domain_accuracy: f32,
+    pub min_model_accuracy: f32,
+    pub min_provider_accuracy: f32,
     pub pass: bool,
     pub failures: Vec<String>,
     pub eval: EvalReport,
@@ -77,6 +89,24 @@ pub struct DomainEvalMiss {
     pub expected_domain: DomainLabel,
     pub actual_domain: Option<DomainLabel>,
     pub selected_model: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelEvalMiss {
+    pub input: String,
+    pub expected_model: String,
+    pub selected_model: String,
+    pub selected_provider: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderEvalMiss {
+    pub input: String,
+    pub expected_provider: String,
+    pub selected_model: String,
+    pub selected_provider: Option<String>,
     pub reason: String,
 }
 
@@ -195,10 +225,14 @@ where
 {
     let mut exact_tier_matches = 0;
     let mut domain_matches = 0;
+    let mut model_matches = 0;
+    let mut provider_matches = 0;
     let mut total_cost = 0.0;
     let mut total_capability = 0.0;
     let mut misses = Vec::new();
     let mut domain_misses = Vec::new();
+    let mut model_misses = Vec::new();
+    let mut provider_misses = Vec::new();
 
     for example in examples {
         let route = engine
@@ -221,6 +255,7 @@ where
             .map(|model| model.cost_per_million_input + model.cost_per_million_output)
             .unwrap_or_default();
         let selected_capability = selected.map(|model| model.capability).unwrap_or_default();
+        let selected_provider = selected.map(|model| model.provider.clone());
 
         total_cost += selected_cost;
         total_capability += selected_capability;
@@ -251,6 +286,36 @@ where
         } else {
             domain_matches += 1;
         }
+        if let Some(expected_model) = &example.expected_model {
+            if model_matches_expected(&config, &route.model, expected_model) {
+                model_matches += 1;
+            } else {
+                model_misses.push(ModelEvalMiss {
+                    input: example.input.clone(),
+                    expected_model: expected_model.clone(),
+                    selected_model: route.model.clone(),
+                    selected_provider: selected_provider.clone(),
+                    reason: route.reason.clone(),
+                });
+            }
+        } else {
+            model_matches += 1;
+        }
+        if let Some(expected_provider) = &example.expected_provider {
+            if selected_provider.as_deref() == Some(expected_provider.as_str()) {
+                provider_matches += 1;
+            } else {
+                provider_misses.push(ProviderEvalMiss {
+                    input: example.input.clone(),
+                    expected_provider: expected_provider.clone(),
+                    selected_model: route.model.clone(),
+                    selected_provider,
+                    reason: route.reason.clone(),
+                });
+            }
+        } else {
+            provider_matches += 1;
+        }
     }
 
     let total = examples.len();
@@ -259,13 +324,32 @@ where
         total,
         exact_tier_matches,
         domain_matches,
+        model_matches,
+        provider_matches,
         average_cost: total_cost / denominator,
         average_capability: total_capability / denominator,
         accuracy: exact_tier_matches as f32 / denominator,
         domain_accuracy: domain_matches as f32 / denominator,
+        model_accuracy: model_matches as f32 / denominator,
+        provider_accuracy: provider_matches as f32 / denominator,
         misses,
         domain_misses,
+        model_misses,
+        provider_misses,
     }
+}
+
+fn model_matches_expected(
+    config: &RouterConfig,
+    selected_model: &str,
+    expected_model: &str,
+) -> bool {
+    if selected_model == expected_model {
+        return true;
+    }
+    config
+        .find_model(selected_model)
+        .is_some_and(|model| model.aliases.iter().any(|alias| alias == expected_model))
 }
 
 pub async fn eval_gate(
@@ -275,6 +359,8 @@ pub async fn eval_gate(
     min_examples: usize,
     min_accuracy: f32,
     min_domain_accuracy: f32,
+    min_model_accuracy: f32,
+    min_provider_accuracy: f32,
 ) -> Result<EvalGateReport> {
     anyhow::ensure!(
         (0.0..=1.0).contains(&min_accuracy),
@@ -283,6 +369,14 @@ pub async fn eval_gate(
     anyhow::ensure!(
         (0.0..=1.0).contains(&min_domain_accuracy),
         "eval-gate min_domain_accuracy must be between 0.0 and 1.0"
+    );
+    anyhow::ensure!(
+        (0.0..=1.0).contains(&min_model_accuracy),
+        "eval-gate min_model_accuracy must be between 0.0 and 1.0"
+    );
+    anyhow::ensure!(
+        (0.0..=1.0).contains(&min_provider_accuracy),
+        "eval-gate min_provider_accuracy must be between 0.0 and 1.0"
     );
     let report = evaluate_with_heuristic(config, examples).await;
     let mut failures = Vec::new();
@@ -304,6 +398,18 @@ pub async fn eval_gate(
             report.domain_accuracy
         ));
     }
+    if report.model_accuracy < min_model_accuracy {
+        failures.push(format!(
+            "model accuracy {} is below minimum {min_model_accuracy}",
+            report.model_accuracy
+        ));
+    }
+    if report.provider_accuracy < min_provider_accuracy {
+        failures.push(format!(
+            "provider accuracy {} is below minimum {min_provider_accuracy}",
+            report.provider_accuracy
+        ));
+    }
     Ok(EvalGateReport {
         schema_version: 1,
         dataset: DatasetArtifact {
@@ -314,6 +420,8 @@ pub async fn eval_gate(
         min_examples,
         min_accuracy,
         min_domain_accuracy,
+        min_model_accuracy,
+        min_provider_accuracy,
         pass: failures.is_empty(),
         failures,
         eval: report,
@@ -731,15 +839,26 @@ mod tests {
             input: "Fix typo in Rust docs".to_string(),
             expected_tier: ExpectedTier::Cheap,
             expected_domain: Some(DomainLabel::Coding),
+            expected_model: None,
+            expected_provider: None,
             policy: RouterPolicy::CostEfficient,
             allowed_models: vec![],
             allowed_providers: vec![],
             required_capabilities: Vec::new(),
         }];
 
-        let report = eval_gate(&config, Path::new("tiny.jsonl"), &examples, 2, 0.0, 0.0)
-            .await
-            .unwrap();
+        let report = eval_gate(
+            &config,
+            Path::new("tiny.jsonl"),
+            &examples,
+            2,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        )
+        .await
+        .unwrap();
 
         assert!(!report.pass);
         assert!(report.failures[0].contains("below minimum"));
@@ -753,6 +872,8 @@ mod tests {
                 input: "Fix typo in Rust docs".to_string(),
                 expected_tier: ExpectedTier::Cheap,
                 expected_domain: Some(DomainLabel::Coding),
+                expected_model: Some("cheap".to_string()),
+                expected_provider: Some("local".to_string()),
                 policy: RouterPolicy::CostEfficient,
                 allowed_models: vec![],
                 allowed_providers: vec![],
@@ -762,6 +883,8 @@ mod tests {
                 input: "Design event sourcing platform with security".to_string(),
                 expected_tier: ExpectedTier::Strong,
                 expected_domain: Some(DomainLabel::Design),
+                expected_model: Some("strong".to_string()),
+                expected_provider: Some("local".to_string()),
                 policy: RouterPolicy::CapabilityHeavy,
                 allowed_models: vec![],
                 allowed_providers: vec![],
@@ -776,12 +899,53 @@ mod tests {
             2,
             1.0,
             1.0,
+            1.0,
+            1.0,
         )
         .await
         .unwrap();
 
         assert!(report.pass);
         assert!(report.failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn eval_report_tracks_model_and_provider_expectations() {
+        let config = test_config();
+        let engine = RoutingEngine::new(config, HeuristicClassifier::default());
+        let examples = vec![
+            EvalExample {
+                input: "Fix typo in Rust docs".to_string(),
+                expected_tier: ExpectedTier::Cheap,
+                expected_domain: Some(DomainLabel::Coding),
+                expected_model: Some("cheap".to_string()),
+                expected_provider: Some("local".to_string()),
+                policy: RouterPolicy::CostEfficient,
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+            },
+            EvalExample {
+                input: "Fix typo in Rust docs".to_string(),
+                expected_tier: ExpectedTier::Cheap,
+                expected_domain: Some(DomainLabel::Coding),
+                expected_model: Some("strong".to_string()),
+                expected_provider: Some("remote".to_string()),
+                policy: RouterPolicy::CostEfficient,
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+            },
+        ];
+
+        let report = evaluate(&engine, &examples).await;
+
+        assert_eq!(report.model_matches, 1);
+        assert_eq!(report.provider_matches, 1);
+        assert_eq!(report.model_misses.len(), 1);
+        assert_eq!(report.provider_misses.len(), 1);
+        assert_eq!(report.model_accuracy, 0.5);
+        assert_eq!(report.provider_accuracy, 0.5);
     }
 
     #[test]
@@ -791,6 +955,8 @@ mod tests {
                 input: format!("example-{index}"),
                 expected_tier: ExpectedTier::Balanced,
                 expected_domain: None,
+                expected_model: None,
+                expected_provider: None,
                 policy: RouterPolicy::Balanced,
                 allowed_models: vec![],
                 allowed_providers: vec![],

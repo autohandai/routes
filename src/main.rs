@@ -72,6 +72,10 @@ enum Command {
         min_accuracy: f32,
         #[arg(long, default_value_t = 0.90)]
         min_domain_accuracy: f32,
+        #[arg(long, default_value_t = 0.0)]
+        min_model_accuracy: f32,
+        #[arg(long, default_value_t = 0.0)]
+        min_provider_accuracy: f32,
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -264,6 +268,8 @@ async fn main() -> Result<()> {
             min_examples,
             min_accuracy,
             min_domain_accuracy,
+            min_model_accuracy,
+            min_provider_accuracy,
             output,
         } => {
             let config = RouterConfig::from_path(&cli.config)?;
@@ -275,6 +281,8 @@ async fn main() -> Result<()> {
                 min_examples,
                 min_accuracy,
                 min_domain_accuracy,
+                min_model_accuracy,
+                min_provider_accuracy,
             )
             .await?;
             if let Some(path) = output {

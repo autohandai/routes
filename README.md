@@ -338,21 +338,23 @@ The matrix report includes every per-model conformance report, `passed`/`failed`
 
 ## Evaluation and Calibration
 
-Evaluation datasets are JSONL files with prompt, expected tier, optional domain, and policy:
+Evaluation datasets are JSONL files with prompt, expected tier, optional domain, optional exact model/provider expectations, policy, filters, and required capabilities:
 
 ```json
-{"input":"Fix this typo","expected_tier":"cheap","expected_domain":"coding","policy":"cost_efficient"}
+{"input":"Build a small web app","expected_tier":"balanced","expected_domain":"coding","expected_model":"gemma","expected_provider":"ollama","policy":"balanced","required_capabilities":["web_apps"]}
 ```
 
-`eval` reports tier accuracy, domain accuracy, average selected cost, average capability, tier misses, and domain misses. `eval-gate` fails non-zero unless the dataset is large enough and meets tier/domain accuracy thresholds. `calibrate` grid-searches the heuristic difficulty cutoffs and can write a calibrated config. `optimize` also searches scoring-policy weights and uses lower average cost as a tiebreaker when accuracy is equal.
+`eval` reports tier, domain, model, and provider accuracy, average selected cost, average capability, and miss details for each checked dimension. `eval-gate` fails non-zero unless the dataset is large enough and meets configured tier/domain/model/provider accuracy thresholds. `calibrate` grid-searches the heuristic difficulty cutoffs and can write a calibrated config. `optimize` also searches scoring-policy weights and uses lower average cost as a tiebreaker when accuracy is equal.
 
 Run the production eval gate before promoting routing changes:
 
 ```bash
 cargo run -- --config examples/router.yaml eval-gate examples/eval.production.jsonl \
-  --min-examples 24 \
+  --min-examples 50 \
   --min-accuracy 0.90 \
   --min-domain-accuracy 0.90 \
+  --min-model-accuracy 0.95 \
+  --min-provider-accuracy 0.95 \
   --output router.eval-gate.json
 ```
 

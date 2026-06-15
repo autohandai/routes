@@ -1,0 +1,16 @@
+{
+  "providers": {
+    "routes": {
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "api": "openai-completions",
+      "apiKey": "routes-local-dev-or-bearer-token",
+      "models": [
+        {
+          "id": "router-balanced",
+          "name": "Routes Balanced",
+          "contextWindow": 128000
+        }
+      ]
+    }
+  }
+}

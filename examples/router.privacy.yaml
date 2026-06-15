@@ -1,0 +1,28 @@
+bind: 127.0.0.1:8080
+default_model: local-fast
+policy: privacy_first
+
+providers:
+  - name: ollama
+    kind: ollama
+    base_url: http://localhost:11434
+    chat_path: /v1/chat/completions
+    health_path: /api/tags
+    timeout_ms: 120000
+    retries: 1
+    max_concurrency: 2
+    queue_timeout_ms: 5000
+
+models:
+  - id: llama3.1:8b
+    provider: ollama
+    aliases: [local-fast]
+    capability: 0.35
+    cost_per_million_input: 0.05
+    cost_per_million_output: 0.05
+    domains: [general, coding]
+    context_window: 128000
+    capabilities:
+      supports_json: true
+      supports_code: true
+    local: true

@@ -1,0 +1,24 @@
+# Hermes Agent configuration for Routes
+# Place relevant sections in ~/.hermes/config.yaml or ~/.hermes/.env.
+
+env:
+  ROUTES_API_KEY: routes-local-dev-or-bearer-token
+
+inference:
+  provider: routes
+
+agents:
+  defaults:
+    model:
+      primary: router-balanced
+
+models:
+  providers:
+    routes:
+      baseUrl: http://127.0.0.1:8080/v1
+      apiKey: ${ROUTES_API_KEY}
+      api: openai-completions
+      models:
+        - id: router-balanced
+          name: Routes Balanced
+          contextWindow: 128000

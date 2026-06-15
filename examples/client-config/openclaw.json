@@ -1,0 +1,29 @@
+{
+  "env": {
+    "ROUTES_API_KEY": "routes-local-dev-or-bearer-token"
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "routes/router-balanced"
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "routes": {
+        "baseUrl": "http://127.0.0.1:8080/v1",
+        "apiKey": "${ROUTES_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "router-balanced",
+            "name": "Routes Balanced",
+            "contextWindow": 128000
+          }
+        ]
+      }
+    }
+  }
+}

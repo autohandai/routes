@@ -1,0 +1,10 @@
+{
+  "provider": "openai",
+  "openai": {
+    "authMode": "api-key",
+    "apiKey": "routes-local-dev-or-bearer-token",
+    "baseUrl": "http://router.internal:8080/v1",
+    "model": "router-balanced",
+    "contextWindow": 128000
+  }
+}

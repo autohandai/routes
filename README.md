@@ -41,6 +41,27 @@ Routes turns those questions into data-driven routing decisions with diagnostics
 - Optional semantic cache, sticky routing, safety routing, budgets, shadow evaluation, decision traces, Prometheus metrics, load tests, and eval gates.
 - JSON Schema and OpenAPI output for editor integration, CI checks, and client generation.
 
+## Autohand Code Enterprise
+
+Routes powers [Autohand Code Enterprise](https://www.autohand.ai/code/enterprise/) across millions of coding sessions. It acts as the model gateway between Autohand Code clients, local inference nodes, hosted providers, and private model pools so teams can route coding work by policy instead of hard-coding one provider into every developer workflow.
+
+The flagship [Autohand Code CLI](https://github.com/autohandai/code-cli/tree/main/docs) can point at Routes through its OpenAI-compatible provider settings. A typical enterprise setup runs Routes near the available model capacity, such as one router per GPU node, region, or private network segment, then lets Autohand Code choose `auto` or a `router-*` policy model.
+
+```json
+{
+  "provider": "openai",
+  "openai": {
+    "authMode": "api-key",
+    "apiKey": "routes-local-dev-or-bearer-token",
+    "baseUrl": "http://router.internal:8080/v1",
+    "model": "router-balanced",
+    "contextWindow": 128000
+  }
+}
+```
+
+Use `router-local` for local-first coding work, `router-privacy` for sensitive repositories, `router-fastest` for low-latency edits, or `router-highest-quality` for complex architecture and review tasks. Routes can sit in front of Ollama, llama.cpp, vLLM, OpenRouter, Cloudflare AI Gateway, and OpenAI-compatible providers across local nodes and internet-reachable gateways.
+
 ## First 10 Minutes
 
 1. Validate the example config.

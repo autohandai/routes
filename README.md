@@ -1,10 +1,12 @@
 # Routes
 
-Routes is an LLM routing layer for teams running more than one model, provider, or inference backend.
+Routes is an OpenAI-compatible routing layer for teams running more than one model, provider, or inference backend.
 
-It gives you one OpenAI-compatible API in front of local models, hosted providers, Ollama, llama.cpp, vLLM, OpenRouter, Cloudflare AI Gateway, and any service that accepts OpenAI-compatible requests. Instead of hand-wiring every fallback, budget, cache, classifier, provider retry, and model-specific rule into your application, Routes makes those decisions explicit, configurable, measurable, and testable.
+It gives you one API in front of local models, hosted providers, Ollama, llama.cpp, vLLM, OpenRouter, Cloudflare AI Gateway, and any service that accepts OpenAI-compatible requests. Instead of hand-wiring every fallback, budget, cache, classifier, provider retry, and model-specific rule into your application, Routes makes those decisions explicit, configurable, measurable, and testable.
 
 We built Routes inside Autohand to battle-test routing across high-volume agent workloads without manually configuring every point of failure. The benchmark suite has exercised the router across 100M routing requests, and the result is a routing system designed around inspectable decisions, eval gates, provider health, multimodal capability checks, and fail-closed fallbacks.
+
+**Use Routes when you want model choice to be a policy you can inspect, evaluate, and improve instead of a pile of provider-specific conditionals.**
 
 ## Who It Is For
 
@@ -38,6 +40,32 @@ Routes turns those questions into data-driven routing decisions with diagnostics
 - Provider retries, timeouts, concurrency limits, health sampling, and transient failover for automatic routes.
 - Optional semantic cache, sticky routing, safety routing, budgets, shadow evaluation, decision traces, Prometheus metrics, load tests, and eval gates.
 - JSON Schema and OpenAPI output for editor integration, CI checks, and client generation.
+
+## First 10 Minutes
+
+1. Validate the example config.
+
+   ```bash
+   cargo run -- --config examples/router.yaml validate
+   ```
+
+2. Ask Routes how it would classify a prompt.
+
+   ```bash
+   cargo run -- --config examples/router.yaml classify "Build a small multimodal web app from a screenshot"
+   ```
+
+3. Ask Routes which model it would choose.
+
+   ```bash
+   cargo run -- --config examples/router.yaml route "Design a production event sourcing system" --policy highest-quality
+   ```
+
+4. Run the test suite before changing routing behavior.
+
+   ```bash
+   cargo test
+   ```
 
 ## Quickstart
 
@@ -76,6 +104,8 @@ Passing a configured model id or alias keeps the request strict and forwards to 
 
 ## Example
 
+Ask for a multimodal-capable route:
+
 ```bash
 curl -s http://127.0.0.1:8080/v1/router/multimodel \
   -H 'content-type: application/json' \
@@ -88,7 +118,7 @@ curl -s http://127.0.0.1:8080/v1/router/multimodel \
 
 The response includes the selected model/provider, prompt labels, policy, confidence values, token estimates, context eligibility, capability eligibility, rejected candidates, and a decision trace explaining the score.
 
-For detailed commands and API examples, see [docs/usage.md](docs/usage.md).
+For detailed commands, API examples, and operations setup, see [docs/usage.md](docs/usage.md).
 
 ## Routing Policies
 
@@ -103,6 +133,15 @@ Routes ships with policy presets that are controlled by configuration, not hidde
 - `multimodal_first`: favors models with vision, audio, tool, JSON, code, web-app, or long-context capabilities.
 
 Legacy policy names remain supported for compatibility: `floor`, `nitro`, `quality`, `cost_efficient`, `capability_heavy`, and `domain_skills`.
+
+## Repository Map
+
+- [src/classifier.rs](src/classifier.rs): deterministic prompt classification and optional model-backed classifier adapters.
+- [src/router.rs](src/router.rs): candidate filtering, scoring policies, fallback handling, and route explanations.
+- [src/provider.rs](src/provider.rs): provider adapters for OpenAI-compatible, Ollama, llama.cpp, vLLM, OpenRouter, and Cloudflare AI Gateway paths.
+- [src/server.rs](src/server.rs): HTTP API, OpenAI-compatible proxy routes, metrics, budgets, cache, safety, and sticky routing.
+- [examples/router.yaml](examples/router.yaml): local example config for development and tests.
+- [docs/examples/router.production.yaml](docs/examples/router.production.yaml): fuller production-oriented config.
 
 ## Documentation
 
@@ -126,6 +165,8 @@ cargo run -- --config examples/router.yaml provider-conformance-matrix
 
 Routes is designed to be composable. New routing ideas should usually land behind the classifier boundary, scoring-policy boundary, provider adapter boundary, or eval tooling rather than inside HTTP handlers.
 
+Start with [CONTRIBUTING.md](CONTRIBUTING.md), then choose a small change with a clear validation path. Good first contributions usually add one provider, one eval slice, one routing policy, one docs example, or one focused diagnostic improvement.
+
 Good areas for contributors:
 
 - Provider adapters for more OpenAI-compatible and native inference servers.
@@ -143,6 +184,10 @@ cargo run -- --config examples/router.yaml validate
 cargo run -- --config examples/router.yaml openapi
 ```
 
+## Help and Maintainers
+
+Routes is maintained by Autohand. Use GitHub issues for bugs, design questions, provider compatibility reports, and proposed routing policies. When reporting routing behavior, include the prompt shape, expected policy, selected model/provider, config snippet, and any `decision_trace` fields that explain the choice.
+
 ## Project Status
 
-Routes is open for builders who want to make model routing easier to inspect, evaluate, and improve.
+Routes is private while we prepare the first collaborator cohort, but it is already structured for outside contribution: public API contracts, focused docs, local deterministic routing, reproducible eval gates, and a small set of extension boundaries.

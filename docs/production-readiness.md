@@ -1,12 +1,12 @@
-# Production Target
+# Production readiness
 
 This router is intended to be the Autohand Code model gateway for hosted and open-weight inference. It should be safe to put in front of Ollama, llama.cpp, vLLM, OpenRouter, Cloudflare AI Gateway, and future provider adapters without changing application callers.
 
-## 100M-User Readiness Bar
+## Desired properties for opening to the world
 
-The router is not considered production-complete until these requirements are true and verified:
+The router is not considered production-complete until these requirements are true and verified, for many more use cases and providers that we have yet to support.
 
-- Correctness: Morph-compatible routing must never return a model outside request constraints. Fallback behavior must be explicit, observable, and safe.
+- Correctness: Current implementation is compatible routing must never return a model outside request constraints. Fallback behavior must be explicit, observable, and safe.
 - Provider abstraction: provider integrations must be adapter-backed, not only OpenAI-compatible URL forwarding. OpenAI-compatible chat is the first adapter; future adapters include Responses API, embeddings, native provider APIs, and local open-weight runtimes.
 - Open-weight first: local and self-hosted models must be first-class targets with capability, context, cost, domain, health, concurrency, and queue controls.
 - Routing intelligence: heuristic routing, LLM-judge routing, and offline optimization must be measurable against held-out eval datasets. Any GEPA-style optimizer must produce replayable configs, reports, and rollback-safe artifacts.
@@ -17,7 +17,7 @@ The router is not considered production-complete until these requirements are tr
 
 ## Current Evidence
 
-- Morph endpoints are implemented: `/v1/router/classify`, `/v1/router/multimodel`, `/v1/router/raw`, and `/v1/router/{provider}`.
+- Current endpoints are implemented: `/v1/router/classify`, `/v1/router/multimodel`, `/v1/router/raw`, and `/v1/router/{provider}`.
 - OpenAI-compatible chat proxying works for local Ollama through a configured alias.
 - OpenAI-compatible chat forwarding is isolated behind a provider adapter registry with explicit provider kinds for generic OpenAI-compatible services, Ollama, llama.cpp, vLLM, OpenRouter, and Cloudflare AI Gateway.
 - Native Ollama `/api/chat` can be configured with `kind: ollama_native`; the adapter rewrites OpenAI chat requests into Ollama chat payloads and transforms native Ollama responses back into OpenAI-compatible chat completions with usage accounting.

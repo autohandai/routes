@@ -1,24 +1,22 @@
 # Contributing to Routes
 
-Thanks for helping make Routes easier to inspect, evaluate, and improve.
+Routes was built so agents can choose the right capability by policy. Contributions that keep that promise — more providers, better policies, richer diagnostics, stronger evals — are welcome.
 
-Routes is built around a few stable extension points. Before adding a feature, decide which boundary owns it:
+Before opening a PR, read this guide and [AGENTS.md](AGENTS.md). The project values small, testable changes that improve one boundary over broad refactors.
 
-- Classifier behavior belongs behind `PromptClassifier` in `src/classifier.rs`.
-- Route selection belongs in scoring policy or candidate filtering code in `src/router.rs`.
-- Provider integration belongs in `src/provider.rs`.
-- Public API behavior belongs in `src/server.rs`, `src/types.rs`, and `src/openapi.rs`.
-- Production proof belongs in eval data, conformance checks, docs, or metrics.
+## Extension boundaries
 
-## Good First Contributions
+Routes is composable. Decide which boundary owns your change:
 
-- Add an eval slice for a real prompt family: small web apps, coding agents, multimodal prompts, safety-sensitive requests, long-context work, or local-model routing.
-- Add or harden a provider adapter for an OpenAI-compatible or native inference server.
-- Improve policy diagnostics so route decisions are easier to explain.
-- Add deployment examples for real model stacks.
-- Improve docs for local Ollama, llama.cpp, vLLM, OpenRouter, or Cloudflare AI Gateway setups.
+- **Classifier behavior** → `src/classifier.rs`
+- **Route selection / scoring / policies** → `src/router.rs`
+- **Provider integration** → `src/provider.rs`
+- **Public API / contracts / OpenAPI** → `src/server.rs`, `src/types.rs`, `src/openapi.rs`
+- **Production proof** → eval data, conformance checks, docs, or metrics
 
-## Local Workflow
+## Development setup
+
+You need a recent Rust toolchain.
 
 ```bash
 cargo fmt
@@ -27,20 +25,51 @@ cargo run -- --config examples/router.yaml validate
 cargo run -- --config examples/router.yaml openapi
 ```
 
-For routing changes, also run:
+## Adding a provider
+
+1. Add a provider kind to `src/provider.rs` or reuse the OpenAI-compatible adapter.
+2. Register the kind in config validation.
+3. Add a config example to `examples/router.yaml` or `docs/examples/router.production.yaml`.
+4. Run conformance:
+
+```bash
+cargo run -- --config examples/router.yaml provider-conformance-matrix
+```
+
+## Adding a routing policy
+
+1. Implement the policy in `src/router.rs`.
+2. Add the public policy name and alias mapping in config.
+3. Add eval examples that exercise the new policy.
+4. Run the eval gate:
 
 ```bash
 cargo run -- --config examples/router.yaml eval examples/eval.jsonl
 cargo run -- --config examples/router.yaml eval-gate examples/eval.production.jsonl
 ```
 
-For provider changes, run the relevant conformance check:
+## Documentation expectations
 
-```bash
-cargo run -- --config examples/router.yaml provider-conformance-matrix
-```
+If your change affects public behavior, update:
 
-## Pull Request Checklist
+- `README.md` for high-level narrative and examples.
+- `docs/usage.md` for commands, API behavior, or configuration.
+- OpenAPI output (`cargo run -- --config examples/router.yaml openapi`).
+- Config schema (`cargo run -- --config examples/router.yaml config-schema`).
+
+## Production proof
+
+Production readiness is tracked in [docs/production-readiness.md](docs/production-readiness.md). New features that affect routing correctness, provider health, auth, budgets, or observability should include evidence in that doc or in CI artifacts.
+
+## Good first contributions
+
+- Add an eval slice for a real prompt family: small web apps, coding agents, multimodal prompts, safety-sensitive requests, long-context work, or local-model routing.
+- Add or harden a provider adapter for an OpenAI-compatible or native inference server.
+- Improve policy diagnostics so route decisions are easier to explain.
+- Add deployment examples for real model stacks.
+- Improve docs for local Ollama, llama.cpp, vLLM, OpenRouter, or Cloudflare AI Gateway setups.
+
+## Pull request checklist
 
 - Keep the public API OpenAI-compatible where possible.
 - Keep providers and models data-driven from config.
@@ -50,7 +79,7 @@ cargo run -- --config examples/router.yaml provider-conformance-matrix
 - Do not hard-code a single provider as the only path.
 - Preserve fail-closed fallback behavior for automatic routing.
 
-## Issue Reports
+## Issue reports
 
 Useful routing issues include:
 
@@ -68,6 +97,6 @@ Useful provider issues include:
 - HTTP status, content type, and response shape.
 - Whether `provider-conformance` or `provider-conformance-matrix` passes.
 
-## Design Notes
+## Design principle
 
 Routes should stay composable. Prefer small, testable changes that improve one boundary over broad changes that couple routing logic directly to HTTP handlers.

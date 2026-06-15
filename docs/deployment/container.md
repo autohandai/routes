@@ -20,12 +20,12 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=build /app/target/release/autohand-router /usr/local/bin/autohand-router
+COPY --from=build /app/target/release/routes /usr/local/bin/routes
 COPY docs/examples/router.production.yaml /app/router.yaml
 
 ENV AUTOHAND_ROUTER_CONFIG=/app/router.yaml
 EXPOSE 8080
-CMD ["autohand-router", "--config", "/app/router.yaml", "serve"]
+CMD ["routes", "--config", "/app/router.yaml", "serve"]
 ```
 
 ## Production Config Shape

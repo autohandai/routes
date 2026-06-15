@@ -1,0 +1,88 @@
+name: Release binaries
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin routes
+
+      - name: Stage release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="routes-${{ matrix.target }}"
+          mkdir -p "dist/$asset"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            binary="routes.exe"
+          else
+            binary="routes"
+          fi
+          cp "target/${{ matrix.target }}/release/$binary" "dist/$asset/"
+          cp README.md LICENSE "dist/$asset/"
+
+      - name: Archive Unix release
+        if: runner.os != 'Windows'
+        shell: bash
+        run: tar -czf "dist/routes-${{ matrix.target }}.tar.gz" -C dist "routes-${{ matrix.target }}"
+
+      - name: Archive Windows release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "dist/routes-${{ matrix.target }}/*" -DestinationPath "dist/routes-${{ matrix.target }}.zip"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: routes-${{ matrix.target }}
+          path: dist/routes-${{ matrix.target }}.*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/routes-*.tar.gz
+            dist/routes-*.zip

@@ -69,6 +69,71 @@ Our flagship open-source enterprise version, [Autohand Code CLI](https://github.
 
 Use `router-local` for local-first coding work, `router-privacy` for sensitive repositories, `router-fastest` for low-latency edits, or `router-highest-quality` for complex architecture and review tasks. Routes can sit in front of Ollama, llama.cpp, vLLM, OpenRouter, Cloudflare AI Gateway, and OpenAI-compatible providers across local nodes and internet-reachable gateways.
 
+## Install Routes
+
+The executable is named `routes`. It can be installed from GitHub release archives or built with Cargo from source.
+
+### Prebuilt executables
+
+Release tags publish archives for Linux, macOS, and Windows:
+
+| Platform | Release asset |
+| --- | --- |
+| Linux x86_64 | `routes-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `routes-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `routes-x86_64-apple-darwin.tar.gz` |
+| Windows x86_64 | `routes-x86_64-pc-windows-msvc.zip` |
+
+Install on Linux:
+
+```bash
+curl -L https://github.com/autohandai/routes/releases/latest/download/routes-x86_64-unknown-linux-gnu.tar.gz -o routes.tar.gz
+tar -xzf routes.tar.gz
+sudo install -m 755 routes-x86_64-unknown-linux-gnu/routes /usr/local/bin/routes
+routes --help
+```
+
+Install on macOS Apple Silicon:
+
+```bash
+curl -L https://github.com/autohandai/routes/releases/latest/download/routes-aarch64-apple-darwin.tar.gz -o routes.tar.gz
+tar -xzf routes.tar.gz
+sudo install -m 755 routes-aarch64-apple-darwin/routes /usr/local/bin/routes
+routes --help
+```
+
+Install on macOS Intel by replacing `aarch64-apple-darwin` with `x86_64-apple-darwin`.
+
+Install on Windows PowerShell:
+
+```powershell
+Invoke-WebRequest https://github.com/autohandai/routes/releases/latest/download/routes-x86_64-pc-windows-msvc.zip -OutFile routes.zip
+Expand-Archive .\routes.zip -DestinationPath .
+.\routes-x86_64-pc-windows-msvc\routes.exe --help
+```
+
+Move `routes.exe` into a directory on your `PATH` when you want it available from any terminal.
+
+### Cargo install
+
+Cargo users can install the same executable directly from the repository:
+
+```bash
+cargo install --git https://github.com/autohandai/routes --bin routes --locked
+routes init-config router.yaml
+routes --config router.yaml validate
+```
+
+From a local checkout:
+
+```bash
+cargo install --path . --bin routes --locked
+routes init-config router.yaml
+routes --config router.yaml serve
+```
+
+Once `routes serve` is running, any coding agent that supports an OpenAI-compatible endpoint can use it with base URL `http://127.0.0.1:8080/v1` and a policy model such as `router-balanced`, `router-fastest`, `router-local`, or `router-highest-quality`.
+
 ## Get started in 10 minutes
 
 This path does not require provider API keys. It checks the config, exercises the deterministic classifier, shows a route decision, and confirms the project is healthy before you wire it into an application.
@@ -123,6 +188,14 @@ After these steps, you have validated the default config, inspected a classifica
 cargo run -- init-config router.yaml
 cargo run -- --config examples/router.yaml validate
 cargo run -- --config examples/router.yaml serve
+```
+
+If you installed the executable, the equivalent commands are:
+
+```bash
+routes init-config router.yaml
+routes --config router.yaml validate
+routes --config router.yaml serve
 ```
 
 Then point any OpenAI-compatible client at:

@@ -10,7 +10,7 @@ keywords = ["llm", "router", "openai", "inference", "agent"]
 categories = ["web-programming", "network-programming", "command-line-utilities"]
 
 [[bin]]
-name = "autohand-router"
+name = "routes"
 path = "src/main.rs"
 
 [lib]

@@ -26,7 +26,7 @@ use std::{fs, path::PathBuf};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Debug, Parser)]
-#[command(name = "autohand-router")]
+#[command(name = "routes")]
 #[command(about = "OpenAI-compatible Rust LLM router for local and hosted providers")]
 struct Cli {
     #[arg(

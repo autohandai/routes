@@ -129,6 +129,62 @@ scoring:
     raw_capability: 0.0
     latency: 0.05
     health: 1.0
+  lowest_cost_acceptable:
+    # Lowest-cost model that still clears capability/context gates.
+    capability_fit: 0.34
+    domain_bonus: 0.10
+    cost: 0.56
+    overkill: 1.8
+    raw_capability: 0.0
+    latency: 0.04
+    health: 1.0
+  fastest_healthy:
+    # Fastest healthy model with enough capability.
+    capability_fit: 0.44
+    domain_bonus: 0.12
+    cost: 0.12
+    overkill: 0.6
+    raw_capability: 0.08
+    latency: 0.42
+    health: 1.25
+  highest_quality:
+    # Strongest model when answer quality matters more than marginal cost.
+    capability_fit: 0.16
+    domain_bonus: 0.10
+    cost: 0.02
+    overkill: 0.0
+    raw_capability: 0.82
+    latency: 0.03
+    health: 1.0
+  local_first:
+    capability_fit: 0.48
+    domain_bonus: 0.14
+    cost: 0.18
+    overkill: 0.8
+    raw_capability: 0.04
+    latency: 0.05
+    health: 1.0
+    local_bonus: 0.34
+    remote_penalty: 0.18
+  privacy_first:
+    capability_fit: 0.42
+    domain_bonus: 0.12
+    cost: 0.12
+    overkill: 0.6
+    raw_capability: 0.06
+    latency: 0.05
+    health: 1.0
+    local_bonus: 0.48
+    remote_penalty: 0.36
+  multimodal_first:
+    capability_fit: 0.42
+    domain_bonus: 0.14
+    cost: 0.10
+    overkill: 0.4
+    raw_capability: 0.08
+    latency: 0.05
+    health: 1.0
+    multimodal_capability: 0.46
   floor:
     # Cheapest acceptable model that still clears capability/context gates.
     capability_fit: 0.34

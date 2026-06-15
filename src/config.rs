@@ -260,6 +260,18 @@ pub struct ProviderHealthSamplerConfig {
 pub struct ScoringConfig {
     #[serde(default = "default_balanced_weights")]
     pub balanced: PolicyWeights,
+    #[serde(default = "default_lowest_cost_acceptable_weights")]
+    pub lowest_cost_acceptable: PolicyWeights,
+    #[serde(default = "default_fastest_healthy_weights")]
+    pub fastest_healthy: PolicyWeights,
+    #[serde(default = "default_highest_quality_weights")]
+    pub highest_quality: PolicyWeights,
+    #[serde(default = "default_local_first_weights")]
+    pub local_first: PolicyWeights,
+    #[serde(default = "default_privacy_first_weights")]
+    pub privacy_first: PolicyWeights,
+    #[serde(default = "default_multimodal_first_weights")]
+    pub multimodal_first: PolicyWeights,
     #[serde(default = "default_floor_weights")]
     pub floor: PolicyWeights,
     #[serde(default = "default_nitro_weights")]
@@ -302,6 +314,12 @@ pub struct PolicyWeights {
     pub latency: f32,
     #[serde(default)]
     pub health: f32,
+    #[serde(default)]
+    pub local_bonus: f32,
+    #[serde(default)]
+    pub remote_penalty: f32,
+    #[serde(default)]
+    pub multimodal_capability: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,6 +340,12 @@ impl Default for ScoringConfig {
     fn default() -> Self {
         Self {
             balanced: default_balanced_weights(),
+            lowest_cost_acceptable: default_lowest_cost_acceptable_weights(),
+            fastest_healthy: default_fastest_healthy_weights(),
+            highest_quality: default_highest_quality_weights(),
+            local_first: default_local_first_weights(),
+            privacy_first: default_privacy_first_weights(),
+            multimodal_first: default_multimodal_first_weights(),
             floor: default_floor_weights(),
             nitro: default_nitro_weights(),
             quality: default_quality_weights(),
@@ -361,6 +385,66 @@ fn default_balanced_weights() -> PolicyWeights {
         raw_capability: 0.0,
         latency: default_latency_weight(),
         health: default_health_weight(),
+        local_bonus: 0.0,
+        remote_penalty: 0.0,
+        multimodal_capability: 0.0,
+    }
+}
+
+fn default_lowest_cost_acceptable_weights() -> PolicyWeights {
+    default_floor_weights()
+}
+
+fn default_fastest_healthy_weights() -> PolicyWeights {
+    default_nitro_weights()
+}
+
+fn default_highest_quality_weights() -> PolicyWeights {
+    default_quality_weights()
+}
+
+fn default_local_first_weights() -> PolicyWeights {
+    PolicyWeights {
+        capability_fit: 0.48,
+        domain_bonus: 0.14,
+        cost: 0.18,
+        overkill: 0.8,
+        raw_capability: 0.04,
+        latency: default_latency_weight(),
+        health: default_health_weight(),
+        local_bonus: 0.34,
+        remote_penalty: 0.18,
+        multimodal_capability: 0.0,
+    }
+}
+
+fn default_privacy_first_weights() -> PolicyWeights {
+    PolicyWeights {
+        capability_fit: 0.42,
+        domain_bonus: 0.12,
+        cost: 0.12,
+        overkill: 0.6,
+        raw_capability: 0.06,
+        latency: default_latency_weight(),
+        health: default_health_weight(),
+        local_bonus: 0.48,
+        remote_penalty: 0.36,
+        multimodal_capability: 0.0,
+    }
+}
+
+fn default_multimodal_first_weights() -> PolicyWeights {
+    PolicyWeights {
+        capability_fit: 0.42,
+        domain_bonus: 0.14,
+        cost: 0.10,
+        overkill: 0.4,
+        raw_capability: 0.08,
+        latency: default_latency_weight(),
+        health: default_health_weight(),
+        local_bonus: 0.0,
+        remote_penalty: 0.0,
+        multimodal_capability: 0.46,
     }
 }
 
@@ -373,6 +457,9 @@ fn default_floor_weights() -> PolicyWeights {
         raw_capability: 0.0,
         latency: default_latency_weight() * 0.8,
         health: default_health_weight(),
+        local_bonus: 0.0,
+        remote_penalty: 0.0,
+        multimodal_capability: 0.0,
     }
 }
 
@@ -385,6 +472,9 @@ fn default_nitro_weights() -> PolicyWeights {
         raw_capability: 0.08,
         latency: 0.42,
         health: 1.25,
+        local_bonus: 0.0,
+        remote_penalty: 0.0,
+        multimodal_capability: 0.0,
     }
 }
 
@@ -397,6 +487,9 @@ fn default_quality_weights() -> PolicyWeights {
         raw_capability: 0.82,
         latency: default_latency_weight() * 0.6,
         health: default_health_weight(),
+        local_bonus: 0.0,
+        remote_penalty: 0.0,
+        multimodal_capability: 0.0,
     }
 }
 
@@ -409,6 +502,9 @@ fn default_cost_efficient_weights() -> PolicyWeights {
         raw_capability: 0.0,
         latency: default_latency_weight(),
         health: default_health_weight(),
+        local_bonus: 0.0,
+        remote_penalty: 0.0,
+        multimodal_capability: 0.0,
     }
 }
 
@@ -421,6 +517,9 @@ fn default_capability_heavy_weights() -> PolicyWeights {
         raw_capability: 0.72,
         latency: default_latency_weight(),
         health: default_health_weight(),
+        local_bonus: 0.0,
+        remote_penalty: 0.0,
+        multimodal_capability: 0.0,
     }
 }
 
@@ -433,6 +532,9 @@ fn default_domain_skills_weights() -> PolicyWeights {
         raw_capability: 0.10,
         latency: default_latency_weight(),
         health: default_health_weight(),
+        local_bonus: 0.0,
+        remote_penalty: 0.0,
+        multimodal_capability: 0.0,
     }
 }
 
@@ -1297,6 +1399,12 @@ impl ScoringConfig {
     pub fn weights_for(&self, policy: &RouterPolicy) -> PolicyWeights {
         match policy {
             RouterPolicy::Balanced => self.balanced,
+            RouterPolicy::LowestCostAcceptable => self.lowest_cost_acceptable,
+            RouterPolicy::FastestHealthy => self.fastest_healthy,
+            RouterPolicy::HighestQuality => self.highest_quality,
+            RouterPolicy::LocalFirst => self.local_first,
+            RouterPolicy::PrivacyFirst => self.privacy_first,
+            RouterPolicy::MultimodalFirst => self.multimodal_first,
             RouterPolicy::Floor => self.floor,
             RouterPolicy::Nitro => self.nitro,
             RouterPolicy::Quality => self.quality,
@@ -1318,6 +1426,12 @@ impl ScoringConfig {
         );
         for (name, weights) in [
             ("balanced", self.balanced),
+            ("lowest_cost_acceptable", self.lowest_cost_acceptable),
+            ("fastest_healthy", self.fastest_healthy),
+            ("highest_quality", self.highest_quality),
+            ("local_first", self.local_first),
+            ("privacy_first", self.privacy_first),
+            ("multimodal_first", self.multimodal_first),
             ("floor", self.floor),
             ("nitro", self.nitro),
             ("quality", self.quality),
@@ -1332,7 +1446,10 @@ impl ScoringConfig {
                     && weights.overkill >= 0.0
                     && weights.raw_capability >= 0.0
                     && weights.latency >= 0.0
-                    && weights.health >= 0.0,
+                    && weights.health >= 0.0
+                    && weights.local_bonus >= 0.0
+                    && weights.remote_penalty >= 0.0
+                    && weights.multimodal_capability >= 0.0,
                 "scoring.{name} weights must be non-negative"
             );
             anyhow::ensure!(
@@ -1342,7 +1459,10 @@ impl ScoringConfig {
                     && weights.overkill.is_finite()
                     && weights.raw_capability.is_finite()
                     && weights.latency.is_finite()
-                    && weights.health.is_finite(),
+                    && weights.health.is_finite()
+                    && weights.local_bonus.is_finite()
+                    && weights.remote_penalty.is_finite()
+                    && weights.multimodal_capability.is_finite(),
                 "scoring.{name} weights must be finite"
             );
         }

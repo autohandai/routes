@@ -88,6 +88,13 @@ pub enum ModelCapability {
 #[serde(rename_all = "snake_case")]
 pub enum RouterPolicy {
     Balanced,
+    LowestCostAcceptable,
+    #[serde(alias = "fast")]
+    FastestHealthy,
+    HighestQuality,
+    LocalFirst,
+    PrivacyFirst,
+    MultimodalFirst,
     Floor,
     Nitro,
     Quality,
@@ -503,6 +510,9 @@ pub struct RoutePolicyWeights {
     pub raw_capability: f32,
     pub latency: f32,
     pub health: f32,
+    pub local_bonus: f32,
+    pub remote_penalty: f32,
+    pub multimodal_capability: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -521,6 +531,9 @@ pub struct RouteScoreComponents {
     pub raw_capability_score: f32,
     pub cost_penalty: f32,
     pub overkill_penalty: f32,
+    pub local_score_boost: f32,
+    pub remote_penalty: f32,
+    pub multimodal_score_boost: f32,
     pub routing_priority_boost: f32,
     pub learned_score_boost: f32,
     pub latency_penalty: f32,

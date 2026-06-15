@@ -590,6 +590,9 @@ impl From<crate::config::PolicyWeights> for RoutePolicyWeights {
             raw_capability: weights.raw_capability,
             latency: weights.latency,
             health: weights.health,
+            local_bonus: weights.local_bonus,
+            remote_penalty: weights.remote_penalty,
+            multimodal_capability: weights.multimodal_capability,
         }
     }
 }
@@ -644,9 +647,25 @@ fn score_model_components(
     let raw_capability_score = model.capability * weights.raw_capability;
     let cost_penalty = cost * weights.cost;
     let overkill_penalty = overkill_penalty * weights.overkill;
-    let final_score = capability_fit_score + domain_bonus_score + raw_capability_score
+    let local_score_boost = if model.local {
+        weights.local_bonus
+    } else {
+        0.0
+    };
+    let remote_penalty = if model.local {
+        0.0
+    } else {
+        weights.remote_penalty
+    };
+    let multimodal_score_boost = model_multimodal_capability(model) * weights.multimodal_capability;
+    let final_score = capability_fit_score
+        + domain_bonus_score
+        + raw_capability_score
+        + local_score_boost
+        + multimodal_score_boost
         - cost_penalty
-        - overkill_penalty;
+        - overkill_penalty
+        - remote_penalty;
 
     RouteScoreComponents {
         capability_fit,
@@ -656,6 +675,9 @@ fn score_model_components(
         raw_capability_score,
         cost_penalty,
         overkill_penalty,
+        local_score_boost,
+        remote_penalty,
+        multimodal_score_boost,
         routing_priority_boost: 0.0,
         learned_score_boost: 0.0,
         latency_penalty: 0.0,
@@ -664,6 +686,20 @@ fn score_model_components(
         context_exclusion_penalty: 0.0,
         final_score,
     }
+}
+
+fn model_multimodal_capability(model: &ModelConfig) -> f32 {
+    let capabilities = [
+        model.capabilities.supports_vision,
+        model.capabilities.supports_audio,
+        model.capabilities.supports_tools,
+        model.capabilities.supports_web_apps,
+    ];
+    let supported = capabilities
+        .into_iter()
+        .filter(|supported| *supported)
+        .count() as f32;
+    supported / capabilities.len() as f32
 }
 
 pub fn required_capability(difficulty: &DifficultyLabel) -> f32 {
@@ -1372,6 +1408,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lowest_cost_acceptable_policy_selects_cheapest_acceptable_model() {
+        let route = engine()
+            .route(MultimodelRequest {
+                input: "Fix this typo in the Rust comment".to_string(),
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+                policy: RouterPolicy::LowestCostAcceptable,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(route.model, "cheap");
+        assert_eq!(route.policy, RouterPolicy::LowestCostAcceptable);
+    }
+
+    #[tokio::test]
     async fn routes_hard_architecture_work_to_strong_model() {
         let route = engine()
             .route(MultimodelRequest {
@@ -1406,6 +1460,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn highest_quality_policy_selects_strongest_model() {
+        let route = engine()
+            .route(MultimodelRequest {
+                input: "Design a production multi tenant event sourcing architecture with concurrency, migration, benchmark, and security tradeoffs".to_string(),
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+                policy: RouterPolicy::HighestQuality,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(route.model, "strong");
+        assert_eq!(route.policy, RouterPolicy::HighestQuality);
+    }
+
+    #[tokio::test]
     async fn nitro_policy_prefers_fast_healthy_provider() {
         let route = latency_policy_engine()
             .route(MultimodelRequest {
@@ -1427,6 +1499,192 @@ mod tests {
                 |candidate| candidate.model == "slow-strong" && candidate.latency_penalty > 0.7
             )
         );
+    }
+
+    #[tokio::test]
+    async fn fastest_healthy_policy_prefers_fast_healthy_provider() {
+        let route = latency_policy_engine()
+            .route(MultimodelRequest {
+                input: "ASAP fast instant realtime: design a production architecture with concurrency, benchmark, and security tradeoffs".to_string(),
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+                policy: RouterPolicy::FastestHealthy,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(route.model, "fast-balanced");
+        assert_eq!(route.provider, "fast");
+        assert_eq!(route.policy, RouterPolicy::FastestHealthy);
+    }
+
+    #[tokio::test]
+    async fn local_first_policy_prefers_local_candidate() {
+        let base_engine = engine();
+        let mut config = (*base_engine.config()).clone();
+        config.providers.push(ProviderConfig {
+            name: "remote".to_string(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://remote.example.test".to_string(),
+            api_key_env: None,
+            api_key: None,
+            chat_path: "/v1/chat/completions".to_string(),
+            responses_path: Some("/v1/responses".to_string()),
+            embeddings_path: Some("/v1/embeddings".to_string()),
+            images_path: Some("/v1/images/generations".to_string()),
+            speech_path: Some("/v1/audio/speech".to_string()),
+            audio_transcriptions_path: Some("/v1/audio/transcriptions".to_string()),
+            audio_translations_path: Some("/v1/audio/translations".to_string()),
+            health_path: None,
+            timeout_ms: 120_000,
+            retries: 1,
+            max_concurrency: None,
+            queue_timeout_ms: None,
+            extra_headers: HashMap::new(),
+        });
+        config.models.push(ModelConfig {
+            id: "remote-strong".to_string(),
+            provider: "remote".to_string(),
+            aliases: vec![],
+            capability: 0.95,
+            cost_per_million_input: 1.0,
+            cost_per_million_output: 1.0,
+            domains: vec![DomainLabel::Coding, DomainLabel::Design],
+            context_window: None,
+            capabilities: Default::default(),
+            local: false,
+        });
+        let engine = RoutingEngine::new(config, HeuristicClassifier::default());
+
+        let route = engine
+            .route(MultimodelRequest {
+                input: "Refactor this Rust API client and add tests".to_string(),
+                allowed_models: vec!["balanced".to_string(), "remote-strong".to_string()],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+                policy: RouterPolicy::LocalFirst,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(route.model, "balanced");
+        assert_eq!(route.policy, RouterPolicy::LocalFirst);
+        let selected = route
+            .candidates
+            .iter()
+            .find(|candidate| candidate.model == "balanced")
+            .expect("selected candidate present");
+        assert!(selected.score_components.local_score_boost > 0.0);
+    }
+
+    #[tokio::test]
+    async fn privacy_first_policy_penalizes_remote_candidates() {
+        let base_engine = engine();
+        let mut config = (*base_engine.config()).clone();
+        config.providers.push(ProviderConfig {
+            name: "remote".to_string(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://remote.example.test".to_string(),
+            api_key_env: None,
+            api_key: None,
+            chat_path: "/v1/chat/completions".to_string(),
+            responses_path: Some("/v1/responses".to_string()),
+            embeddings_path: Some("/v1/embeddings".to_string()),
+            images_path: Some("/v1/images/generations".to_string()),
+            speech_path: Some("/v1/audio/speech".to_string()),
+            audio_transcriptions_path: Some("/v1/audio/transcriptions".to_string()),
+            audio_translations_path: Some("/v1/audio/translations".to_string()),
+            health_path: None,
+            timeout_ms: 120_000,
+            retries: 1,
+            max_concurrency: None,
+            queue_timeout_ms: None,
+            extra_headers: HashMap::new(),
+        });
+        config.models.push(ModelConfig {
+            id: "remote-strong".to_string(),
+            provider: "remote".to_string(),
+            aliases: vec![],
+            capability: 0.95,
+            cost_per_million_input: 1.0,
+            cost_per_million_output: 1.0,
+            domains: vec![DomainLabel::Coding, DomainLabel::Design],
+            context_window: None,
+            capabilities: Default::default(),
+            local: false,
+        });
+        let engine = RoutingEngine::new(config, HeuristicClassifier::default());
+
+        let route = engine
+            .route(MultimodelRequest {
+                input: "Refactor this Rust API client and add tests without using cloud models"
+                    .to_string(),
+                allowed_models: vec!["balanced".to_string(), "remote-strong".to_string()],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+                policy: RouterPolicy::PrivacyFirst,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(route.model, "balanced");
+        assert_eq!(route.policy, RouterPolicy::PrivacyFirst);
+        let remote = route
+            .candidates
+            .iter()
+            .find(|candidate| candidate.model == "remote-strong")
+            .expect("remote candidate present");
+        assert!(remote.score_components.remote_penalty > 0.0);
+    }
+
+    #[tokio::test]
+    async fn multimodal_first_policy_prefers_multimodal_candidate() {
+        let base_engine = engine();
+        let mut config = (*base_engine.config()).clone();
+        let mut multimodal_capabilities = crate::types::ModelCapabilities::default();
+        multimodal_capabilities.supports_vision = true;
+        multimodal_capabilities.supports_audio = true;
+        multimodal_capabilities.supports_tools = true;
+        multimodal_capabilities.supports_web_apps = true;
+        config.models.push(ModelConfig {
+            id: "multimodal-balanced".to_string(),
+            provider: "local".to_string(),
+            aliases: vec![],
+            capability: 0.65,
+            cost_per_million_input: 1.0,
+            cost_per_million_output: 1.0,
+            domains: vec![DomainLabel::Coding, DomainLabel::Design],
+            context_window: None,
+            capabilities: multimodal_capabilities,
+            local: true,
+        });
+        let engine = RoutingEngine::new(config, HeuristicClassifier::default());
+
+        let route = engine
+            .route(MultimodelRequest {
+                input: "Build a small multimodal web app from a screenshot and audio note"
+                    .to_string(),
+                allowed_models: vec!["balanced".to_string(), "multimodal-balanced".to_string()],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+                policy: RouterPolicy::MultimodalFirst,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(route.model, "multimodal-balanced");
+        assert_eq!(route.policy, RouterPolicy::MultimodalFirst);
+        let selected = route
+            .candidates
+            .iter()
+            .find(|candidate| candidate.model == "multimodal-balanced")
+            .expect("multimodal candidate present");
+        assert!(selected.score_components.multimodal_score_boost > 0.0);
     }
 
     #[tokio::test]

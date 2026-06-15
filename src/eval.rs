@@ -716,6 +716,9 @@ fn balanced_weight_candidates() -> Vec<PolicyWeights> {
             raw_capability: 0.0,
             latency: 0.05,
             health: 1.0,
+            local_bonus: 0.0,
+            remote_penalty: 0.0,
+            multimodal_capability: 0.0,
         },
         PolicyWeights {
             capability_fit: 0.58,
@@ -725,6 +728,9 @@ fn balanced_weight_candidates() -> Vec<PolicyWeights> {
             raw_capability: 0.0,
             latency: 0.05,
             health: 1.0,
+            local_bonus: 0.0,
+            remote_penalty: 0.0,
+            multimodal_capability: 0.0,
         },
         PolicyWeights {
             capability_fit: 0.64,
@@ -734,6 +740,9 @@ fn balanced_weight_candidates() -> Vec<PolicyWeights> {
             raw_capability: 0.0,
             latency: 0.05,
             health: 1.0,
+            local_bonus: 0.0,
+            remote_penalty: 0.0,
+            multimodal_capability: 0.0,
         },
         PolicyWeights {
             capability_fit: 0.52,
@@ -743,6 +752,9 @@ fn balanced_weight_candidates() -> Vec<PolicyWeights> {
             raw_capability: 0.0,
             latency: 0.05,
             health: 1.0,
+            local_bonus: 0.0,
+            remote_penalty: 0.0,
+            multimodal_capability: 0.0,
         },
         PolicyWeights {
             capability_fit: 0.44,
@@ -752,6 +764,9 @@ fn balanced_weight_candidates() -> Vec<PolicyWeights> {
             raw_capability: 0.0,
             latency: 0.05,
             health: 1.0,
+            local_bonus: 0.0,
+            remote_penalty: 0.0,
+            multimodal_capability: 0.0,
         },
     ]
 }

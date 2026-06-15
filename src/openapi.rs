@@ -729,9 +729,12 @@ fn schemas() -> Value {
                 "overkill": { "type": "number" },
                 "raw_capability": { "type": "number" },
                 "latency": { "type": "number" },
-                "health": { "type": "number" }
+                "health": { "type": "number" },
+                "local_bonus": { "type": "number" },
+                "remote_penalty": { "type": "number" },
+                "multimodal_capability": { "type": "number" }
             },
-            "required": ["capability_fit", "domain_bonus", "cost", "overkill", "raw_capability", "latency", "health"]
+            "required": ["capability_fit", "domain_bonus", "cost", "overkill", "raw_capability", "latency", "health", "local_bonus", "remote_penalty", "multimodal_capability"]
         },
         "RouteCandidateRejection": {
             "type": "object",
@@ -752,6 +755,9 @@ fn schemas() -> Value {
                 "raw_capability_score": { "type": "number" },
                 "cost_penalty": { "type": "number" },
                 "overkill_penalty": { "type": "number" },
+                "local_score_boost": { "type": "number" },
+                "remote_penalty": { "type": "number" },
+                "multimodal_score_boost": { "type": "number" },
                 "routing_priority_boost": { "type": "number" },
                 "learned_score_boost": { "type": "number" },
                 "latency_penalty": { "type": "number" },
@@ -760,7 +766,7 @@ fn schemas() -> Value {
                 "context_exclusion_penalty": { "type": "number" },
                 "final_score": { "type": "number" }
             },
-            "required": ["capability_fit", "capability_fit_score", "domain_bonus", "domain_bonus_score", "raw_capability_score", "cost_penalty", "overkill_penalty", "routing_priority_boost", "learned_score_boost", "latency_penalty", "health_penalty", "capability_exclusion_penalty", "context_exclusion_penalty", "final_score"]
+            "required": ["capability_fit", "capability_fit_score", "domain_bonus", "domain_bonus_score", "raw_capability_score", "cost_penalty", "overkill_penalty", "local_score_boost", "remote_penalty", "multimodal_score_boost", "routing_priority_boost", "learned_score_boost", "latency_penalty", "health_penalty", "capability_exclusion_penalty", "context_exclusion_penalty", "final_score"]
         },
         "ModelCapability": {
             "type": "string",
@@ -780,7 +786,7 @@ fn schemas() -> Value {
         },
         "RouterPolicy": {
             "type": "string",
-            "enum": ["balanced", "floor", "nitro", "quality", "cost_efficient", "capability_heavy", "domain_skills"]
+            "enum": ["balanced", "lowest_cost_acceptable", "fastest_healthy", "highest_quality", "local_first", "privacy_first", "multimodal_first", "floor", "nitro", "quality", "cost_efficient", "capability_heavy", "domain_skills"]
         },
         "OpenAiChatRequest": {
             "type": "object",
@@ -1043,5 +1049,22 @@ mod tests {
         assert!(spec["components"]["schemas"]["LatencySensitivityClassification"].is_object());
         assert!(spec["components"]["schemas"]["ReasoningDepthClassification"].is_object());
         assert!(spec["components"]["schemas"]["JudgeMetricsSnapshot"].is_object());
+        assert!(
+            spec["components"]["schemas"]["RouterPolicy"]["enum"]
+                .as_array()
+                .expect("router policy enum")
+                .iter()
+                .any(|value| value == "privacy_first")
+        );
+        assert!(
+            spec["components"]["schemas"]["RouteScoreComponents"]["properties"]
+                ["local_score_boost"]
+                .is_object()
+        );
+        assert!(
+            spec["components"]["schemas"]["RouteScoreComponents"]["properties"]
+                ["multimodal_score_boost"]
+                .is_object()
+        );
     }
 }

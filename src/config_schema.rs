@@ -46,6 +46,13 @@ fn defs() -> Value {
     json!({
         "RouterPolicy": string_enum(&[
             "balanced",
+            "lowest_cost_acceptable",
+            "fastest_healthy",
+            "fast",
+            "highest_quality",
+            "local_first",
+            "privacy_first",
+            "multimodal_first",
             "floor",
             "nitro",
             "quality",
@@ -283,6 +290,12 @@ fn defs() -> Value {
             "additionalProperties": false,
             "properties": {
                 "balanced": ref_schema("PolicyWeights"),
+                "lowest_cost_acceptable": ref_schema("PolicyWeights"),
+                "fastest_healthy": ref_schema("PolicyWeights"),
+                "highest_quality": ref_schema("PolicyWeights"),
+                "local_first": ref_schema("PolicyWeights"),
+                "privacy_first": ref_schema("PolicyWeights"),
+                "multimodal_first": ref_schema("PolicyWeights"),
                 "floor": ref_schema("PolicyWeights"),
                 "nitro": ref_schema("PolicyWeights"),
                 "quality": ref_schema("PolicyWeights"),
@@ -320,7 +333,10 @@ fn defs() -> Value {
                 "overkill": { "type": "number" },
                 "raw_capability": { "type": "number", "default": 0.0 },
                 "latency": { "type": "number", "default": 0.05 },
-                "health": { "type": "number", "default": 1.0 }
+                "health": { "type": "number", "default": 1.0 },
+                "local_bonus": { "type": "number", "default": 0.0 },
+                "remote_penalty": { "type": "number", "default": 0.0 },
+                "multimodal_capability": { "type": "number", "default": 0.0 }
             }
         }
     })
@@ -464,6 +480,30 @@ mod tests {
         assert_eq!(
             schema["$defs"]["ScoringConfig"]["properties"]["learned"]["$ref"],
             "#/$defs/LearnedScoringConfig"
+        );
+        assert_eq!(
+            schema["$defs"]["ScoringConfig"]["properties"]["local_first"]["$ref"],
+            "#/$defs/PolicyWeights"
+        );
+        assert_eq!(
+            schema["$defs"]["ScoringConfig"]["properties"]["privacy_first"]["$ref"],
+            "#/$defs/PolicyWeights"
+        );
+        assert_eq!(
+            schema["$defs"]["ScoringConfig"]["properties"]["multimodal_first"]["$ref"],
+            "#/$defs/PolicyWeights"
+        );
+        assert_eq!(
+            schema["$defs"]["PolicyWeights"]["properties"]["local_bonus"]["default"],
+            0.0
+        );
+        assert_eq!(
+            schema["$defs"]["PolicyWeights"]["properties"]["remote_penalty"]["default"],
+            0.0
+        );
+        assert_eq!(
+            schema["$defs"]["PolicyWeights"]["properties"]["multimodal_capability"]["default"],
+            0.0
         );
         assert_eq!(
             schema["$defs"]["ModelCapabilities"]["properties"]["supports_web_apps"]["type"],

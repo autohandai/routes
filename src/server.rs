@@ -3756,7 +3756,19 @@ fn cached_upstream_response(
 }
 
 fn parse_router_model_policy(model: &str) -> RouterPolicy {
-    if model.contains("floor") {
+    if model.contains("lowest-cost") || model.contains("lowest_cost") {
+        RouterPolicy::LowestCostAcceptable
+    } else if model.contains("fastest") || model.contains("fastest-healthy") {
+        RouterPolicy::FastestHealthy
+    } else if model.contains("highest-quality") || model.contains("highest_quality") {
+        RouterPolicy::HighestQuality
+    } else if model.contains("local") {
+        RouterPolicy::LocalFirst
+    } else if model.contains("privacy") {
+        RouterPolicy::PrivacyFirst
+    } else if model.contains("multimodal") {
+        RouterPolicy::MultimodalFirst
+    } else if model.contains("floor") {
         RouterPolicy::Floor
     } else if model.contains("nitro") || model.contains("fast") {
         RouterPolicy::Nitro
@@ -4895,6 +4907,30 @@ mod tests {
         assert_eq!(
             parse_router_model_policy("router-balanced"),
             RouterPolicy::Balanced
+        );
+        assert_eq!(
+            parse_router_model_policy("router-lowest-cost"),
+            RouterPolicy::LowestCostAcceptable
+        );
+        assert_eq!(
+            parse_router_model_policy("router-fastest"),
+            RouterPolicy::FastestHealthy
+        );
+        assert_eq!(
+            parse_router_model_policy("router-highest-quality"),
+            RouterPolicy::HighestQuality
+        );
+        assert_eq!(
+            parse_router_model_policy("router-local"),
+            RouterPolicy::LocalFirst
+        );
+        assert_eq!(
+            parse_router_model_policy("router-privacy"),
+            RouterPolicy::PrivacyFirst
+        );
+        assert_eq!(
+            parse_router_model_policy("router-multimodal"),
+            RouterPolicy::MultimodalFirst
         );
         assert_eq!(
             parse_router_model_policy("router-floor"),

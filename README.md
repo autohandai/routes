@@ -50,7 +50,7 @@ http://127.0.0.1:8080/v1/audio/transcriptions
 http://127.0.0.1:8080/v1/audio/translations
 ```
 
-Use model `auto`, `router-balanced`, `router-floor`, `router-nitro`, `router-quality`, `router-cost`, `router-capability`, or `router-domain` to let the router select the upstream model. Passing a configured model id or alias forwards to that model.
+Use model `auto`, `router-balanced`, `router-lowest-cost`, `router-fastest`, `router-highest-quality`, `router-local`, `router-privacy`, `router-multimodal`, `router-floor`, `router-nitro`, `router-quality`, `router-cost`, `router-capability`, or `router-domain` to let the router select the upstream model. Passing a configured model id or alias forwards to that model.
 
 Proxied responses include:
 
@@ -86,7 +86,7 @@ The response includes `model`, `provider`, `difficulty`, `ambiguity`, `domain`, 
 It also includes estimated input tokens, requested output tokens, per-candidate context eligibility, and per-candidate capability eligibility so oversized or modality-specific prompts do not route to models that cannot fit or satisfy them.
 `decision_trace` includes the classifier labels, selected policy weights, required capabilities, selected score, rejected candidates, and per-candidate score components for debugging routing decisions.
 Reasoning depth raises or lowers the capability target, and latency sensitivity changes how strongly observed/static provider latency affects candidate scores.
-Policy presets are config-driven: `balanced` is the default tradeoff, `floor` selects the cheapest acceptable candidate, `nitro` emphasizes fast healthy providers, and `quality` favors the strongest candidate. Legacy policy names `cost_efficient`, `capability_heavy`, and `domain_skills` remain supported.
+Policy presets are config-driven: `balanced` is the default tradeoff, `lowest_cost_acceptable` selects the cheapest candidate that clears capability/context gates, `fastest_healthy` emphasizes low-latency healthy providers, `highest_quality` favors the strongest candidate, `local_first` prefers local models, `privacy_first` strongly penalizes remote candidates, and `multimodal_first` favors models with vision/audio/tool/web-app capability. Legacy aliases `floor`, `nitro`, `quality`, `cost_efficient`, `capability_heavy`, and `domain_skills` remain supported.
 Optional learned scoring is configured under `scoring.learned`; it applies a bounded linear score boost from trainable feature/model weights such as `difficulty.hard`, `domain.coding`, `modality.vision`, `supports_web_apps`, `capability`, `cost`, `provider.<name>`, and `model.<id-or-alias>`. Learned contributions are exposed as `score_components.learned_score_boost`.
 When `default_model` is provided with `allowed_models` or `allowed_providers`, the default must satisfy those filters. The router will not silently return an out-of-filter fallback.
 

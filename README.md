@@ -134,6 +134,10 @@ routes --config router.yaml serve
 
 Once `routes serve` is running, any coding agent that supports an OpenAI-compatible endpoint can use it with base URL `http://127.0.0.1:8080/v1` and a policy model such as `router-balanced`, `router-fastest`, `router-local`, or `router-highest-quality`.
 
+### Release channels
+
+GitHub Actions publishes stable releases by default for tags such as `v0.2.0`. Alpha releases use tags such as `v0.2.0-alpha.1` or the manual release workflow's `alpha` channel. Every release generates GitHub release notes and attaches `routes-<tag>-CHANGELOG.md` plus `routes-<tag>-RELEASE_NOTES.md` alongside the platform archives.
+
 ## Get started in 10 minutes
 
 This path does not require provider API keys. It checks the config, exercises the deterministic classifier, shows a route decision, and confirms the project is healthy before you wire it into an application.

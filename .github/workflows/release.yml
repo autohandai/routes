@@ -2,6 +2,19 @@ name: Release binaries
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, for example v0.2.0 or v0.2.0-alpha.1"
+        required: true
+        type: string
+      release_channel:
+        description: "Release channel"
+        required: true
+        default: stable
+        type: choice
+        options:
+          - stable
+          - alpha
   push:
     tags:
       - "v*"
@@ -70,19 +83,161 @@ jobs:
   publish:
     name: Publish GitHub release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
+      - name: Resolve release metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+            channel="${{ inputs.release_channel }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            channel="stable"
+          fi
+
+          if [[ "$tag" == *"-alpha"* ]]; then
+            channel="alpha"
+          fi
+
+          if [ "$channel" = "alpha" ]; then
+            prerelease="true"
+            make_latest="false"
+          else
+            prerelease="false"
+            make_latest="true"
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "make_latest=$make_latest" >> "$GITHUB_OUTPUT"
+
+      - name: Generate changelog
+        id: changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force
+
+          tag="${{ steps.metadata.outputs.tag }}"
+          channel="${{ steps.metadata.outputs.channel }}"
+          changelog_path="dist/routes-${tag}-CHANGELOG.md"
+          release_notes_path="dist/routes-${tag}-RELEASE_NOTES.md"
+
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            end_ref="$tag"
+          else
+            end_ref="$GITHUB_SHA"
+          fi
+
+          previous_tag="$(
+            git tag --sort=-v:refname --merged "$end_ref" \
+              | grep -Fvx "$tag" \
+              | head -n 1 || true
+          )"
+
+          if [ -n "$previous_tag" ]; then
+            range="$previous_tag..$end_ref"
+            summary="Changes since \`$previous_tag\`."
+          else
+            range="$end_ref"
+            summary="Initial release changelog."
+          fi
+
+          {
+            echo "# Routes $tag Changelog"
+            echo
+            echo "- Channel: \`$channel\`"
+            echo "- Previous tag: \`${previous_tag:-none}\`"
+            echo
+            echo "$summary"
+            echo
+            echo "## Commits"
+            echo
+            if git log --no-merges --pretty=format:'- %s (%h)' "$range" | grep .; then
+              true
+            else
+              echo "- No commits found for this range."
+            fi
+          } > "$changelog_path"
+
+          echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
+          echo "changelog_path=$changelog_path" >> "$GITHUB_OUTPUT"
+          echo "release_notes_path=$release_notes_path" >> "$GITHUB_OUTPUT"
+          echo "changelog_asset=$(basename "$changelog_path")" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+          PREVIOUS_TAG: ${{ steps.changelog.outputs.previous_tag }}
+          CHANGELOG_PATH: ${{ steps.changelog.outputs.changelog_path }}
+          CHANGELOG_ASSET: ${{ steps.changelog.outputs.changelog_asset }}
+          RELEASE_NOTES_PATH: ${{ steps.changelog.outputs.release_notes_path }}
+        with:
+          script: |
+            const fs = require("fs");
+
+            let generatedBody;
+            try {
+              const request = {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: process.env.RELEASE_TAG,
+                target_commitish: context.sha,
+              };
+
+              if (process.env.PREVIOUS_TAG) {
+                request.previous_tag_name = process.env.PREVIOUS_TAG;
+              }
+
+              const response = await github.rest.repos.generateReleaseNotes(request);
+              generatedBody = response.data.body;
+            } catch (error) {
+              core.warning(`Falling back to local changelog for release notes: ${error.message}`);
+              generatedBody = fs.readFileSync(process.env.CHANGELOG_PATH, "utf8");
+            }
+
+            const notes = [
+              generatedBody.trim(),
+              "",
+              "## Changelog",
+              "",
+              `A generated changelog is attached as \`${process.env.CHANGELOG_ASSET}\`.`,
+              "",
+            ].join("\n");
+
+            fs.writeFileSync(process.env.RELEASE_NOTES_PATH, notes);
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.metadata.outputs.tag }}
+          name: Routes ${{ steps.metadata.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ steps.metadata.outputs.prerelease }}
+          make_latest: ${{ steps.metadata.outputs.make_latest }}
+          body_path: ${{ steps.changelog.outputs.release_notes_path }}
           files: |
             dist/routes-*.tar.gz
             dist/routes-*.zip
+            dist/routes-*-CHANGELOG.md
+            dist/routes-*-RELEASE_NOTES.md

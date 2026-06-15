@@ -1,19 +1,26 @@
-# Autohand Router
+# Routes
 
-Autohand Router is a Rust LLM router and OpenAI-compatible proxy for hosted and local inference. It can sit in front of Ollama, llama.cpp, vLLM, OpenRouter, Cloudflare AI Gateway, or any service that accepts OpenAI-compatible chat, Responses, embeddings, image, speech, transcription, or translation requests.
+Routes is the Rust LLM routing layer we built inside Autohand to battle-test our model-routing capabilities without manually configuring every provider, fallback, budget, cache, classifier, and point of failure for each experiment. It gives one OpenAI-compatible front door for local and hosted inference across Ollama, llama.cpp, vLLM, OpenRouter, Cloudflare AI Gateway, and any service that accepts OpenAI-compatible chat, Responses, embeddings, image, speech, transcription, or translation requests.
 
-The project is built for people running mixed model fleets: small local models for cheap/fast work, stronger hosted models for hard reasoning, and explicit policy controls when quality, cost, latency, safety, context, or modality matter. Routing stays config-driven, inspectable, and fail-closed to a configured fallback model.
+We built Routes because the hard part of running many LLMs is not just picking a model. It is keeping every routing decision explainable while handling context limits, multimodal requirements, provider health, retries, concurrency, budgets, cache hits, safety policy, local-model affinity, and fallbacks without turning the application into provider-specific glue code.
+
+Routes has been battle-tested across 100M routing requests in our benchmark suite and improved from that pressure: route decisions are config-driven, inspectable, eval-gated, and fail-closed to a configured fallback model.
 
 ## Why It Exists
 
-- Keep one OpenAI-compatible front door while swapping providers and local inference backends.
-- Route automatically by prompt difficulty, domain, modality, safety, cacheability, latency sensitivity, reasoning depth, context window, required capabilities, cost, health, and learned score boosts.
-- Make routing debuggable with candidate traces, score components, Prometheus metrics, provider conformance checks, eval gates, and redacted decision logs.
+- Keep one OpenAI-compatible front door while swapping providers, local inference backends, and model families.
+- Route automatically by prompt difficulty, domain, modality, safety, cacheability, latency sensitivity, reasoning depth, context window, required capabilities, cost, provider health, sticky session affinity, semantic cache eligibility, and learned score boosts.
+- Make every decision debuggable with candidate traces, score components, Prometheus metrics, provider conformance checks, eval gates, and redacted decision logs.
 - Support practical production workflows: retries, timeouts, concurrency limits, budget rejection before dispatch, semantic cache, sticky routing, shadow eval, safety routing, load tests, dashboards, alerts, and config schemas.
 
-Contributors are welcome. Good first areas include new provider adapters, richer eval corpora, routing policies, dashboard panels, deployment examples, and docs for real local-model setups.
+Contributors are welcome. Good first areas include:
 
-See [PRODUCTION.md](PRODUCTION.md) for the explicit 100M-user readiness bar and open-weight provider roadmap. See [docs/](docs/README.md) for container packaging and deployment examples for AWS, Google Cloud, Azure, and Cloudflare. Use `cargo run -- config-schema` to print a JSON Schema for `router.yaml` that can be wired into YAML editors or CI checks.
+- Provider adapters for more OpenAI-compatible and native inference servers.
+- Eval datasets for real prompt categories: small web apps, coding agents, multimodal requests, safety-sensitive prompts, long-context work, and local-model routing.
+- Routing policies with clear behavior, such as lowest-cost acceptable, fastest healthy, highest-quality, local-first, privacy-first, or multimodal-first.
+- Dashboard panels, deployment examples, and docs for real local-model setups.
+
+See [docs/](docs/README.md) for container packaging and deployment examples for AWS, Google Cloud, Azure, and Cloudflare. Use `cargo run -- config-schema` to print a JSON Schema for `router.yaml` that can be wired into YAML editors or CI checks.
 
 ## Run
 

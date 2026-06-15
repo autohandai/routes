@@ -1,51 +1,58 @@
 # Routes
 
-Routes is an OpenAI-compatible routing layer for teams running more than one model, provider, or inference backend.
+Routes was built from the ground up inside Autohand so agents can choose the capability they need, at the moment they need it.
 
-It gives you one API in front of local models, hosted providers, Ollama, llama.cpp, vLLM, OpenRouter, Cloudflare AI Gateway, and any service that accepts OpenAI-compatible requests. Instead of hand-wiring every fallback, budget, cache, classifier, provider retry, and model-specific rule into your application, Routes makes those decisions explicit, configurable, measurable, and testable.
+After powering millions of coding sessions, we learned that model choice is not a one-time decision. It is a continuous judgment about capability, cost, latency, privacy, context, and provider health. Routes makes that judgment explicit, configurable, measurable, and testable.
 
-We built Routes inside Autohand to battle-test routing across high-volume agent workloads without manually configuring every point of failure. The benchmark suite has exercised the router across 100M routing requests, and the result is a routing system designed around inspectable decisions, eval gates, provider health, multimodal capability checks, and fail-closed fallbacks.
+It is an OpenAI-compatible routing layer that sits in front of local models, hosted providers, Ollama, llama.cpp, vLLM, OpenRouter, Cloudflare AI Gateway, and any service that accepts OpenAI-compatible requests. Instead of hard-wiring every fallback, budget, cache, classifier, retry, and model-specific rule into your application, you describe your providers, define your policies, and let Routes decide.
 
-**Use Routes when you want model choice to be a policy you can inspect, evaluate, and improve instead of a pile of provider-specific conditionals.**
+The benchmark suite has exercised the router across 100M routing requests. The result is a system designed around inspectable decisions, eval gates, provider health, multimodal capability checks, and fail-closed fallbacks — so model choice becomes something you can evaluate and improve, not a pile of provider-specific conditionals.
 
-## Who It Is For
+**Use Routes when you want agents to pick the right capability by policy, not by accident.**
 
-- AI engineers and developers exploring next-generation routing with local models, hosted models, multimodal inputs, tool use, long context, and OpenAI-compatible clients.
-- MLOps teams that need learning-based routing optimization, provider conformance checks, production metrics, budget controls, and custom model-selection strategies.
-- Research teams comparing routing policies before production deployment, including quality-first, cost-aware, privacy-first, local-first, and multimodal-first strategies.
+## The problem with model choice today
 
-## What Routes Solves
+Most teams start with one provider and one model. Then they add a local model for cost. Then a bigger model for hard prompts. Then a vision model. Then a fallback for outages. Before long, model selection is buried in `if/else` branches, hidden provider timeouts, and undocumented budget rules.
 
-Running multiple LLMs is not just picking the biggest model. Real routing needs to answer questions like:
+Routes replaces those branches with configuration:
 
-- Is this prompt simple enough for a small local model?
-- Does it need vision, audio, JSON mode, tool calls, code strength, web-app generation, or long context?
-- Which providers are healthy right now?
-- Should this request optimize for latency, cost, privacy, capability, or quality?
-- Can we reject over-budget requests before provider dispatch?
-- Can we explain why a model was chosen after something goes wrong?
-- Can we evaluate routing changes before shipping them?
+- "Use a local model for simple prompts, but fall back to a hosted model when vision or long context is needed."
+- "Prefer the fastest healthy provider, unless quality is critical."
+- "Reject this request before dispatch if it would exceed the team budget."
+- "Explain exactly why this model was chosen, with scores and rejected candidates."
 
-Routes turns those questions into data-driven routing decisions with diagnostics.
+## What Routes does
 
-## Highlights
+Routes is an OpenAI-compatible routing layer. You point your client at one URL and use model names like `auto`, `router-balanced`, or `router-highest-quality`. Routes inspects the prompt, checks capability requirements, scores candidates, respects health and budgets, and forwards to the best upstream.
 
-- OpenAI-compatible front door for chat completions, Responses, embeddings, image generation, speech, transcription, and translation.
-- Automatic routing through `auto` and `router-*` model names.
-- Config-driven provider and model registry with aliases, capabilities, context windows, local/remote metadata, costs, and domain strengths.
-- Deterministic local classifier that works without external services.
-- Optional LLM classifier or judge model for learned routing experiments.
-- Routing policies for balanced, lowest-cost acceptable, fastest healthy, highest-quality, local-first, privacy-first, multimodal-first, and legacy presets.
-- Candidate diagnostics that expose labels, score components, required capabilities, context eligibility, rejected candidates, and fallback behavior.
-- Provider retries, timeouts, concurrency limits, health sampling, and transient failover for automatic routes.
-- Optional semantic cache, sticky routing, safety routing, budgets, shadow evaluation, decision traces, Prometheus metrics, load tests, and eval gates.
-- JSON Schema and OpenAPI output for editor integration, CI checks, and client generation.
+It handles the messy parts of multi-model operation:
 
-## Autohand Code Enterprise
+| Concern                    | How Routes handles it                                                                         |
+| -------------------------- | --------------------------------------------------------------------------------------------- |
+| **Capability matching**    | Vision, audio, JSON mode, tool calls, code strength, web-app generation, long context         |
+| **Policy routing**         | Balanced, lowest-cost, fastest, highest-quality, local-first, privacy-first, multimodal-first |
+| **Provider health**        | Retries, timeouts, concurrency limits, health sampling, transient failover                    |
+| **Operational safety**     | Budgets, safety routing, fail-closed fallbacks, sticky routing                                |
+| **Observability**          | Prometheus metrics, decision traces, route diagnostics                                        |
+| **Continuous improvement** | Eval gates, calibration, optimization, provider conformance                                   |
+
+## Why Routes is different
+
+1. **Agent-native routing.** Routes is not a load balancer with model names. It classifies prompts, understands capabilities, and lets agents request a capability profile rather than a specific model.
+
+2. **Deterministic by default.** The local classifier works without external services, so routing keeps working when providers are flaky.
+
+3. **Fail-closed, not fail-open.** When no candidate is eligible, Routes falls back to a configured fallback model instead of silently sending requests to the wrong provider.
+
+4. **Configuration as the source of truth.** Scoring weights, policies, provider metadata, and context windows live in config, not code. Change routing behavior without redeploying your application.
+
+5. **Built for evaluation.** Every routing change can be tested against an eval corpus before it reaches production.
+
+## Battle-tested at scale
 
 Routes powers [Autohand Code Enterprise](https://www.autohand.ai/code/enterprise/) across millions of coding sessions. It acts as the model gateway between Autohand Code clients, local inference nodes, hosted providers, and private model pools so teams can route coding work by policy instead of hard-coding one provider into every developer workflow.
 
-The flagship [Autohand Code CLI](https://github.com/autohandai/code-cli/tree/main/docs) can point at Routes through its OpenAI-compatible provider settings. A typical enterprise setup runs Routes near the available model capacity, such as one router per GPU node, region, or private network segment, then lets Autohand Code choose `auto` or a `router-*` policy model.
+Our flagship open-source enterprise version, [Autohand Code CLI](https://github.com/autohandai/code-cli/tree/main/docs) can point at Routes through its OpenAI-compatible provider settings. A typical enterprise setup runs Routes near the available model capacity, such as one router per GPU node, region, or private network segment, then lets Autohand Code choose `auto` or a `router-*` policy model.
 
 ```json
 {
@@ -62,7 +69,7 @@ The flagship [Autohand Code CLI](https://github.com/autohandai/code-cli/tree/mai
 
 Use `router-local` for local-first coding work, `router-privacy` for sensitive repositories, `router-fastest` for low-latency edits, or `router-highest-quality` for complex architecture and review tasks. Routes can sit in front of Ollama, llama.cpp, vLLM, OpenRouter, Cloudflare AI Gateway, and OpenAI-compatible providers across local nodes and internet-reachable gateways.
 
-## First 10 Minutes
+## Get started in 10 minutes
 
 1. Validate the example config.
 
@@ -82,7 +89,7 @@ Use `router-local` for local-first coding work, `router-privacy` for sensitive r
    cargo run -- --config examples/router.yaml route "Design a production event sourcing system" --policy highest-quality
    ```
 
-4. Run the test suite before changing routing behavior.
+4. Run the test suite.
 
    ```bash
    cargo test
@@ -123,7 +130,154 @@ router-multimodal
 
 Passing a configured model id or alias keeps the request strict and forwards to that model.
 
-## Example
+## Use with your favorite coding agent
+
+Any agent that speaks OpenAI-compatible APIs can route through Routes. Point it at the router URL, pick a policy model, and keep provider keys server-side.
+
+For a complete integration guide — including codebase setup, capability best practices, policy selection, and per-agent configuration — see [SKILL.md](SKILL.md).
+
+### Autohand Code CLI
+
+```json
+{
+  "provider": "autohandai",
+  "autohandai": {
+    "authMode": "api-key",
+    "apiKey": "routes-local-dev-or-bearer-token",
+    "baseUrl": "http://router.internal:8080/v1",
+    "model": "router-balanced",
+    "contextWindow": 128000
+  }
+}
+```
+
+Use `router-local` for local-first coding work, `router-privacy` for sensitive repositories, `router-fastest` for low-latency edits, or `router-highest-quality` for complex architecture and review tasks.
+
+### OpenAI Codex
+
+Set environment variables before running `codex`:
+
+```bash
+export OPENAI_BASE_URL="http://127.0.0.1:8080/v1"
+export OPENAI_API_KEY="routes-local-dev-or-bearer-token"
+export OPENAI_MODEL="router-highest-quality"
+codex
+```
+
+### Pi
+
+Add Routes as a custom provider in `~/.pi/agent/models.json`:
+
+```json
+{
+  "providers": {
+    "routes": {
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "api": "openai-completions",
+      "apiKey": "routes-local-dev-or-bearer-token",
+      "models": [
+        {
+          "id": "router-balanced",
+          "name": "Routes Balanced",
+          "contextWindow": 128000
+        }
+      ]
+    }
+  }
+}
+```
+
+If your Routes build does not understand the `developer` role, add `"compat": { "supportsDeveloperRole": false }` to the provider.
+
+### Aider
+
+```bash
+aider --model openai/router-balanced \
+      --openai-api-base http://127.0.0.1:8080/v1 \
+      --openai-api-key routes-local-dev-or-bearer-token
+```
+
+### Cursor
+
+In Cursor settings, add a custom OpenAI-compatible provider:
+
+- Base URL: `http://router.internal:8080/v1`
+- API Key: `routes-local-dev-or-bearer-token`
+- Model: `router-balanced`
+
+### Hermes Agent
+
+Add Routes as a custom OpenAI-compatible provider in `~/.hermes/config.yaml`:
+
+```yaml
+env:
+  ROUTES_API_KEY: routes-local-dev-or-bearer-token
+
+inference:
+  provider: routes
+
+agents:
+  defaults:
+    model:
+      primary: router-balanced
+
+models:
+  providers:
+    routes:
+      baseUrl: http://127.0.0.1:8080/v1
+      apiKey: ${ROUTES_API_KEY}
+      api: openai-completions
+      models:
+        - id: router-balanced
+          name: Routes Balanced
+          contextWindow: 128000
+```
+
+### OpenClaw
+
+Add Routes as a custom provider in `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "env": {
+    "ROUTES_API_KEY": "routes-local-dev-or-bearer-token"
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "routes/router-balanced"
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "routes": {
+        "baseUrl": "http://127.0.0.1:8080/v1",
+        "apiKey": "${ROUTES_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "router-balanced",
+            "name": "Routes Balanced",
+            "contextWindow": 128000
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+### Other agents
+
+If your agent supports an OpenAI-compatible endpoint, configure:
+
+- **Base URL**: `http://<router-host>:8080/v1`
+- **API Key**: your Routes bearer token
+- **Model**: `auto`, `router-balanced`, `router-highest-quality`, `router-fastest`, `router-local`, `router-privacy`, or any configured model alias
+
+## Example: route by capability
 
 Ask for a multimodal-capable route:
 
@@ -141,7 +295,7 @@ The response includes the selected model/provider, prompt labels, policy, confid
 
 For detailed commands, API examples, and operations setup, see [docs/usage.md](docs/usage.md).
 
-## Routing Policies
+## Routing policies
 
 Routes ships with policy presets that are controlled by configuration, not hidden constants:
 
@@ -155,22 +309,21 @@ Routes ships with policy presets that are controlled by configuration, not hidde
 
 Legacy policy names remain supported for compatibility: `floor`, `nitro`, `quality`, `cost_efficient`, `capability_heavy`, and `domain_skills`.
 
-## Repository Map
+## Who it's for
 
-- [src/classifier.rs](src/classifier.rs): deterministic prompt classification and optional model-backed classifier adapters.
-- [src/router.rs](src/router.rs): candidate filtering, scoring policies, fallback handling, and route explanations.
-- [src/provider.rs](src/provider.rs): provider adapters for OpenAI-compatible, Ollama, llama.cpp, vLLM, OpenRouter, and Cloudflare AI Gateway paths.
-- [src/server.rs](src/server.rs): HTTP API, OpenAI-compatible proxy routes, metrics, budgets, cache, safety, and sticky routing.
-- [examples/router.yaml](examples/router.yaml): local example config for development and tests.
-- [docs/examples/router.production.yaml](docs/examples/router.production.yaml): fuller production-oriented config.
+- **AI engineers and developers** building agents that need model choice without provider lock-in.
+- **Platform/MLOps teams** running mixed local and hosted inference who need health checks, retries, budgets, and metrics.
+- **Research teams** comparing routing policies and measuring tradeoffs before production deployment.
 
-## Documentation
+## Documentation and contribution
 
 - [Usage guide](docs/usage.md): commands, router APIs, headers, operations, auth, configuration, evaluation, calibration, and provider conformance.
 - [Deployment docs](docs/README.md): container packaging and hosting examples.
 - [Container runtime](docs/deployment/container.md): production image and config guidance.
 - [Monitoring](docs/monitoring/README.md): Prometheus metrics, dashboards, and alerts.
+- [Examples](examples/): runnable CLI commands, curl requests, agent configs, and minimal config variants.
 - [Production example config](docs/examples/router.production.yaml): fuller production-oriented config.
+- [Production readiness checklist](docs/production-readiness.md): current evidence and remaining work.
 
 Useful local commands:
 
@@ -182,19 +335,7 @@ cargo run -- --config examples/router.yaml eval-gate examples/eval.production.js
 cargo run -- --config examples/router.yaml provider-conformance-matrix
 ```
 
-## Contributing
-
-Routes is designed to be composable. New routing ideas should usually land behind the classifier boundary, scoring-policy boundary, provider adapter boundary, or eval tooling rather than inside HTTP handlers.
-
-Start with [CONTRIBUTING.md](CONTRIBUTING.md), then choose a small change with a clear validation path. Good first contributions usually add one provider, one eval slice, one routing policy, one docs example, or one focused diagnostic improvement.
-
-Good areas for contributors:
-
-- Provider adapters for more OpenAI-compatible and native inference servers.
-- Eval corpora for small web apps, coding agents, multimodal prompts, safety-sensitive prompts, long-context work, and local-model routing.
-- Routing policies with clear behavior and measurable tradeoffs.
-- Learned scoring features, optimizer experiments, and judge-model evaluation workflows.
-- Dashboard panels, deployment recipes, and examples for real local-model setups.
+Routes is designed to be composable. New routing ideas should usually land behind the classifier boundary, scoring-policy boundary, provider adapter boundary, or eval tooling rather than inside HTTP handlers. Start with [CONTRIBUTING.md](CONTRIBUTING.md), then choose a small change with a clear validation path.
 
 Run the core checks before opening a PR:
 
@@ -205,10 +346,6 @@ cargo run -- --config examples/router.yaml validate
 cargo run -- --config examples/router.yaml openapi
 ```
 
-## Help and Maintainers
+## Support
 
-Routes is maintained by Autohand. Use GitHub issues for bugs, design questions, provider compatibility reports, and proposed routing policies. When reporting routing behavior, include the prompt shape, expected policy, selected model/provider, config snippet, and any `decision_trace` fields that explain the choice.
-
-## Project Status
-
-Routes is private while we prepare the first collaborator cohort, but it is already structured for outside contribution: public API contracts, focused docs, local deterministic routing, reproducible eval gates, and a small set of extension boundaries.
+Routes is maintained by Autohand. Open a GitHub issue for bugs, design questions, provider reports, or proposed routing policies. See [CONTRIBUTING.md](CONTRIBUTING.md) for issue templates and what to include.

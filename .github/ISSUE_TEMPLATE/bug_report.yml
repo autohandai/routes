@@ -1,0 +1,73 @@
+name: Bug report
+description: Report incorrect routing, provider failures, crashes, or other unexpected behavior
+title: "[Bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please fill out the sections below so we can reproduce and triage quickly.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the unexpected behavior.
+      placeholder: Routes selected provider X when I expected provider Y.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Provide a minimal config, request payload, or CLI command that triggers the issue.
+      placeholder: |
+        1. Run `cargo run -- --config examples/router.yaml classify "..."`
+        2. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant config or request payload
+      description: Paste the provider/model config or request payload. Redact API keys.
+      render: yaml
+
+  - type: textarea
+    id: decision-trace
+    attributes:
+      label: Decision trace or diagnostics
+      description: If applicable, paste `decision_trace`, score components, or the `/v1/router/multimodel` response.
+      render: json
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Routes version or git commit hash
+      placeholder: 0.1.0 or abc1234
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I have searched existing issues
+          required: true
+        - label: I have run `cargo test` and the issue persists
+          required: false

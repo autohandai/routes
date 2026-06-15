@@ -1,0 +1,54 @@
+name: Feature request
+description: Suggest a new routing policy, provider adapter, diagnostic, or capability
+title: "[Feature] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature. A clear use case and boundary make triage much faster.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Explain the use case or pain point.
+      placeholder: I want to route code-review prompts to a specific local model when latency is under X.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the feature or change.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: boundary
+    attributes:
+      label: Which boundary does this touch?
+      description: See [CONTRIBUTING.md](../CONTRIBUTING.md) for extension boundaries.
+      options:
+        - Classifier (src/classifier.rs)
+        - Router / scoring policy (src/router.rs)
+        - Provider adapter (src/provider.rs)
+        - Public API / server (src/server.rs, src/types.rs)
+        - Eval / conformance / metrics
+        - Docs / deployment / monitoring
+        - Other
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or other designs did you consider?
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I have searched existing issues and discussions
+          required: true

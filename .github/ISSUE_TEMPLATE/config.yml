@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Routes documentation
+    url: https://github.com/autohandai/routes/tree/main/docs
+    about: Check the docs before opening an issue.

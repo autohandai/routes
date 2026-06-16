@@ -5,7 +5,7 @@ edition = "2024"
 description = "OpenAI-compatible routing layer for multi-model, multi-provider inference"
 readme = "README.md"
 repository = "https://github.com/autohandai/routes"
-license = "MIT"
+license-file = "LICENSE"
 keywords = ["llm", "router", "openai", "inference", "agent"]
 categories = ["web-programming", "network-programming", "command-line-utilities"]
 

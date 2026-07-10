@@ -147,6 +147,8 @@ cache:
 
 `embedding_model: local-hash` is deterministic and does not require a provider call. Setting `embedding_model` to a configured model id or alias with embeddings support uses provider-backed vectors.
 
+For safety, semantic caching is disabled when bearer authentication is enabled (to avoid cross-tenant response reuse) and for requests with behavior-changing options such as tools, structured output, sampling, or a `user` field. Use a tenant-aware cache namespace before enabling shared authenticated caching.
+
 ## Shadow Evaluation
 
 Collect pairwise routing data without changing foreground responses:

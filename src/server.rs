@@ -145,6 +145,10 @@ impl RequestAuthenticator {
             .iter()
             .any(|allowed| constant_time_eq(allowed.as_bytes(), token.as_bytes()))
     }
+
+    fn is_enabled(&self) -> bool {
+        !self.tokens.is_empty()
+    }
 }
 
 #[derive(Default)]
@@ -1345,7 +1349,8 @@ async fn chat_completions(
                 route.cacheability.as_ref(),
                 request.stream(),
                 route_input,
-            ),
+            )
+            .filter(|_| semantic_cache_safe_for_request(&state.auth, &request.extra)),
             shadow_eval_dispatch,
         )
     } else {
@@ -1478,7 +1483,8 @@ async fn responses(
                 route.cacheability.as_ref(),
                 request.stream(),
                 route_input,
-            ),
+            )
+            .filter(|_| semantic_cache_safe_for_request(&state.auth, &request.extra)),
             shadow_eval_dispatch,
         )
     } else {
@@ -2289,6 +2295,16 @@ fn semantic_cache_request_for_route(
         return None;
     }
     Some(SemanticCacheRequest { endpoint, prompt })
+}
+
+fn semantic_cache_safe_for_request(
+    auth: &RequestAuthenticator,
+    extra: &serde_json::Map<String, Value>,
+) -> bool {
+    if auth.is_enabled() {
+        return false;
+    }
+    extra.keys().all(|key| key == "stream")
 }
 
 async fn semantic_cache_embedding_for_request(
@@ -3948,7 +3964,8 @@ mod tests {
     use super::{
         AppState, RequestAuthenticator, RouterMetrics, RoutingEndpoint, UsageAccounting, app,
         budget_violation, constant_time_eq, is_known_router_model, legacy_raw_difficulty,
-        parse_router_model_policy, prometheus_escape, supported_provider_names, usage_from_value,
+        parse_router_model_policy, prometheus_escape, semantic_cache_safe_for_request,
+        supported_provider_names, usage_from_value,
     };
     use crate::{
         classifier::SmartClassifier,
@@ -4005,6 +4022,34 @@ mod tests {
 
         let chat_providers = supported_provider_names(&config, RoutingEndpoint::Chat);
         assert_eq!(chat_providers, vec!["failing", "healthy"]);
+    }
+
+    #[test]
+    fn semantic_cache_fails_closed_for_authenticated_or_variant_requests() {
+        let mut config = failover_config(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:2".to_string(),
+        );
+        config.auth.bearer_tokens = vec!["secret".to_string()];
+        let authenticated = RequestAuthenticator::from_config(&config).unwrap();
+        let unauthenticated = RequestAuthenticator::from_config(&failover_config(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:2".to_string(),
+        ))
+        .unwrap();
+
+        assert!(!semantic_cache_safe_for_request(
+            &authenticated,
+            &Default::default()
+        ));
+        assert!(semantic_cache_safe_for_request(
+            &unauthenticated,
+            &Default::default()
+        ));
+        assert!(!semantic_cache_safe_for_request(
+            &unauthenticated,
+            &serde_json::Map::from_iter([("tools".to_string(), Value::Array(vec![]))])
+        ));
     }
 
     #[test]

@@ -20,7 +20,8 @@ use crate::{
         CacheabilityLabel, ChatMessage, ClassifyRequest, ClassifyResponse, ModelCapability,
         ModelConfig, MultimodelRequest, MultimodelResponse, OpenAiAudioMultipartRequest,
         OpenAiChatRequest, OpenAiEmbeddingsRequest, OpenAiImagesRequest, OpenAiMultipartPart,
-        OpenAiResponsesRequest, OpenAiSpeechRequest, RouterPolicy, SafetyLabel,
+        OpenAiResponsesRequest, OpenAiSpeechRequest, ProviderConfig, ProviderKind, RouterPolicy,
+        SafetyLabel,
     },
 };
 use anyhow::Result;
@@ -1290,12 +1291,16 @@ async fn chat_completions(
         let policy = parse_router_model_policy(&requested_model);
         let mut route_input = prompt.clone();
         let required_capabilities = request.required_capabilities();
+        let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Chat);
+        if allowed_providers.is_empty() {
+            return unsupported_endpoint_response(RoutingEndpoint::Chat);
+        }
         let mut route = state
             .engine
             .route(MultimodelRequest {
                 input: route_input.clone(),
                 allowed_models: vec![],
-                allowed_providers: vec![],
+                allowed_providers,
                 required_capabilities,
                 policy,
                 default_model: None,
@@ -1410,12 +1415,16 @@ async fn responses(
         let policy = parse_router_model_policy(&requested_model);
         let mut route_input = prompt.clone();
         let required_capabilities = request.required_capabilities();
+        let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Responses);
+        if allowed_providers.is_empty() {
+            return unsupported_endpoint_response(RoutingEndpoint::Responses);
+        }
         let mut route = state
             .engine
             .route(MultimodelRequest {
                 input: route_input.clone(),
                 allowed_models: vec![],
-                allowed_providers: vec![],
+                allowed_providers,
                 required_capabilities,
                 policy,
                 default_model: None,
@@ -1782,12 +1791,16 @@ async fn embeddings(
     let (models, estimated_input_tokens) = if automatic {
         let policy = parse_router_model_policy(&requested_model);
         let route_input = prompt.clone();
+        let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Embeddings);
+        if allowed_providers.is_empty() {
+            return unsupported_endpoint_response(RoutingEndpoint::Embeddings);
+        }
         let route = state
             .engine
             .route(MultimodelRequest {
                 input: route_input.clone(),
                 allowed_models: vec![],
-                allowed_providers: vec![],
+                allowed_providers,
                 required_capabilities: Vec::new(),
                 policy,
                 default_model: None,
@@ -1851,12 +1864,16 @@ async fn images_generations(
     let (models, estimated_input_tokens) = if automatic {
         let policy = parse_router_model_policy(&requested_model);
         let route_input = prompt.clone();
+        let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Images);
+        if allowed_providers.is_empty() {
+            return unsupported_endpoint_response(RoutingEndpoint::Images);
+        }
         let route = state
             .engine
             .route(MultimodelRequest {
                 input: route_input.clone(),
                 allowed_models: vec![],
-                allowed_providers: vec![],
+                allowed_providers,
                 required_capabilities: Vec::new(),
                 policy,
                 default_model: None,
@@ -1920,12 +1937,16 @@ async fn audio_speech(
     let (models, estimated_input_tokens) = if automatic {
         let policy = parse_router_model_policy(&requested_model);
         let route_input = prompt.clone();
+        let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Speech);
+        if allowed_providers.is_empty() {
+            return unsupported_endpoint_response(RoutingEndpoint::Speech);
+        }
         let route = state
             .engine
             .route(MultimodelRequest {
                 input: route_input.clone(),
                 allowed_models: vec![],
-                allowed_providers: vec![],
+                allowed_providers,
                 required_capabilities: vec![ModelCapability::Audio],
                 policy,
                 default_model: None,
@@ -2015,6 +2036,71 @@ enum AudioMultipartEndpoint {
     Translation,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RoutingEndpoint {
+    Chat,
+    Responses,
+    Embeddings,
+    Images,
+    Speech,
+    AudioTranscriptions,
+    AudioTranslations,
+}
+
+impl RoutingEndpoint {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "/v1/chat/completions",
+            Self::Responses => "/v1/responses",
+            Self::Embeddings => "/v1/embeddings",
+            Self::Images => "/v1/images/generations",
+            Self::Speech => "/v1/audio/speech",
+            Self::AudioTranscriptions => "/v1/audio/transcriptions",
+            Self::AudioTranslations => "/v1/audio/translations",
+        }
+    }
+}
+
+fn provider_supports_endpoint(provider: &ProviderConfig, endpoint: RoutingEndpoint) -> bool {
+    let native_only_chat = matches!(
+        provider.kind,
+        ProviderKind::OllamaNative | ProviderKind::LlamaCppNative
+    );
+    match endpoint {
+        RoutingEndpoint::Chat => !provider.chat_path.trim().is_empty(),
+        RoutingEndpoint::Responses => !native_only_chat && provider.responses_path.is_some(),
+        RoutingEndpoint::Embeddings => !native_only_chat && provider.embeddings_path.is_some(),
+        RoutingEndpoint::Images => !native_only_chat && provider.images_path.is_some(),
+        RoutingEndpoint::Speech => !native_only_chat && provider.speech_path.is_some(),
+        RoutingEndpoint::AudioTranscriptions => {
+            !native_only_chat && provider.audio_transcriptions_path.is_some()
+        }
+        RoutingEndpoint::AudioTranslations => {
+            !native_only_chat && provider.audio_translations_path.is_some()
+        }
+    }
+}
+
+fn supported_provider_names(config: &RouterConfig, endpoint: RoutingEndpoint) -> Vec<String> {
+    config
+        .providers
+        .iter()
+        .filter(|provider| provider_supports_endpoint(provider, endpoint))
+        .map(|provider| provider.name.clone())
+        .collect()
+}
+
+fn unsupported_endpoint_response(endpoint: RoutingEndpoint) -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(ProviderClient::error_json(format!(
+            "no configured provider supports {}",
+            endpoint.label()
+        ))),
+    )
+        .into_response()
+}
+
 impl AudioMultipartEndpoint {
     fn route_label(self) -> &'static str {
         match self {
@@ -2049,12 +2135,20 @@ async fn audio_multipart_endpoint(
     let (models, estimated_input_tokens) = if automatic {
         let policy = parse_router_model_policy(&requested_model);
         let route_input = route_prompt.clone();
+        let routing_endpoint = match endpoint {
+            AudioMultipartEndpoint::Transcription => RoutingEndpoint::AudioTranscriptions,
+            AudioMultipartEndpoint::Translation => RoutingEndpoint::AudioTranslations,
+        };
+        let allowed_providers = supported_provider_names(&config, routing_endpoint);
+        if allowed_providers.is_empty() {
+            return unsupported_endpoint_response(routing_endpoint);
+        }
         let route = state
             .engine
             .route(MultimodelRequest {
                 input: route_input.clone(),
                 allowed_models: vec![],
-                allowed_providers: vec![],
+                allowed_providers,
                 required_capabilities: vec![ModelCapability::Audio],
                 policy,
                 default_model: None,
@@ -2316,7 +2410,8 @@ fn provider_supports_chat(config: &RouterConfig, provider_name: &str) -> bool {
     config
         .providers
         .iter()
-        .any(|provider| provider.name == provider_name)
+        .find(|provider| provider.name == provider_name)
+        .is_some_and(|provider| provider_supports_endpoint(provider, RoutingEndpoint::Chat))
 }
 
 fn provider_supports_responses(config: &RouterConfig, provider_name: &str) -> bool {
@@ -2324,8 +2419,7 @@ fn provider_supports_responses(config: &RouterConfig, provider_name: &str) -> bo
         .providers
         .iter()
         .find(|provider| provider.name == provider_name)
-        .and_then(|provider| provider.responses_path.as_ref())
-        .is_some()
+        .is_some_and(|provider| provider_supports_endpoint(provider, RoutingEndpoint::Responses))
 }
 
 fn eligible_route_models(
@@ -3816,9 +3910,9 @@ fn elapsed_millis_u32(started: Instant) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, RequestAuthenticator, RouterMetrics, UsageAccounting, app, budget_violation,
-        constant_time_eq, legacy_raw_difficulty, parse_router_model_policy, prometheus_escape,
-        usage_from_value,
+        AppState, RequestAuthenticator, RouterMetrics, RoutingEndpoint, UsageAccounting, app,
+        budget_violation, constant_time_eq, legacy_raw_difficulty, parse_router_model_policy,
+        prometheus_escape, supported_provider_names, usage_from_value,
     };
     use crate::{
         classifier::SmartClassifier,
@@ -3860,6 +3954,21 @@ mod tests {
         assert!(!constant_time_eq(b"token", b"tokem"));
         assert!(!constant_time_eq(b"token", b"token-extra"));
         assert!(!constant_time_eq(b"", b"token"));
+    }
+
+    #[test]
+    fn automatic_endpoint_candidates_exclude_native_adapters_without_support() {
+        let mut config = failover_config(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:2".to_string(),
+        );
+        config.providers[0].kind = ProviderKind::OllamaNative;
+
+        let response_providers = supported_provider_names(&config, RoutingEndpoint::Responses);
+        assert_eq!(response_providers, vec!["healthy"]);
+
+        let chat_providers = supported_provider_names(&config, RoutingEndpoint::Chat);
+        assert_eq!(chat_providers, vec!["failing", "healthy"]);
     }
 
     #[test]

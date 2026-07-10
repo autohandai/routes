@@ -29,7 +29,7 @@ The router is not considered production-complete until these requirements are tr
 - OpenAI-compatible `/v1/audio/speech` forwarding uses the same configured provider path, timeout, retry, concurrency, failover, budget, and adapter boundary as chat.
 - OpenAI-compatible multipart `/v1/audio/transcriptions` and `/v1/audio/translations` forwarding use configured provider paths, model rewriting, timeout, retry, concurrency, failover, budget, metrics, and the adapter boundary.
 - Automatic chat routing has an end-to-end transient failover test across two candidate providers, including router headers and failover metrics.
-- Request-scoped filters are enforced for default-model fallback.
+- Request-scoped model/provider filters are intersected and enforced for default-model fallback. Capability- or context-ineligible diagnostic candidates are excluded from upstream failover.
 - Eval, eval-gate, calibration, and scoring optimization commands exist for deterministic router tuning; `examples/eval.production.jsonl` provides a 24-example production gate with minimum tier/domain accuracy thresholds.
 - Optimizer runs can emit replayable, secret-safe JSON artifacts with dataset fingerprints, deterministic train/holdout split metadata, baseline/optimized reports, holdout validation reports, selected config patches, replay commands, and rollback guidance.
 - LLM-judge classification can be enabled with any configured model, with fallback to the heuristic classifier on judge failure.

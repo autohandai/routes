@@ -67,7 +67,15 @@ where
         let candidates = self.candidates(&request, default_model);
 
         if classifications.difficulty.label == DifficultyLabel::NeedsInfo {
-            return match allowed_default {
+            let eligible_default = allowed_default.filter(|model| {
+                context_eligible(
+                    model,
+                    token_budget
+                        .estimated_input_tokens
+                        .saturating_add(token_budget.requested_output_tokens),
+                ) && capability_eligible(model, &request.required_capabilities)
+            });
+            return match eligible_default {
                 Some(model) => self.response_for_model(
                     &model.id,
                     classifications,
@@ -79,7 +87,7 @@ where
                 None => self.response_for_unknown(
                     classifications,
                     request.policy,
-                    "prompt needs more information but default_model does not satisfy allowed filters",
+                    "prompt needs more information but default_model does not satisfy allowed filters/capabilities/context",
                     true,
                     token_budget,
                 ),
@@ -426,7 +434,7 @@ fn model_allowed_by_request(model: &ModelConfig, request: &MultimodelRequest) ->
         .iter()
         .any(|allowed| model.id == *allowed || model.aliases.iter().any(|alias| alias == allowed));
     let provider_allowed = request.allowed_providers.contains(&model.provider);
-    model_allowed || provider_allowed
+    (!has_model_filter || model_allowed) && (!has_provider_filter || provider_allowed)
 }
 
 impl MultimodelResponse {
@@ -1987,5 +1995,67 @@ mod tests {
         assert_eq!(route.provider, "local");
         assert_eq!(route.difficulty, DifficultyLabel::NeedsInfo);
         assert!(route.fallback);
+    }
+
+    #[tokio::test]
+    async fn model_and_provider_allowlists_are_intersected() {
+        let route = engine()
+            .route(MultimodelRequest {
+                input: "Fix this typo in the Rust comment".to_string(),
+                allowed_models: vec!["cheap".to_string()],
+                allowed_providers: vec!["not-local".to_string()],
+                required_capabilities: Vec::new(),
+                policy: RouterPolicy::CostEfficient,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(route.model, "");
+        assert_eq!(route.provider, "");
+        assert!(route.fallback);
+        assert!(route.candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn needs_info_default_must_satisfy_required_capabilities() {
+        let route = capability_engine()
+            .route(MultimodelRequest {
+                input: "hi".to_string(),
+                allowed_models: vec!["text-only".to_string()],
+                allowed_providers: vec![],
+                required_capabilities: vec![ModelCapability::Audio],
+                policy: RouterPolicy::Balanced,
+                default_model: Some("text-only".to_string()),
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(route.model, "");
+        assert_eq!(route.provider, "");
+        assert_eq!(route.difficulty, DifficultyLabel::NeedsInfo);
+        assert!(route.fallback);
+        assert!(route.reason.contains("capabilities/context"));
+    }
+
+    #[tokio::test]
+    async fn needs_info_default_must_fit_the_requested_context() {
+        let route = context_engine()
+            .route(MultimodelRequest {
+                input: "hi".to_string(),
+                allowed_models: vec!["small-context".to_string()],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+                policy: RouterPolicy::Balanced,
+                default_model: Some("small-context".to_string()),
+                max_output_tokens: Some(512),
+            })
+            .await;
+
+        assert_eq!(route.model, "");
+        assert_eq!(route.provider, "");
+        assert_eq!(route.difficulty, DifficultyLabel::NeedsInfo);
+        assert!(route.fallback);
+        assert!(route.reason.contains("capabilities/context"));
     }
 }

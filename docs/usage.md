@@ -86,6 +86,8 @@ curl -s http://127.0.0.1:8080/v1/router/multimodel \
 
 The response includes `model`, `provider`, `difficulty`, `ambiguity`, `domain`, `modality`, `safety`, `cacheability`, `latency_sensitivity`, `reasoning_depth`, confidence fields, policy, reason, fallback status, token estimates, context eligibility, capability eligibility, and a decision trace.
 
+`allowed_models` and `allowed_providers` are independent allowlists. If both are present, a candidate must satisfy both. Models rejected for an allowlist, required capability, or context-window constraint remain visible in diagnostics where applicable, but are never used for fallback or upstream failover.
+
 Clients that only need a difficulty label can call `/v1/router/raw`:
 
 ```bash

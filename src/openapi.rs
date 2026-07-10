@@ -644,8 +644,16 @@ fn schemas() -> Value {
             "type": "object",
             "properties": {
                 "input": { "type": "string" },
-                "allowed_models": { "type": "array", "items": { "type": "string" } },
-                "allowed_providers": { "type": "array", "items": { "type": "string" } },
+                "allowed_models": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional model id/alias allowlist. When provider filters are also present, a candidate must satisfy both allowlists."
+                },
+                "allowed_providers": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional provider allowlist. When model filters are also present, a candidate must satisfy both allowlists."
+                },
                 "required_capabilities": { "type": "array", "items": { "$ref": "#/components/schemas/ModelCapability" } },
                 "policy": { "$ref": "#/components/schemas/RouterPolicy" },
                 "default_model": { "type": ["string", "null"] },

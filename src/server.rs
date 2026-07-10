@@ -1273,7 +1273,7 @@ async fn chat_completions(
             .telemetry
             .record_route("chat.auto", &route_input, &route)
             .await;
-        let Some(model) = config.find_model(&route.model).cloned() else {
+        let Some(mut models) = eligible_route_models(&config, &route) else {
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(ProviderClient::error_json(format!(
@@ -1283,15 +1283,6 @@ async fn chat_completions(
             )
                 .into_response();
         };
-        let mut models = vec![model];
-        for candidate in route.candidates {
-            if models.iter().any(|model| model.id == candidate.model) {
-                continue;
-            }
-            if let Some(model) = config.find_model(&candidate.model).cloned() {
-                models.push(model);
-            }
-        }
         apply_sticky_routing(&state, &config, sticky_key.as_deref(), &mut models);
         if let Some(selected_model) = models.first() {
             record_sticky_routing(&state, &config, sticky_key.clone(), selected_model);
@@ -1406,7 +1397,7 @@ async fn responses(
             .telemetry
             .record_route("responses.auto", &route_input, &route)
             .await;
-        let Some(model) = config.find_model(&route.model).cloned() else {
+        let Some(mut models) = eligible_route_models(&config, &route) else {
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(ProviderClient::error_json(format!(
@@ -1416,15 +1407,6 @@ async fn responses(
             )
                 .into_response();
         };
-        let mut models = vec![model];
-        for candidate in route.candidates {
-            if models.iter().any(|model| model.id == candidate.model) {
-                continue;
-            }
-            if let Some(model) = config.find_model(&candidate.model).cloned() {
-                models.push(model);
-            }
-        }
         apply_sticky_routing(&state, &config, sticky_key.as_deref(), &mut models);
         if let Some(selected_model) = models.first() {
             record_sticky_routing(&state, &config, sticky_key.clone(), selected_model);
@@ -1774,7 +1756,7 @@ async fn embeddings(
             .telemetry
             .record_route("embeddings.auto", &route_input, &route)
             .await;
-        let Some(model) = config.find_model(&route.model).cloned() else {
+        let Some(models) = eligible_route_models(&config, &route) else {
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(ProviderClient::error_json(format!(
@@ -1784,15 +1766,6 @@ async fn embeddings(
             )
                 .into_response();
         };
-        let mut models = vec![model];
-        for candidate in route.candidates {
-            if models.iter().any(|model| model.id == candidate.model) {
-                continue;
-            }
-            if let Some(model) = config.find_model(&candidate.model).cloned() {
-                models.push(model);
-            }
-        }
         (models, route.estimated_input_tokens)
     } else {
         let Some(model) = config.find_model(&requested_model).cloned() else {
@@ -1852,7 +1825,7 @@ async fn images_generations(
             .telemetry
             .record_route("images.auto", &route_input, &route)
             .await;
-        let Some(model) = config.find_model(&route.model).cloned() else {
+        let Some(models) = eligible_route_models(&config, &route) else {
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(ProviderClient::error_json(format!(
@@ -1862,15 +1835,6 @@ async fn images_generations(
             )
                 .into_response();
         };
-        let mut models = vec![model];
-        for candidate in route.candidates {
-            if models.iter().any(|model| model.id == candidate.model) {
-                continue;
-            }
-            if let Some(model) = config.find_model(&candidate.model).cloned() {
-                models.push(model);
-            }
-        }
         (models, route.estimated_input_tokens)
     } else {
         let Some(model) = config.find_model(&requested_model).cloned() else {
@@ -1930,7 +1894,7 @@ async fn audio_speech(
             .telemetry
             .record_route("speech.auto", &route_input, &route)
             .await;
-        let Some(model) = config.find_model(&route.model).cloned() else {
+        let Some(models) = eligible_route_models(&config, &route) else {
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(ProviderClient::error_json(format!(
@@ -1940,15 +1904,6 @@ async fn audio_speech(
             )
                 .into_response();
         };
-        let mut models = vec![model];
-        for candidate in route.candidates {
-            if models.iter().any(|model| model.id == candidate.model) {
-                continue;
-            }
-            if let Some(model) = config.find_model(&candidate.model).cloned() {
-                models.push(model);
-            }
-        }
         (models, route.estimated_input_tokens)
     } else {
         let Some(model) = config.find_model(&requested_model).cloned() else {
@@ -2068,7 +2023,7 @@ async fn audio_multipart_endpoint(
             .telemetry
             .record_route(endpoint.route_label(), &route_input, &route)
             .await;
-        let Some(model) = config.find_model(&route.model).cloned() else {
+        let Some(models) = eligible_route_models(&config, &route) else {
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(ProviderClient::error_json(format!(
@@ -2078,15 +2033,6 @@ async fn audio_multipart_endpoint(
             )
                 .into_response();
         };
-        let mut models = vec![model];
-        for candidate in route.candidates {
-            if models.iter().any(|model| model.id == candidate.model) {
-                continue;
-            }
-            if let Some(model) = config.find_model(&candidate.model).cloned() {
-                models.push(model);
-            }
-        }
         (models, route.estimated_input_tokens)
     } else {
         let Some(model) = config.find_model(&requested_model).cloned() else {
@@ -2331,6 +2277,35 @@ fn provider_supports_responses(config: &RouterConfig, provider_name: &str) -> bo
         .find(|provider| provider.name == provider_name)
         .and_then(|provider| provider.responses_path.as_ref())
         .is_some()
+}
+
+fn eligible_route_models(
+    config: &RouterConfig,
+    route: &MultimodelResponse,
+) -> Option<Vec<ModelConfig>> {
+    let selected = config.find_model(&route.model)?.clone();
+    if route
+        .candidates
+        .iter()
+        .find(|candidate| candidate.model == selected.id)
+        .is_some_and(|candidate| !candidate.capability_eligible || !candidate.context_eligible)
+    {
+        return None;
+    }
+
+    let mut models = vec![selected];
+    for candidate in &route.candidates {
+        if !candidate.capability_eligible
+            || !candidate.context_eligible
+            || models.iter().any(|model| model.id == candidate.model)
+        {
+            continue;
+        }
+        if let Some(model) = config.find_model(&candidate.model).cloned() {
+            models.push(model);
+        }
+    }
+    Some(models)
 }
 
 async fn dispatch_chat(
@@ -4009,6 +3984,59 @@ mod tests {
             body.contains(
                 "autohand_router_selection_requests_total_by_model{model=\"strong-ok\"} 1"
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_chat_never_failovers_to_capability_ineligible_candidate() {
+        let failing_base_url =
+            spawn_chat_upstream("vision-fail", StatusCode::SERVICE_UNAVAILABLE).await;
+        let ineligible_base_url = spawn_chat_upstream("text-only", StatusCode::OK).await;
+        let mut config = failover_config(failing_base_url, ineligible_base_url);
+        config.models[0].id = "vision-fail".to_string();
+        config.models[0].capabilities.supports_vision = true;
+        config.models[1].id = "text-only".to_string();
+        config.models[1].capabilities.supports_vision = false;
+        config.default_model = "vision-fail".to_string();
+
+        let router_url = spawn_router(config).await;
+        let response = reqwest::Client::new()
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&OpenAiChatRequest {
+                model: "router-capability".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: serde_json::json!([
+                        {
+                            "type": "text",
+                            "text": "Inspect this architecture diagram and identify the failure domain"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": { "url": "data:image/png;base64,AA==" }
+                        }
+                    ]),
+                }],
+                extra: serde_json::Map::from_iter([("max_tokens".to_string(), Value::from(64))]),
+            })
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-autohand-router-model")
+                .and_then(|value| value.to_str().ok()),
+            Some("vision-fail")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-autohand-router-failovers")
+                .and_then(|value| value.to_str().ok()),
+            Some("0")
         );
     }
 

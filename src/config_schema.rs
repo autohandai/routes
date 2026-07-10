@@ -172,7 +172,8 @@ fn defs() -> Value {
             "additionalProperties": false,
             "properties": {
                 "bearer_tokens": string_array(),
-                "bearer_token_env": string_array()
+                "bearer_token_env": string_array(),
+                "allow_unauthenticated_network": bool_default(false)
             }
         },
         "BudgetConfig": {
@@ -473,6 +474,10 @@ mod tests {
         assert!(schema["$defs"]["StickyRoutingConfig"].is_object());
         assert!(schema["$defs"]["ShadowEvalJudgeConfig"].is_object());
         assert!(schema["$defs"]["LearnedScoringConfig"].is_object());
+        assert_eq!(
+            schema["$defs"]["AuthConfig"]["properties"]["allow_unauthenticated_network"]["default"],
+            false
+        );
         assert_eq!(
             schema["$defs"]["SemanticCacheConfig"]["properties"]["backend"]["$ref"],
             "#/$defs/StorageBackend"

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    net::SocketAddr,
     path::Path,
 };
 
@@ -91,6 +92,8 @@ pub struct AuthConfig {
     pub bearer_tokens: Vec<String>,
     #[serde(default)]
     pub bearer_token_env: Vec<String>,
+    #[serde(default)]
+    pub allow_unauthenticated_network: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -836,12 +839,7 @@ impl RouterConfig {
             self.classifier.easy_threshold < self.classifier.hard_threshold,
             "classifier.easy_threshold must be lower than classifier.hard_threshold"
         );
-        for env_name in &self.auth.bearer_token_env {
-            anyhow::ensure!(
-                !env_name.trim().is_empty(),
-                "auth.bearer_token_env entries cannot be empty"
-            );
-        }
+        self.auth.validate(&self.bind)?;
         self.scoring.validate()?;
         self.budget.validate()?;
         self.telemetry.validate()?;
@@ -867,21 +865,6 @@ impl RouterConfig {
         })
     }
 
-    pub fn auth_tokens(&self) -> Vec<String> {
-        self.auth
-            .bearer_tokens
-            .iter()
-            .cloned()
-            .chain(
-                self.auth
-                    .bearer_token_env
-                    .iter()
-                    .filter_map(|name| std::env::var(name).ok()),
-            )
-            .filter(|token| !token.is_empty())
-            .collect()
-    }
-
     fn validate_scoring_hints(&self, providers: &HashSet<&str>) -> Result<()> {
         for model in self.scoring.model_priorities.keys() {
             anyhow::ensure!(
@@ -903,6 +886,40 @@ impl RouterConfig {
         }
         Ok(())
     }
+}
+
+impl AuthConfig {
+    pub(crate) fn validate(&self, bind: &str) -> Result<()> {
+        for token in &self.bearer_tokens {
+            anyhow::ensure!(
+                !token.is_empty() && !token.chars().any(char::is_whitespace),
+                "auth.bearer_tokens entries cannot be empty or contain whitespace"
+            );
+        }
+        for env_name in &self.bearer_token_env {
+            anyhow::ensure!(
+                !env_name.trim().is_empty(),
+                "auth.bearer_token_env entries cannot be empty"
+            );
+        }
+        anyhow::ensure!(
+            bind_is_loopback(bind)
+                || self.allow_unauthenticated_network
+                || !self.bearer_tokens.is_empty()
+                || !self.bearer_token_env.is_empty(),
+            "auth is required for non-loopback bind {bind}; configure bearer tokens or explicitly set auth.allow_unauthenticated_network"
+        );
+        Ok(())
+    }
+}
+
+pub(crate) fn bind_is_loopback(bind: &str) -> bool {
+    bind.parse::<SocketAddr>()
+        .map(|address| address.ip().is_loopback())
+        .unwrap_or_else(|_| {
+            bind.rsplit_once(':')
+                .is_some_and(|(host, _)| host.eq_ignore_ascii_case("localhost"))
+        })
 }
 
 fn validate_unique_providers(providers: &[ProviderConfig]) -> Result<()> {
@@ -1634,6 +1651,44 @@ mod tests {
 
         let error = config.validate().expect_err("zero queue timeout rejected");
         assert!(error.to_string().contains("queue_timeout_ms"));
+    }
+
+    #[test]
+    fn rejects_unauthenticated_non_loopback_bind() {
+        let mut config = valid_config();
+        config.bind = "0.0.0.0:8080".to_string();
+
+        let error = config
+            .validate()
+            .expect_err("public bind without auth must be explicit");
+        assert!(error.to_string().contains("auth is required"));
+    }
+
+    #[test]
+    fn accepts_explicit_unauthenticated_network_override() {
+        let mut config = valid_config();
+        config.bind = "0.0.0.0:8080".to_string();
+        config.auth.allow_unauthenticated_network = true;
+
+        config
+            .validate()
+            .expect("trusted gateway override is explicit");
+    }
+
+    #[test]
+    fn rejects_empty_auth_sources() {
+        let mut config = valid_config();
+        config.auth.bearer_tokens = vec![" ".to_string()];
+
+        let error = config.validate().expect_err("empty bearer token rejected");
+        assert!(error.to_string().contains("bearer_tokens"));
+
+        config.auth.bearer_tokens.clear();
+        config.auth.bearer_token_env = vec!["".to_string()];
+        let error = config
+            .validate()
+            .expect_err("empty bearer token env name rejected");
+        assert!(error.to_string().contains("bearer_token_env"));
     }
 
     #[test]

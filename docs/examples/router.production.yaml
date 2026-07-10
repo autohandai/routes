@@ -5,6 +5,7 @@ policy: balanced
 auth:
   bearer_tokens: []
   bearer_token_env: [AUTOHAND_ROUTER_TOKEN]
+  allow_unauthenticated_network: false
 
 budget:
   max_chat_requests:

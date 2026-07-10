@@ -15,7 +15,7 @@ use autohand_router::{
     provider::ProviderClient,
     router::RoutingEngine,
     semantic_cache::SemanticCache,
-    server::{self, AppState},
+    server::{self, AppState, RequestAuthenticator},
     shadow_eval::ShadowEvalLogger,
     sticky::StickyRoutingStore,
     telemetry::DecisionLogger,
@@ -220,6 +220,7 @@ async fn main() -> Result<()> {
             let bind = config.bind.clone();
             let state = AppState {
                 engine,
+                auth: RequestAuthenticator::from_config(&config)?,
                 providers: ProviderClient::new(&config)?,
                 metrics: Default::default(),
                 accounting: BudgetAccounting::from_budget_config(&config.budget)?,

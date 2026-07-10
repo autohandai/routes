@@ -3,9 +3,10 @@ default_model: llama3.1:8b
 policy: balanced
 
 auth:
-  # Disabled when both lists are empty. Prefer env-backed tokens outside local dev.
+  # Localhost development is unauthenticated when both lists are empty.
   bearer_tokens: []
-  bearer_token_env: [AUTOHAND_ROUTER_TOKEN]
+  bearer_token_env: []
+  allow_unauthenticated_network: false
 
 budget:
   # Disabled when null. Set accounting.backend=file for shared local multi-process enforcement.

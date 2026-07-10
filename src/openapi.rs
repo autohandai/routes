@@ -66,7 +66,8 @@ pub fn spec() -> Value {
                                     "schema": { "$ref": "#/components/schemas/ModelList" }
                                 }
                             }
-                        }
+                        },
+                        "401": { "$ref": "#/components/responses/Unauthorized" }
                     }
                 }
             },
@@ -525,6 +526,14 @@ pub fn spec() -> Value {
             "responses": {
                 "Unauthorized": {
                     "description": "Missing or invalid bearer token",
+                    "headers": {
+                        "WWW-Authenticate": {
+                            "schema": { "type": "string", "const": "Bearer" }
+                        },
+                        "x-autohand-router-request-id": {
+                            "schema": { "type": "string" }
+                        }
+                    },
                     "content": {
                         "application/json": {
                             "schema": { "$ref": "#/components/schemas/RouterError" }
@@ -1057,6 +1066,15 @@ mod tests {
         assert!(spec["components"]["schemas"]["LatencySensitivityClassification"].is_object());
         assert!(spec["components"]["schemas"]["ReasoningDepthClassification"].is_object());
         assert!(spec["components"]["schemas"]["JudgeMetricsSnapshot"].is_object());
+        assert_eq!(
+            spec["paths"]["/v1/models"]["get"]["responses"]["401"]["$ref"],
+            "#/components/responses/Unauthorized"
+        );
+        assert_eq!(
+            spec["components"]["responses"]["Unauthorized"]["headers"]["WWW-Authenticate"]["schema"]
+                ["const"],
+            "Bearer"
+        );
         assert!(
             spec["components"]["schemas"]["RouterPolicy"]["enum"]
                 .as_array()

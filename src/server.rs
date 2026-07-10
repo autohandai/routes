@@ -1,7 +1,7 @@
 use crate::{
     accounting::{BudgetAccounting, BudgetReservation, BudgetUsageSnapshot},
     classifier::{JudgeMetricsSnapshot, SmartClassifier},
-    config::{BudgetConfig, RouterConfig, SafetyRoutingAction},
+    config::{BudgetConfig, RouterConfig, SafetyRoutingAction, bind_is_loopback},
     openapi,
     provider::{ProviderClient, ProviderResponse, is_transient_status},
     router::RoutingEngine,
@@ -72,6 +72,7 @@ enum ShadowEvalDispatch {
 #[derive(Clone)]
 pub struct AppState {
     pub engine: RoutingEngine<SmartClassifier>,
+    pub auth: RequestAuthenticator,
     pub providers: ProviderClient,
     pub metrics: Arc<RouterMetrics>,
     pub accounting: BudgetAccounting,
@@ -79,6 +80,70 @@ pub struct AppState {
     pub semantic_cache: SemanticCache,
     pub shadow_eval: ShadowEvalLogger,
     pub sticky_routing: StickyRoutingStore,
+}
+
+#[derive(Clone)]
+pub struct RequestAuthenticator {
+    tokens: Arc<Vec<String>>,
+}
+
+impl RequestAuthenticator {
+    pub fn from_config(config: &RouterConfig) -> Result<Self> {
+        Self::from_config_with_env(config, |name| {
+            std::env::var(name).map_err(|error| error.to_string())
+        })
+    }
+
+    fn from_config_with_env(
+        config: &RouterConfig,
+        mut read_env: impl FnMut(&str) -> std::result::Result<String, String>,
+    ) -> Result<Self> {
+        config.auth.validate(&config.bind)?;
+        let mut tokens = config.auth.bearer_tokens.clone();
+        for env_name in &config.auth.bearer_token_env {
+            let token = read_env(env_name).map_err(|error| {
+                anyhow::anyhow!(
+                    "auth bearer token environment variable {env_name} is unavailable: {error}"
+                )
+            })?;
+            anyhow::ensure!(
+                !token.is_empty() && !token.chars().any(char::is_whitespace),
+                "auth bearer token environment variable {env_name} is empty or contains whitespace"
+            );
+            tokens.push(token);
+        }
+        anyhow::ensure!(
+            !tokens.is_empty()
+                || bind_is_loopback(&config.bind)
+                || config.auth.allow_unauthenticated_network,
+            "auth is required for non-loopback bind {}; configure bearer tokens or explicitly set auth.allow_unauthenticated_network",
+            config.bind
+        );
+        Ok(Self {
+            tokens: Arc::new(tokens),
+        })
+    }
+
+    fn authorized(&self, headers: &HeaderMap) -> bool {
+        if self.tokens.is_empty() {
+            return true;
+        }
+        let Some(value) = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+        else {
+            return false;
+        };
+        let Some((scheme, token)) = value.split_once(' ') else {
+            return false;
+        };
+        if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
+            return false;
+        }
+        self.tokens
+            .iter()
+            .any(|allowed| constant_time_eq(allowed.as_bytes(), token.as_bytes()))
+    }
 }
 
 #[derive(Default)]
@@ -553,7 +618,7 @@ async fn request_context(
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    if !is_public_request(&request) && !authorized(&state, request.headers()) {
+    if !is_public_request(&request) && !state.auth.authorized(request.headers()) {
         state.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
         let mut response = (
             StatusCode::UNAUTHORIZED,
@@ -562,6 +627,9 @@ async fn request_context(
             )),
         )
             .into_response();
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         insert_request_id(response.headers_mut(), &request_id);
         return response;
     }
@@ -574,25 +642,6 @@ async fn request_context(
 fn is_public_request(request: &Request<Body>) -> bool {
     request.method() == Method::OPTIONS
         || matches!(request.uri().path(), "/health" | "/openapi.json")
-}
-
-fn authorized(state: &AppState, headers: &HeaderMap) -> bool {
-    let tokens = state.engine.config().auth_tokens();
-    if tokens.is_empty() {
-        return true;
-    }
-    let Some(value) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-    else {
-        return false;
-    };
-    let Some(token) = value.strip_prefix("Bearer ") else {
-        return false;
-    };
-    tokens
-        .iter()
-        .any(|allowed| constant_time_eq(allowed.as_bytes(), token.as_bytes()))
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -3767,8 +3816,9 @@ fn elapsed_millis_u32(started: Instant) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, RouterMetrics, UsageAccounting, app, budget_violation, constant_time_eq,
-        legacy_raw_difficulty, parse_router_model_policy, prometheus_escape, usage_from_value,
+        AppState, RequestAuthenticator, RouterMetrics, UsageAccounting, app, budget_violation,
+        constant_time_eq, legacy_raw_difficulty, parse_router_model_policy, prometheus_escape,
+        usage_from_value,
     };
     use crate::{
         classifier::SmartClassifier,
@@ -3788,7 +3838,11 @@ mod tests {
         },
     };
     use axum::{
-        Json, Router, extract::Multipart, http::StatusCode, response::IntoResponse, routing::post,
+        Json, Router,
+        extract::Multipart,
+        http::{HeaderMap, HeaderValue, StatusCode, header},
+        response::IntoResponse,
+        routing::post,
     };
     use serde_json::Value;
     use std::{
@@ -3806,6 +3860,56 @@ mod tests {
         assert!(!constant_time_eq(b"token", b"tokem"));
         assert!(!constant_time_eq(b"token", b"token-extra"));
         assert!(!constant_time_eq(b"", b"token"));
+    }
+
+    #[test]
+    fn configured_auth_env_must_resolve_to_a_non_empty_token() {
+        let mut config = failover_config(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:2".to_string(),
+        );
+        config.auth.bearer_token_env = vec!["ROUTER_TEST_TOKEN".to_string()];
+
+        let missing =
+            RequestAuthenticator::from_config_with_env(&config, |_| Err("not present".to_string()))
+                .err()
+                .expect("missing configured token must fail");
+        assert!(missing.to_string().contains("ROUTER_TEST_TOKEN"));
+        assert!(missing.to_string().contains("unavailable"));
+
+        let empty = RequestAuthenticator::from_config_with_env(&config, |_| Ok(" ".to_string()))
+            .err()
+            .expect("empty configured token must fail");
+        assert!(empty.to_string().contains("ROUTER_TEST_TOKEN"));
+        assert!(empty.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn authenticator_uses_the_startup_resolved_token() {
+        let mut config = failover_config(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:2".to_string(),
+        );
+        config.auth.bearer_token_env = vec!["ROUTER_TEST_TOKEN".to_string()];
+        let auth = RequestAuthenticator::from_config_with_env(&config, |_| {
+            Ok("resolved-secret".to_string())
+        })
+        .expect("configured token resolves");
+
+        let mut valid = HeaderMap::new();
+        valid.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("bearer resolved-secret"),
+        );
+        assert!(auth.authorized(&valid));
+
+        let mut invalid = HeaderMap::new();
+        invalid.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer wrong-secret"),
+        );
+        assert!(!auth.authorized(&invalid));
+        assert!(!auth.authorized(&HeaderMap::new()));
     }
 
     #[test]
@@ -4038,6 +4142,59 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("0")
         );
+    }
+
+    #[tokio::test]
+    async fn protected_routes_require_the_startup_resolved_bearer_token() {
+        let mut config = failover_config(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:2".to_string(),
+        );
+        config.auth.bearer_tokens = vec!["test-router-secret".to_string()];
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let health = client
+            .get(format!("{router_url}/health"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let unauthorized = client
+            .get(format!("{router_url}/v1/models"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            unauthorized
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer")
+        );
+        assert!(
+            unauthorized
+                .headers()
+                .contains_key("x-autohand-router-request-id")
+        );
+
+        let invalid = client
+            .get(format!("{router_url}/v1/models"))
+            .bearer_auth("wrong-secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized = client
+            .get(format!("{router_url}/v1/models"))
+            .bearer_auth("test-router-secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(authorized.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -5395,6 +5552,7 @@ mod tests {
         let engine = RoutingEngine::new(config.clone(), classifier);
         let state = AppState {
             engine,
+            auth: RequestAuthenticator::from_config(&config).unwrap(),
             providers: ProviderClient::new(&config).unwrap(),
             metrics: Default::default(),
             accounting: crate::accounting::BudgetAccounting::from_budget_config(&config.budget)

@@ -223,13 +223,16 @@ When enabled, `/v1/router/multimodel` and automatic chat routing write selected 
 
 ## Auth
 
-Auth is disabled when no tokens are configured. To protect the router, set `auth.bearer_token_env` or `auth.bearer_tokens`:
+Auth is optional for loopback development. Set `auth.bearer_token_env` or `auth.bearer_tokens` before binding to a network interface:
 
 ```yaml
 auth:
   bearer_token_env: [AUTOHAND_ROUTER_TOKEN]
   bearer_tokens: []
+  allow_unauthenticated_network: false
 ```
+
+Configured environment variables are resolved once when `serve` starts. A missing or empty token fails startup instead of disabling auth. Non-loopback binds also require at least one token source unless `allow_unauthenticated_network: true` is set explicitly for a deployment where a trusted API gateway enforces authentication and direct origin access is blocked.
 
 Then call protected endpoints with:
 
@@ -237,7 +240,7 @@ Then call protected endpoints with:
 curl -H "Authorization: Bearer $AUTOHAND_ROUTER_TOKEN" http://127.0.0.1:8080/metrics
 ```
 
-`/health` and CORS preflight requests stay public. Protected responses include `x-autohand-router-request-id` for tracing.
+`/health`, `/openapi.json`, and CORS preflight requests stay public. Authentication failures include `WWW-Authenticate: Bearer` and `x-autohand-router-request-id`.
 
 ## CLI
 

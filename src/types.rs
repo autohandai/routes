@@ -619,6 +619,14 @@ impl OpenAiChatRequest {
             .join("\n")
     }
 
+    pub fn context_text(&self) -> String {
+        format!(
+            "messages={}\nrequest_options={}",
+            serde_json::to_string(&self.messages).unwrap_or_default(),
+            serde_json::to_string(&self.extra).unwrap_or_default()
+        )
+    }
+
     pub fn required_capabilities(&self) -> Vec<ModelCapability> {
         let mut capabilities = Vec::new();
         if self
@@ -663,6 +671,14 @@ impl OpenAiResponsesRequest {
         content_to_text(&self.input).unwrap_or_default()
     }
 
+    pub fn context_text(&self) -> String {
+        format!(
+            "input={}\nrequest_options={}",
+            serde_json::to_string(&self.input).unwrap_or_default(),
+            serde_json::to_string(&self.extra).unwrap_or_default()
+        )
+    }
+
     pub fn into_upstream(mut self, model: String) -> Value {
         self.model = model;
         serde_json::to_value(self).expect("OpenAI responses request serializes")
@@ -701,6 +717,14 @@ impl OpenAiResponsesRequest {
 impl OpenAiEmbeddingsRequest {
     pub fn prompt_text(&self) -> String {
         content_to_text(&self.input).unwrap_or_default()
+    }
+
+    pub fn context_text(&self) -> String {
+        format!(
+            "input={}\nrequest_options={}",
+            serde_json::to_string(&self.input).unwrap_or_default(),
+            serde_json::to_string(&self.extra).unwrap_or_default()
+        )
     }
 
     pub fn into_upstream(mut self, model: String) -> Value {
@@ -918,6 +942,28 @@ mod tests {
         };
 
         assert_eq!(request.prompt_text(), "first prompt\nsecond prompt");
+    }
+
+    #[test]
+    fn chat_context_text_includes_history_and_request_options() {
+        let request = OpenAiChatRequest {
+            model: "auto".to_string(),
+            messages: vec![
+                super::ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String("first question".to_string()),
+                },
+                super::ChatMessage {
+                    role: "assistant".to_string(),
+                    content: Value::String("previous answer".to_string()),
+                },
+            ],
+            extra: serde_json::Map::from_iter([("tools".to_string(), serde_json::json!([]))]),
+        };
+
+        let context = request.context_text();
+        assert!(context.contains("previous answer"));
+        assert!(context.contains("tools"));
     }
 
     #[test]

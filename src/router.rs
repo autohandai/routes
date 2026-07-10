@@ -54,9 +54,27 @@ where
     }
 
     pub async fn route(&self, request: MultimodelRequest) -> MultimodelResponse {
+        self.route_internal(request, None).await
+    }
+
+    pub async fn route_with_estimated_input_tokens(
+        &self,
+        request: MultimodelRequest,
+        estimated_input_tokens: u32,
+    ) -> MultimodelResponse {
+        self.route_internal(request, Some(estimated_input_tokens))
+            .await
+    }
+
+    async fn route_internal(
+        &self,
+        request: MultimodelRequest,
+        estimated_input_tokens: Option<u32>,
+    ) -> MultimodelResponse {
         let classifications = self.classify(&request.input).await;
         let token_budget = TokenBudget {
-            estimated_input_tokens: estimate_tokens(&request.input),
+            estimated_input_tokens: estimated_input_tokens
+                .unwrap_or_else(|| estimate_tokens(&request.input)),
             requested_output_tokens: request.max_output_tokens.unwrap_or(1024),
         };
         let default_model = request
@@ -1757,6 +1775,28 @@ mod tests {
         for candidate in &route.candidates {
             assert!((candidate.score_components.final_score - candidate.score).abs() < 0.0001);
         }
+    }
+
+    #[tokio::test]
+    async fn caller_supplied_context_estimate_controls_context_eligibility() {
+        let route = context_engine()
+            .route_with_estimated_input_tokens(
+                MultimodelRequest {
+                    input: "short classifier text".to_string(),
+                    allowed_models: vec![],
+                    allowed_providers: vec![],
+                    required_capabilities: Vec::new(),
+                    policy: RouterPolicy::Balanced,
+                    default_model: None,
+                    max_output_tokens: Some(0),
+                },
+                4097,
+            )
+            .await;
+
+        assert_eq!(route.model, "");
+        assert!(route.fallback);
+        assert_eq!(route.decision_trace.unwrap().context_required, 4097);
     }
 
     #[tokio::test]

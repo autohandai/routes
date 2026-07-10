@@ -1272,21 +1272,25 @@ async fn chat_completions(
         let policy = parse_router_model_policy(&requested_model);
         let mut route_input = prompt.clone();
         let required_capabilities = request.required_capabilities();
+        let estimated_context_tokens = estimate_tokens(&request.context_text());
         let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Chat);
         if allowed_providers.is_empty() {
             return unsupported_endpoint_response(RoutingEndpoint::Chat);
         }
         let mut route = state
             .engine
-            .route(MultimodelRequest {
-                input: route_input.clone(),
-                allowed_models: vec![],
-                allowed_providers,
-                required_capabilities,
-                policy,
-                default_model: None,
-                max_output_tokens: request.max_output_tokens(),
-            })
+            .route_with_estimated_input_tokens(
+                MultimodelRequest {
+                    input: route_input.clone(),
+                    allowed_models: vec![],
+                    allowed_providers,
+                    required_capabilities,
+                    policy,
+                    default_model: None,
+                    max_output_tokens: request.max_output_tokens(),
+                },
+                estimated_context_tokens,
+            )
             .await;
         state.metrics.route_requests.fetch_add(1, Ordering::Relaxed);
         if route.fallback {
@@ -1396,21 +1400,25 @@ async fn responses(
         let policy = parse_router_model_policy(&requested_model);
         let mut route_input = prompt.clone();
         let required_capabilities = request.required_capabilities();
+        let estimated_context_tokens = estimate_tokens(&request.context_text());
         let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Responses);
         if allowed_providers.is_empty() {
             return unsupported_endpoint_response(RoutingEndpoint::Responses);
         }
         let mut route = state
             .engine
-            .route(MultimodelRequest {
-                input: route_input.clone(),
-                allowed_models: vec![],
-                allowed_providers,
-                required_capabilities,
-                policy,
-                default_model: None,
-                max_output_tokens: request.max_output_tokens(),
-            })
+            .route_with_estimated_input_tokens(
+                MultimodelRequest {
+                    input: route_input.clone(),
+                    allowed_models: vec![],
+                    allowed_providers,
+                    required_capabilities,
+                    policy,
+                    default_model: None,
+                    max_output_tokens: request.max_output_tokens(),
+                },
+                estimated_context_tokens,
+            )
             .await;
         state.metrics.route_requests.fetch_add(1, Ordering::Relaxed);
         if route.fallback {
@@ -1772,21 +1780,25 @@ async fn embeddings(
     let (models, estimated_input_tokens) = if automatic {
         let policy = parse_router_model_policy(&requested_model);
         let route_input = prompt.clone();
+        let estimated_context_tokens = estimate_tokens(&request.context_text());
         let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Embeddings);
         if allowed_providers.is_empty() {
             return unsupported_endpoint_response(RoutingEndpoint::Embeddings);
         }
         let route = state
             .engine
-            .route(MultimodelRequest {
-                input: route_input.clone(),
-                allowed_models: vec![],
-                allowed_providers,
-                required_capabilities: Vec::new(),
-                policy,
-                default_model: None,
-                max_output_tokens: Some(0),
-            })
+            .route_with_estimated_input_tokens(
+                MultimodelRequest {
+                    input: route_input.clone(),
+                    allowed_models: vec![],
+                    allowed_providers,
+                    required_capabilities: Vec::new(),
+                    policy,
+                    default_model: None,
+                    max_output_tokens: Some(0),
+                },
+                estimated_context_tokens,
+            )
             .await;
         state.metrics.route_requests.fetch_add(1, Ordering::Relaxed);
         if route.fallback {

@@ -8,14 +8,14 @@ use std::{
     fs::{self, OpenOptions},
     io::ErrorKind,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread::sleep,
     time::{Duration, Instant},
 };
 
 #[derive(Clone)]
 pub enum BudgetAccounting {
-    Process,
+    Process(Arc<ProcessBudgetLedger>),
     File(Arc<FileBudgetLedger>),
 }
 
@@ -36,7 +36,9 @@ pub struct BudgetReservation {
 impl BudgetAccounting {
     pub fn from_budget_config(budget: &BudgetConfig) -> Result<Self> {
         match budget.accounting.backend {
-            BudgetAccountingBackend::Process => Ok(Self::Process),
+            BudgetAccountingBackend::Process => {
+                Ok(Self::Process(Arc::new(ProcessBudgetLedger::default())))
+            }
             BudgetAccountingBackend::File => {
                 let path = budget
                     .accounting
@@ -53,16 +55,40 @@ impl BudgetAccounting {
 
     pub fn reserve(&self, budget: &BudgetConfig, reservation: BudgetReservation) -> Result<()> {
         match self {
-            Self::Process => Ok(()),
+            Self::Process(ledger) => ledger.reserve(budget, reservation),
             Self::File(ledger) => ledger.reserve(budget, reservation),
         }
     }
 
     pub fn snapshot(&self) -> Option<BudgetUsageSnapshot> {
         match self {
-            Self::Process => None,
+            Self::Process(ledger) => ledger.snapshot().ok(),
             Self::File(ledger) => ledger.snapshot().ok(),
         }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ProcessBudgetLedger {
+    usage: Mutex<BudgetUsageSnapshot>,
+}
+
+impl ProcessBudgetLedger {
+    fn reserve(&self, budget: &BudgetConfig, reservation: BudgetReservation) -> Result<()> {
+        let mut usage = self
+            .usage
+            .lock()
+            .map_err(|_| anyhow::anyhow!("process budget ledger lock poisoned"))?;
+        ensure_within_budget(budget, &usage, reservation)?;
+        add_reservation(&mut usage, reservation);
+        Ok(())
+    }
+
+    fn snapshot(&self) -> Result<BudgetUsageSnapshot> {
+        self.usage
+            .lock()
+            .map(|usage| usage.clone())
+            .map_err(|_| anyhow::anyhow!("process budget ledger lock poisoned"))
     }
 }
 
@@ -117,13 +143,7 @@ impl FileBudgetLedger {
         let _lock = FileLock::acquire(&self.lock_path, self.lock_timeout)?;
         let mut usage = self.read_usage()?;
         ensure_within_budget(budget, &usage, reservation)?;
-        usage.request_count = usage
-            .request_count
-            .saturating_add(reservation.request_count);
-        usage.total_tokens = usage.total_tokens.saturating_add(reservation.total_tokens);
-        usage.estimated_cost_micros = usage
-            .estimated_cost_micros
-            .saturating_add(reservation.estimated_cost_micros);
+        add_reservation(&mut usage, reservation);
         self.write_usage(&usage)
     }
 
@@ -152,6 +172,16 @@ impl FileBudgetLedger {
         fs::write(&self.path, raw)
             .with_context(|| format!("failed to write budget ledger {}", self.path.display()))
     }
+}
+
+fn add_reservation(usage: &mut BudgetUsageSnapshot, reservation: BudgetReservation) {
+    usage.request_count = usage
+        .request_count
+        .saturating_add(reservation.request_count);
+    usage.total_tokens = usage.total_tokens.saturating_add(reservation.total_tokens);
+    usage.estimated_cost_micros = usage
+        .estimated_cost_micros
+        .saturating_add(reservation.estimated_cost_micros);
 }
 
 fn ensure_within_budget(
@@ -242,7 +272,7 @@ mod tests {
         config::{BudgetAccountingBackend, BudgetAccountingConfig, BudgetConfig},
         types::ModelConfig,
     };
-    use std::{fs, time::SystemTime};
+    use std::{fs, thread, time::SystemTime};
 
     #[test]
     fn file_accounting_enforces_shared_request_limit() {
@@ -274,6 +304,35 @@ mod tests {
         assert_eq!(first.snapshot().unwrap().request_count, 1);
         let _ = fs::remove_file(path.with_extension("json.lock"));
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn process_accounting_reserves_concurrent_requests_atomically() {
+        let budget = BudgetConfig {
+            max_chat_requests: Some(1),
+            max_total_tokens: None,
+            max_estimated_cost_micros: None,
+            accounting: Default::default(),
+        };
+        let accounting = BudgetAccounting::from_budget_config(&budget).unwrap();
+        let reservation = BudgetReservation::new(&test_model(), 10, 0);
+        let successes = thread::scope(|scope| {
+            let handles = (0..8)
+                .map(|_| {
+                    let accounting = accounting.clone();
+                    let budget = budget.clone();
+                    scope.spawn(move || accounting.reserve(&budget, reservation).is_ok())
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .filter_map(|handle| handle.join().ok())
+                .filter(|success| *success)
+                .count()
+        });
+
+        assert_eq!(successes, 1);
+        assert_eq!(accounting.snapshot().unwrap().request_count, 1);
     }
 
     fn test_model() -> ModelConfig {

@@ -1,5 +1,5 @@
 use crate::{
-    accounting::{BudgetAccounting, BudgetReservation, BudgetUsageSnapshot},
+    accounting::{BudgetAccounting, BudgetReservation},
     classifier::{JudgeMetricsSnapshot, SmartClassifier},
     config::{BudgetConfig, RouterConfig, SafetyRoutingAction, bind_is_loopback},
     openapi,
@@ -298,7 +298,7 @@ impl RouterMetrics {
             estimated_cost_usd: estimated_cost_micros as f64 / 1_000_000.0,
             per_model: snapshot_selection_map(&self.per_model),
             per_provider: snapshot_selection_map(&self.per_provider),
-            budget: BudgetSnapshot::from_config(self, budget, accounting),
+            budget: BudgetSnapshot::from_config(budget, accounting),
             judge,
         }
     }
@@ -338,25 +338,10 @@ impl RouterMetrics {
             cost_micros,
         );
     }
-
-    fn model_request_count(&self) -> u64 {
-        self.chat_requests
-            .load(Ordering::Relaxed)
-            .saturating_add(self.responses_requests.load(Ordering::Relaxed))
-            .saturating_add(self.embeddings_requests.load(Ordering::Relaxed))
-            .saturating_add(self.images_requests.load(Ordering::Relaxed))
-            .saturating_add(self.speech_requests.load(Ordering::Relaxed))
-            .saturating_add(self.audio_transcription_requests.load(Ordering::Relaxed))
-            .saturating_add(self.audio_translation_requests.load(Ordering::Relaxed))
-    }
 }
 
 impl BudgetSnapshot {
-    fn from_config(
-        metrics: &RouterMetrics,
-        budget: Option<&BudgetConfig>,
-        accounting: &BudgetAccounting,
-    ) -> Self {
+    fn from_config(budget: Option<&BudgetConfig>, accounting: &BudgetAccounting) -> Self {
         let Some(budget) = budget else {
             return Self {
                 accounting_backend: "disabled".to_string(),
@@ -372,13 +357,9 @@ impl BudgetSnapshot {
             };
         };
         let (accounting_backend, used) = match accounting {
-            BudgetAccounting::Process => (
+            BudgetAccounting::Process(_) => (
                 "process".to_string(),
-                BudgetUsageSnapshot {
-                    request_count: metrics.model_request_count(),
-                    total_tokens: metrics.total_tokens.load(Ordering::Relaxed),
-                    estimated_cost_micros: metrics.estimated_cost_micros.load(Ordering::Relaxed),
-                },
+                accounting.snapshot().unwrap_or_default(),
             ),
             BudgetAccounting::File(_) => (
                 "file".to_string(),
@@ -3338,6 +3319,7 @@ async fn dispatch_audio_multipart(
         .into_response()
 }
 
+#[cfg(test)]
 fn budget_violation(
     budget: &BudgetConfig,
     metrics: &RouterMetrics,
@@ -3396,24 +3378,13 @@ fn reserve_budget(
     estimated_input_tokens: u32,
     requested_output_tokens: u32,
 ) -> Option<String> {
-    match &state.accounting {
-        BudgetAccounting::Process => budget_violation(
-            budget,
-            &state.metrics,
-            model,
-            estimated_input_tokens,
-            requested_output_tokens,
-        ),
-        BudgetAccounting::File(_) => {
-            let reservation =
-                BudgetReservation::new(model, estimated_input_tokens, requested_output_tokens);
-            state
-                .accounting
-                .reserve(budget, reservation)
-                .err()
-                .map(|error| error.to_string())
-        }
-    }
+    let reservation =
+        BudgetReservation::new(model, estimated_input_tokens, requested_output_tokens);
+    state
+        .accounting
+        .reserve(budget, reservation)
+        .err()
+        .map(|error| error.to_string())
 }
 
 async fn upstream_response(

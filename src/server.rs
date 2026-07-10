@@ -1261,6 +1261,9 @@ async fn chat_completions(
     let requested_model = request.model.clone();
     let config = state.engine.config();
     let automatic = requested_model.starts_with("router-") || requested_model == "auto";
+    if requested_model.starts_with("router-") && !is_known_router_model(&requested_model) {
+        return invalid_router_model_response(&requested_model);
+    }
     let sticky_key = automatic.then(|| chat_sticky_key(&request)).flatten();
     let (
         models,
@@ -1387,6 +1390,9 @@ async fn responses(
     let requested_model = request.model.clone();
     let config = state.engine.config();
     let automatic = requested_model.starts_with("router-") || requested_model == "auto";
+    if requested_model.starts_with("router-") && !is_known_router_model(&requested_model) {
+        return invalid_router_model_response(&requested_model);
+    }
     let sticky_key = automatic.then(|| responses_sticky_key(&request)).flatten();
     let (
         models,
@@ -1773,6 +1779,9 @@ async fn embeddings(
     let requested_model = request.model.clone();
     let config = state.engine.config();
     let automatic = requested_model.starts_with("router-") || requested_model == "auto";
+    if requested_model.starts_with("router-") && !is_known_router_model(&requested_model) {
+        return invalid_router_model_response(&requested_model);
+    }
     let (models, estimated_input_tokens) = if automatic {
         let policy = parse_router_model_policy(&requested_model);
         let route_input = prompt.clone();
@@ -1850,6 +1859,9 @@ async fn images_generations(
     let requested_model = request.model.clone();
     let config = state.engine.config();
     let automatic = requested_model.starts_with("router-") || requested_model == "auto";
+    if requested_model.starts_with("router-") && !is_known_router_model(&requested_model) {
+        return invalid_router_model_response(&requested_model);
+    }
     let (models, estimated_input_tokens) = if automatic {
         let policy = parse_router_model_policy(&requested_model);
         let route_input = prompt.clone();
@@ -1923,6 +1935,9 @@ async fn audio_speech(
     let requested_model = request.model.clone();
     let config = state.engine.config();
     let automatic = requested_model.starts_with("router-") || requested_model == "auto";
+    if requested_model.starts_with("router-") && !is_known_router_model(&requested_model) {
+        return invalid_router_model_response(&requested_model);
+    }
     let (models, estimated_input_tokens) = if automatic {
         let policy = parse_router_model_policy(&requested_model);
         let route_input = prompt.clone();
@@ -2121,6 +2136,9 @@ async fn audio_multipart_endpoint(
     let requested_model = request.model.clone();
     let config = state.engine.config();
     let automatic = requested_model.starts_with("router-") || requested_model == "auto";
+    if requested_model.starts_with("router-") && !is_known_router_model(&requested_model) {
+        return invalid_router_model_response(&requested_model);
+    }
     let (models, estimated_input_tokens) = if automatic {
         let policy = parse_router_model_policy(&requested_model);
         let route_input = route_prompt.clone();
@@ -3891,6 +3909,36 @@ fn parse_router_model_policy(model: &str) -> RouterPolicy {
     }
 }
 
+fn is_known_router_model(model: &str) -> bool {
+    matches!(
+        model,
+        "router-balanced"
+            | "router-lowest-cost"
+            | "router-fastest"
+            | "router-fastest-healthy"
+            | "router-highest-quality"
+            | "router-local"
+            | "router-privacy"
+            | "router-multimodal"
+            | "router-floor"
+            | "router-nitro"
+            | "router-quality"
+            | "router-cost"
+            | "router-capability"
+            | "router-domain"
+    )
+}
+
+fn invalid_router_model_response(model: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ProviderClient::error_json(format!(
+            "unknown router model {model}; use auto or a documented router-* policy"
+        ))),
+    )
+        .into_response()
+}
+
 fn elapsed_millis_u32(started: Instant) -> u32 {
     started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32
 }
@@ -3899,8 +3947,8 @@ fn elapsed_millis_u32(started: Instant) -> u32 {
 mod tests {
     use super::{
         AppState, RequestAuthenticator, RouterMetrics, RoutingEndpoint, UsageAccounting, app,
-        budget_violation, constant_time_eq, legacy_raw_difficulty, parse_router_model_policy,
-        prometheus_escape, supported_provider_names, usage_from_value,
+        budget_violation, constant_time_eq, is_known_router_model, legacy_raw_difficulty,
+        parse_router_model_policy, prometheus_escape, supported_provider_names, usage_from_value,
     };
     use crate::{
         classifier::SmartClassifier,
@@ -5278,6 +5326,8 @@ mod tests {
             parse_router_model_policy("router-multimodal"),
             RouterPolicy::MultimodalFirst
         );
+        assert!(is_known_router_model("router-balanced"));
+        assert!(!is_known_router_model("router-privcy"));
         assert_eq!(
             parse_router_model_policy("router-floor"),
             RouterPolicy::Floor

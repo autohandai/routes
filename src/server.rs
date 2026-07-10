@@ -1323,9 +1323,6 @@ async fn chat_completions(
                 .into_response();
         };
         apply_sticky_routing(&state, &config, sticky_key.as_deref(), &mut models);
-        if let Some(selected_model) = models.first() {
-            record_sticky_routing(&state, &config, sticky_key.clone(), selected_model);
-        }
         let shadow_eval_dispatch = shadow_eval_request_for_chat(
             &state,
             &config,
@@ -1377,6 +1374,7 @@ async fn chat_completions(
         requested_output_tokens,
         semantic_cache_request,
         shadow_eval_dispatch,
+        sticky_key,
     )
     .await
 }
@@ -1455,9 +1453,6 @@ async fn responses(
                 .into_response();
         };
         apply_sticky_routing(&state, &config, sticky_key.as_deref(), &mut models);
-        if let Some(selected_model) = models.first() {
-            record_sticky_routing(&state, &config, sticky_key.clone(), selected_model);
-        }
         let shadow_eval_dispatch = shadow_eval_request_for_responses(
             &state,
             &config,
@@ -1509,6 +1504,7 @@ async fn responses(
         requested_output_tokens,
         semantic_cache_request,
         shadow_eval_dispatch,
+        sticky_key,
     )
     .await
 }
@@ -2454,6 +2450,7 @@ async fn dispatch_chat(
     requested_output_tokens: u32,
     semantic_cache_request: Option<SemanticCacheRequest>,
     shadow_eval_dispatch: Option<ShadowEvalDispatch>,
+    sticky_key: Option<String>,
 ) -> Response {
     let Some(first_model) = models.first() else {
         state
@@ -2538,6 +2535,7 @@ async fn dispatch_chat(
             .fetch_add(1, Ordering::Relaxed);
         if let Some(model) = config.find_model(&hit.model) {
             state.metrics.record_selection(model);
+            record_sticky_routing(&state, &config, sticky_key.clone(), model);
         }
         return cached_upstream_response(hit, estimated_input_tokens, requested_output_tokens);
     }
@@ -2579,6 +2577,7 @@ async fn dispatch_chat(
                         .fetch_add(1, Ordering::Relaxed);
                 }
                 state.metrics.record_selection(model);
+                record_sticky_routing(&state, &config, sticky_key.clone(), model);
                 return upstream_response(
                     state.clone(),
                     response,
@@ -2645,6 +2644,7 @@ async fn dispatch_responses(
     requested_output_tokens: u32,
     semantic_cache_request: Option<SemanticCacheRequest>,
     shadow_eval_dispatch: Option<ShadowEvalDispatch>,
+    sticky_key: Option<String>,
 ) -> Response {
     let Some(first_model) = models.first() else {
         state
@@ -2732,6 +2732,7 @@ async fn dispatch_responses(
             .fetch_add(1, Ordering::Relaxed);
         if let Some(model) = config.find_model(&hit.model) {
             state.metrics.record_selection(model);
+            record_sticky_routing(&state, &config, sticky_key.clone(), model);
         }
         return cached_upstream_response(hit, estimated_input_tokens, requested_output_tokens);
     }
@@ -2773,6 +2774,7 @@ async fn dispatch_responses(
                         .fetch_add(1, Ordering::Relaxed);
                 }
                 state.metrics.record_selection(model);
+                record_sticky_routing(&state, &config, sticky_key.clone(), model);
                 return upstream_response(
                     state.clone(),
                     response,
@@ -4183,6 +4185,70 @@ mod tests {
             body.contains(
                 "autohand_router_selection_requests_total_by_model{model=\"strong-ok\"} 1"
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn sticky_routing_records_the_successful_failover_model() {
+        let failing_base_url =
+            spawn_chat_upstream("sticky-fail", StatusCode::SERVICE_UNAVAILABLE).await;
+        let healthy_base_url = spawn_chat_upstream("sticky-ok", StatusCode::OK).await;
+        let mut config = failover_config(failing_base_url, healthy_base_url);
+        config.sticky_routing.enabled = true;
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+        let request = serde_json::json!({
+            "model": "router-capability",
+            "messages": [{
+                "role": "user",
+                "content": "Design a production Rust router with distributed failover and security"
+            }],
+            "user": "sticky-test-session",
+            "max_tokens": 64
+        });
+
+        let first = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(
+            first
+                .headers()
+                .get("x-autohand-router-model")
+                .and_then(|value| value.to_str().ok()),
+            Some("strong-ok")
+        );
+        assert_eq!(
+            first
+                .headers()
+                .get("x-autohand-router-failovers")
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+
+        let second = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(
+            second
+                .headers()
+                .get("x-autohand-router-model")
+                .and_then(|value| value.to_str().ok()),
+            Some("strong-ok")
+        );
+        assert_eq!(
+            second
+                .headers()
+                .get("x-autohand-router-failovers")
+                .and_then(|value| value.to_str().ok()),
+            Some("0")
         );
     }
 

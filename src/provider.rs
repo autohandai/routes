@@ -9,6 +9,7 @@ use crate::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures_util::{StreamExt, stream};
 use reqwest::{Client, Response, StatusCode, multipart};
 use serde::Serialize;
 use serde_json::Value;
@@ -19,40 +20,87 @@ use tokio::{
 };
 
 pub enum ProviderResponse {
-    Upstream(Response),
+    Upstream {
+        response: Response,
+        permit: Option<OwnedSemaphorePermit>,
+    },
     Buffered {
         status: StatusCode,
         headers: reqwest::header::HeaderMap,
         body: Bytes,
+        permit: Option<OwnedSemaphorePermit>,
     },
 }
 
 impl ProviderResponse {
     pub fn status(&self) -> StatusCode {
         match self {
-            Self::Upstream(response) => response.status(),
+            Self::Upstream { response, .. } => response.status(),
             Self::Buffered { status, .. } => *status,
         }
     }
 
     pub fn headers(&self) -> &reqwest::header::HeaderMap {
         match self {
-            Self::Upstream(response) => response.headers(),
+            Self::Upstream { response, .. } => response.headers(),
             Self::Buffered { headers, .. } => headers,
         }
     }
 
     pub async fn bytes(self) -> Result<Bytes, reqwest::Error> {
         match self {
-            Self::Upstream(response) => response.bytes().await,
-            Self::Buffered { body, .. } => Ok(body),
+            Self::Upstream { response, permit } => {
+                let _permit = permit;
+                response.bytes().await
+            }
+            Self::Buffered { body, permit, .. } => {
+                let _permit = permit;
+                Ok(body)
+            }
         }
     }
 
     pub fn into_upstream(self) -> Option<Response> {
         match self {
-            Self::Upstream(response) => Some(response),
+            Self::Upstream { response, .. } => Some(response),
             Self::Buffered { .. } => None,
+        }
+    }
+
+    pub fn into_stream(
+        self,
+    ) -> Option<impl futures_util::Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static>
+    {
+        let Self::Upstream { response, permit } = self else {
+            return None;
+        };
+        let upstream = Box::pin(response.bytes_stream());
+        Some(stream::unfold(
+            (upstream, permit),
+            |(mut upstream, permit)| async move {
+                upstream
+                    .as_mut()
+                    .next()
+                    .await
+                    .map(|item| (item, (upstream, permit)))
+            },
+        ))
+    }
+
+    fn with_permit(self, permit: Option<OwnedSemaphorePermit>) -> Self {
+        match self {
+            Self::Upstream { response, .. } => Self::Upstream { response, permit },
+            Self::Buffered {
+                status,
+                headers,
+                body,
+                ..
+            } => Self::Buffered {
+                status,
+                headers,
+                body,
+                permit,
+            },
         }
     }
 }
@@ -98,10 +146,11 @@ impl ProviderClient {
             .iter()
             .find(|provider| provider.name == model.provider)
             .with_context(|| format!("provider {} is not configured", model.provider))?;
-        let _permit = self.acquire_permit(provider).await?;
+        let permit = self.acquire_permit(provider).await?;
         self.adapter_for(provider)?
             .send_chat(&self.http, provider, model, request)
             .await
+            .map(|response| response.with_permit(permit))
     }
 
     pub async fn send_responses(
@@ -115,10 +164,11 @@ impl ProviderClient {
             .iter()
             .find(|provider| provider.name == model.provider)
             .with_context(|| format!("provider {} is not configured", model.provider))?;
-        let _permit = self.acquire_permit(provider).await?;
+        let permit = self.acquire_permit(provider).await?;
         self.adapter_for(provider)?
             .send_responses(&self.http, provider, model, request)
             .await
+            .map(|response| response.with_permit(permit))
     }
 
     pub async fn send_embeddings(
@@ -132,10 +182,11 @@ impl ProviderClient {
             .iter()
             .find(|provider| provider.name == model.provider)
             .with_context(|| format!("provider {} is not configured", model.provider))?;
-        let _permit = self.acquire_permit(provider).await?;
+        let permit = self.acquire_permit(provider).await?;
         self.adapter_for(provider)?
             .send_embeddings(&self.http, provider, model, request)
             .await
+            .map(|response| response.with_permit(permit))
     }
 
     pub async fn send_images(
@@ -149,10 +200,11 @@ impl ProviderClient {
             .iter()
             .find(|provider| provider.name == model.provider)
             .with_context(|| format!("provider {} is not configured", model.provider))?;
-        let _permit = self.acquire_permit(provider).await?;
+        let permit = self.acquire_permit(provider).await?;
         self.adapter_for(provider)?
             .send_images(&self.http, provider, model, request)
             .await
+            .map(|response| response.with_permit(permit))
     }
 
     pub async fn send_speech(
@@ -166,10 +218,11 @@ impl ProviderClient {
             .iter()
             .find(|provider| provider.name == model.provider)
             .with_context(|| format!("provider {} is not configured", model.provider))?;
-        let _permit = self.acquire_permit(provider).await?;
+        let permit = self.acquire_permit(provider).await?;
         self.adapter_for(provider)?
             .send_speech(&self.http, provider, model, request)
             .await
+            .map(|response| response.with_permit(permit))
     }
 
     pub async fn send_audio_transcription(
@@ -183,10 +236,11 @@ impl ProviderClient {
             .iter()
             .find(|provider| provider.name == model.provider)
             .with_context(|| format!("provider {} is not configured", model.provider))?;
-        let _permit = self.acquire_permit(provider).await?;
+        let permit = self.acquire_permit(provider).await?;
         self.adapter_for(provider)?
             .send_audio_transcription(&self.http, provider, model, request)
             .await
+            .map(|response| response.with_permit(permit))
     }
 
     pub async fn send_audio_translation(
@@ -200,10 +254,11 @@ impl ProviderClient {
             .iter()
             .find(|provider| provider.name == model.provider)
             .with_context(|| format!("provider {} is not configured", model.provider))?;
-        let _permit = self.acquire_permit(provider).await?;
+        let permit = self.acquire_permit(provider).await?;
         self.adapter_for(provider)?
             .send_audio_translation(&self.http, provider, model, request)
             .await
+            .map(|response| response.with_permit(permit))
     }
 
     pub async fn check_provider(&self, provider: &ProviderConfig) -> ProviderHealth {
@@ -472,6 +527,7 @@ async fn ollama_chat_response(model: &ModelConfig, response: Response) -> Result
             status,
             headers,
             body: bytes,
+            permit: None,
         });
     }
     let value = serde_json::from_slice::<Value>(&bytes)
@@ -517,6 +573,7 @@ async fn ollama_chat_response(model: &ModelConfig, response: Response) -> Result
         status,
         headers,
         body: Bytes::from(serde_json::to_vec(&transformed)?),
+        permit: None,
     })
 }
 
@@ -726,6 +783,7 @@ async fn llama_cpp_completion_response(
             status,
             headers,
             body: bytes,
+            permit: None,
         });
     }
     let value = serde_json::from_slice::<Value>(&bytes)
@@ -778,6 +836,7 @@ async fn llama_cpp_completion_response(
         status,
         headers,
         body: Bytes::from(serde_json::to_vec(&transformed)?),
+        permit: None,
     })
 }
 
@@ -950,7 +1009,12 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
                 {
                     sleep(backoff(attempt)).await;
                 }
-                Ok(response) => return Ok(ProviderResponse::Upstream(response)),
+                Ok(response) => {
+                    return Ok(ProviderResponse::Upstream {
+                        response,
+                        permit: None,
+                    });
+                }
                 Err(error)
                     if attempt + 1 < attempts && (error.is_timeout() || error.is_connect()) =>
                 {
@@ -1028,7 +1092,12 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
                 {
                     sleep(backoff(attempt)).await;
                 }
-                Ok(response) => return Ok(ProviderResponse::Upstream(response)),
+                Ok(response) => {
+                    return Ok(ProviderResponse::Upstream {
+                        response,
+                        permit: None,
+                    });
+                }
                 Err(error)
                     if attempt + 1 < attempts && (error.is_timeout() || error.is_connect()) =>
                 {
@@ -1068,7 +1137,12 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
                 {
                     sleep(backoff(attempt)).await;
                 }
-                Ok(response) => return Ok(ProviderResponse::Upstream(response)),
+                Ok(response) => {
+                    return Ok(ProviderResponse::Upstream {
+                        response,
+                        permit: None,
+                    });
+                }
                 Err(error)
                     if attempt + 1 < attempts && (error.is_timeout() || error.is_connect()) =>
                 {
@@ -1108,7 +1182,12 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
                 {
                     sleep(backoff(attempt)).await;
                 }
-                Ok(response) => return Ok(ProviderResponse::Upstream(response)),
+                Ok(response) => {
+                    return Ok(ProviderResponse::Upstream {
+                        response,
+                        permit: None,
+                    });
+                }
                 Err(error)
                     if attempt + 1 < attempts && (error.is_timeout() || error.is_connect()) =>
                 {
@@ -1148,7 +1227,12 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
                 {
                     sleep(backoff(attempt)).await;
                 }
-                Ok(response) => return Ok(ProviderResponse::Upstream(response)),
+                Ok(response) => {
+                    return Ok(ProviderResponse::Upstream {
+                        response,
+                        permit: None,
+                    });
+                }
                 Err(error)
                     if attempt + 1 < attempts && (error.is_timeout() || error.is_connect()) =>
                 {
@@ -1231,7 +1315,12 @@ async fn send_audio_multipart(
             Ok(response) if is_transient_status(response.status()) && attempt + 1 < attempts => {
                 sleep(backoff(attempt)).await;
             }
-            Ok(response) => return Ok(ProviderResponse::Upstream(response)),
+            Ok(response) => {
+                return Ok(ProviderResponse::Upstream {
+                    response,
+                    permit: None,
+                });
+            }
             Err(error) if attempt + 1 < attempts && (error.is_timeout() || error.is_connect()) => {
                 sleep(backoff(attempt)).await;
             }
@@ -1350,6 +1439,39 @@ mod tests {
 
         assert_eq!(value["model"], "responses-model");
         assert_eq!(value["input"], "hello");
+    }
+
+    #[tokio::test]
+    async fn provider_concurrency_permit_lasts_until_response_body_is_consumed() {
+        let base_url = spawn_provider_server().await;
+        let mut config = provider_test_config(base_url);
+        config.providers[0].max_concurrency = Some(1);
+        config.providers[0].queue_timeout_ms = Some(25);
+        let client = ProviderClient::new(&config).unwrap();
+        let model = config.find_model("responses-model").unwrap();
+        let request = || OpenAiChatRequest {
+            model: "ignored".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: Value::String("hello".to_string()),
+            }],
+            extra: Default::default(),
+        };
+
+        let first = client.send_chat(&config, model, request()).await.unwrap();
+        let second = client.send_chat(&config, model, request()).await;
+        let error = match second {
+            Ok(_) => panic!("the first response must still hold the permit"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("queue timeout"));
+
+        first.bytes().await.unwrap();
+        let third = client.send_chat(&config, model, request()).await;
+        assert!(
+            third.is_ok(),
+            "permit should be released after body consumption"
+        );
     }
 
     #[tokio::test]

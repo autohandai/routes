@@ -3437,8 +3437,11 @@ async fn upstream_response(
     let semantic_cache_was_enabled = semantic_cache_write.is_some();
     let mut response = if stream {
         match upstream {
-            ProviderResponse::Upstream(upstream) => {
-                Response::new(Body::from_stream(upstream.bytes_stream()))
+            ProviderResponse::Upstream { response, permit } => {
+                let stream = ProviderResponse::Upstream { response, permit }
+                    .into_stream()
+                    .expect("upstream response must expose a stream");
+                Response::new(Body::from_stream(stream))
             }
             ProviderResponse::Buffered { body, .. } => Response::new(Body::from(body)),
         }

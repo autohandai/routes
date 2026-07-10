@@ -93,6 +93,7 @@ dependencies = [
  "axum",
  "bytes",
  "clap",
+ "futures-util",
  "reqwest",
  "serde",
  "serde_json",

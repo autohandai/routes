@@ -578,8 +578,28 @@ async fn serve_with_shutdown_timeout(
 }
 
 async fn wait_for_shutdown_signal() {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        warn!(%error, "failed to listen for shutdown signal");
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            warn!(%error, "failed to listen for ctrl-c shutdown signal");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => warn!(%error, "failed to listen for SIGTERM shutdown signal"),
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
     }
     info!("shutdown signal received");
 }

@@ -274,6 +274,12 @@ impl ProviderClient {
         }
     }
 
+    pub fn adapter_name(&self, provider: &ProviderConfig) -> String {
+        self.adapter_for(provider)
+            .map(|adapter| adapter.name().to_string())
+            .unwrap_or_else(|_| format!("{:?}", provider.kind))
+    }
+
     fn adapter_for(&self, provider: &ProviderConfig) -> Result<Arc<dyn ProviderAdapter>> {
         self.adapters
             .get(&provider.kind)

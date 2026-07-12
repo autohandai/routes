@@ -3,7 +3,9 @@ use crate::{
     classifier::{JudgeMetricsSnapshot, SmartClassifier},
     config::{BudgetConfig, RouterConfig, SafetyRoutingAction, bind_is_loopback},
     openapi,
-    provider::{ProviderClient, ProviderResponse, is_transient_status},
+    provider::{
+        ProviderClient, ProviderHealth, ProviderHealthStatus, ProviderResponse, is_transient_status,
+    },
     router::RoutingEngine,
     semantic_cache::{
         SemanticCache, SemanticCacheEmbedding, SemanticCacheEndpoint, SemanticCacheHit,
@@ -35,6 +37,7 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
+use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -2345,6 +2348,7 @@ async fn semantic_cache_embedding_for_request(
         );
         return None;
     };
+    let started = Instant::now();
     let response = match state
         .providers
         .send_embeddings(
@@ -2358,8 +2362,24 @@ async fn semantic_cache_embedding_for_request(
         )
         .await
     {
-        Ok(response) => response,
+        Ok(response) => {
+            record_provider_dispatch_response(
+                state,
+                config,
+                &model,
+                response.status(),
+                elapsed_millis_u32(started),
+            );
+            response
+        }
         Err(error) => {
+            record_provider_dispatch_error(
+                state,
+                config,
+                &model,
+                &error,
+                elapsed_millis_u32(started),
+            );
             warn!(?error, "semantic cache embedding request failed");
             return None;
         }
@@ -2610,20 +2630,26 @@ async fn dispatch_chat(
             .send_chat(&config, model, request.clone())
             .await
         {
-            Ok(response)
-                if allow_failover
-                    && is_transient_status(response.status())
-                    && index + 1 < models.len() =>
-            {
-                failovers += 1;
-                state
-                    .metrics
-                    .failover_attempts
-                    .fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
             Ok(response) => {
                 let selected_latency_ms = elapsed_millis_u32(started);
+                record_provider_dispatch_response(
+                    &state,
+                    &config,
+                    model,
+                    response.status(),
+                    selected_latency_ms,
+                );
+                if allow_failover
+                    && is_transient_status(response.status())
+                    && index + 1 < models.len()
+                {
+                    failovers += 1;
+                    state
+                        .metrics
+                        .failover_attempts
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 if failovers > 0 {
                     state
                         .metrics
@@ -2653,15 +2679,18 @@ async fn dispatch_chat(
                 )
                 .await;
             }
-            Err(error) if allow_failover && index + 1 < models.len() => {
-                failovers += 1;
-                state
-                    .metrics
-                    .failover_attempts
-                    .fetch_add(1, Ordering::Relaxed);
-                last_error = Some(error.to_string());
-            }
             Err(error) => {
+                let latency_ms = elapsed_millis_u32(started);
+                record_provider_dispatch_error(&state, &config, model, &error, latency_ms);
+                if allow_failover && index + 1 < models.len() {
+                    failovers += 1;
+                    state
+                        .metrics
+                        .failover_attempts
+                        .fetch_add(1, Ordering::Relaxed);
+                    last_error = Some(error.to_string());
+                    continue;
+                }
                 state
                     .metrics
                     .upstream_errors
@@ -2807,20 +2836,26 @@ async fn dispatch_responses(
             .send_responses(&config, model, request.clone())
             .await
         {
-            Ok(response)
-                if allow_failover
-                    && is_transient_status(response.status())
-                    && index + 1 < models.len() =>
-            {
-                failovers += 1;
-                state
-                    .metrics
-                    .failover_attempts
-                    .fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
             Ok(response) => {
                 let selected_latency_ms = elapsed_millis_u32(started);
+                record_provider_dispatch_response(
+                    &state,
+                    &config,
+                    model,
+                    response.status(),
+                    selected_latency_ms,
+                );
+                if allow_failover
+                    && is_transient_status(response.status())
+                    && index + 1 < models.len()
+                {
+                    failovers += 1;
+                    state
+                        .metrics
+                        .failover_attempts
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 if failovers > 0 {
                     state
                         .metrics
@@ -2850,15 +2885,18 @@ async fn dispatch_responses(
                 )
                 .await;
             }
-            Err(error) if allow_failover && index + 1 < models.len() => {
-                failovers += 1;
-                state
-                    .metrics
-                    .failover_attempts
-                    .fetch_add(1, Ordering::Relaxed);
-                last_error = Some(error.to_string());
-            }
             Err(error) => {
+                let latency_ms = elapsed_millis_u32(started);
+                record_provider_dispatch_error(&state, &config, model, &error, latency_ms);
+                if allow_failover && index + 1 < models.len() {
+                    failovers += 1;
+                    state
+                        .metrics
+                        .failover_attempts
+                        .fetch_add(1, Ordering::Relaxed);
+                    last_error = Some(error.to_string());
+                    continue;
+                }
                 state
                     .metrics
                     .upstream_errors
@@ -2931,24 +2969,32 @@ async fn dispatch_embeddings(
     let mut failovers = 0_u32;
 
     for (index, model) in models.iter().enumerate() {
+        let started = Instant::now();
         match state
             .providers
             .send_embeddings(&config, model, request.clone())
             .await
         {
-            Ok(response)
+            Ok(response) => {
+                let latency_ms = elapsed_millis_u32(started);
+                record_provider_dispatch_response(
+                    &state,
+                    &config,
+                    model,
+                    response.status(),
+                    latency_ms,
+                );
                 if allow_failover
                     && is_transient_status(response.status())
-                    && index + 1 < models.len() =>
-            {
-                failovers += 1;
-                state
-                    .metrics
-                    .failover_attempts
-                    .fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            Ok(response) => {
+                    && index + 1 < models.len()
+                {
+                    failovers += 1;
+                    state
+                        .metrics
+                        .failover_attempts
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 if failovers > 0 {
                     state
                         .metrics
@@ -2964,21 +3010,24 @@ async fn dispatch_embeddings(
                     failovers,
                     estimated_input_tokens,
                     0,
-                    0,
+                    latency_ms,
                     None,
                     None,
                 )
                 .await;
             }
-            Err(error) if allow_failover && index + 1 < models.len() => {
-                failovers += 1;
-                state
-                    .metrics
-                    .failover_attempts
-                    .fetch_add(1, Ordering::Relaxed);
-                last_error = Some(error.to_string());
-            }
             Err(error) => {
+                let latency_ms = elapsed_millis_u32(started);
+                record_provider_dispatch_error(&state, &config, model, &error, latency_ms);
+                if allow_failover && index + 1 < models.len() {
+                    failovers += 1;
+                    state
+                        .metrics
+                        .failover_attempts
+                        .fetch_add(1, Ordering::Relaxed);
+                    last_error = Some(error.to_string());
+                    continue;
+                }
                 state
                     .metrics
                     .upstream_errors
@@ -3051,24 +3100,32 @@ async fn dispatch_images(
     let mut failovers = 0_u32;
 
     for (index, model) in models.iter().enumerate() {
+        let started = Instant::now();
         match state
             .providers
             .send_images(&config, model, request.clone())
             .await
         {
-            Ok(response)
+            Ok(response) => {
+                let latency_ms = elapsed_millis_u32(started);
+                record_provider_dispatch_response(
+                    &state,
+                    &config,
+                    model,
+                    response.status(),
+                    latency_ms,
+                );
                 if allow_failover
                     && is_transient_status(response.status())
-                    && index + 1 < models.len() =>
-            {
-                failovers += 1;
-                state
-                    .metrics
-                    .failover_attempts
-                    .fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            Ok(response) => {
+                    && index + 1 < models.len()
+                {
+                    failovers += 1;
+                    state
+                        .metrics
+                        .failover_attempts
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 if failovers > 0 {
                     state
                         .metrics
@@ -3084,21 +3141,24 @@ async fn dispatch_images(
                     failovers,
                     estimated_input_tokens,
                     0,
-                    0,
+                    latency_ms,
                     None,
                     None,
                 )
                 .await;
             }
-            Err(error) if allow_failover && index + 1 < models.len() => {
-                failovers += 1;
-                state
-                    .metrics
-                    .failover_attempts
-                    .fetch_add(1, Ordering::Relaxed);
-                last_error = Some(error.to_string());
-            }
             Err(error) => {
+                let latency_ms = elapsed_millis_u32(started);
+                record_provider_dispatch_error(&state, &config, model, &error, latency_ms);
+                if allow_failover && index + 1 < models.len() {
+                    failovers += 1;
+                    state
+                        .metrics
+                        .failover_attempts
+                        .fetch_add(1, Ordering::Relaxed);
+                    last_error = Some(error.to_string());
+                    continue;
+                }
                 state
                     .metrics
                     .upstream_errors
@@ -3171,24 +3231,32 @@ async fn dispatch_speech(
     let mut failovers = 0_u32;
 
     for (index, model) in models.iter().enumerate() {
+        let started = Instant::now();
         match state
             .providers
             .send_speech(&config, model, request.clone())
             .await
         {
-            Ok(response)
+            Ok(response) => {
+                let latency_ms = elapsed_millis_u32(started);
+                record_provider_dispatch_response(
+                    &state,
+                    &config,
+                    model,
+                    response.status(),
+                    latency_ms,
+                );
                 if allow_failover
                     && is_transient_status(response.status())
-                    && index + 1 < models.len() =>
-            {
-                failovers += 1;
-                state
-                    .metrics
-                    .failover_attempts
-                    .fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            Ok(response) => {
+                    && index + 1 < models.len()
+                {
+                    failovers += 1;
+                    state
+                        .metrics
+                        .failover_attempts
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 if failovers > 0 {
                     state
                         .metrics
@@ -3204,21 +3272,24 @@ async fn dispatch_speech(
                     failovers,
                     estimated_input_tokens,
                     0,
-                    0,
+                    latency_ms,
                     None,
                     None,
                 )
                 .await;
             }
-            Err(error) if allow_failover && index + 1 < models.len() => {
-                failovers += 1;
-                state
-                    .metrics
-                    .failover_attempts
-                    .fetch_add(1, Ordering::Relaxed);
-                last_error = Some(error.to_string());
-            }
             Err(error) => {
+                let latency_ms = elapsed_millis_u32(started);
+                record_provider_dispatch_error(&state, &config, model, &error, latency_ms);
+                if allow_failover && index + 1 < models.len() {
+                    failovers += 1;
+                    state
+                        .metrics
+                        .failover_attempts
+                        .fetch_add(1, Ordering::Relaxed);
+                    last_error = Some(error.to_string());
+                    continue;
+                }
                 state
                     .metrics
                     .upstream_errors
@@ -3302,6 +3373,7 @@ async fn dispatch_audio_multipart(
     let mut failovers = 0_u32;
 
     for (index, model) in models.iter().enumerate() {
+        let started = Instant::now();
         let result = match endpoint {
             AudioMultipartEndpoint::Transcription => {
                 state
@@ -3318,19 +3390,26 @@ async fn dispatch_audio_multipart(
         };
 
         match result {
-            Ok(response)
+            Ok(response) => {
+                let latency_ms = elapsed_millis_u32(started);
+                record_provider_dispatch_response(
+                    &state,
+                    &config,
+                    model,
+                    response.status(),
+                    latency_ms,
+                );
                 if allow_failover
                     && is_transient_status(response.status())
-                    && index + 1 < models.len() =>
-            {
-                failovers += 1;
-                state
-                    .metrics
-                    .failover_attempts
-                    .fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            Ok(response) => {
+                    && index + 1 < models.len()
+                {
+                    failovers += 1;
+                    state
+                        .metrics
+                        .failover_attempts
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 if failovers > 0 {
                     state
                         .metrics
@@ -3346,21 +3425,24 @@ async fn dispatch_audio_multipart(
                     failovers,
                     estimated_input_tokens,
                     0,
-                    0,
+                    latency_ms,
                     None,
                     None,
                 )
                 .await;
             }
-            Err(error) if allow_failover && index + 1 < models.len() => {
-                failovers += 1;
-                state
-                    .metrics
-                    .failover_attempts
-                    .fetch_add(1, Ordering::Relaxed);
-                last_error = Some(error.to_string());
-            }
             Err(error) => {
+                let latency_ms = elapsed_millis_u32(started);
+                record_provider_dispatch_error(&state, &config, model, &error, latency_ms);
+                if allow_failover && index + 1 < models.len() {
+                    failovers += 1;
+                    state
+                        .metrics
+                        .failover_attempts
+                        .fetch_add(1, Ordering::Relaxed);
+                    last_error = Some(error.to_string());
+                    continue;
+                }
                 state
                     .metrics
                     .upstream_errors
@@ -3385,6 +3467,66 @@ async fn dispatch_audio_multipart(
         ))),
     )
         .into_response()
+}
+
+fn record_provider_dispatch_response(
+    state: &AppState,
+    config: &RouterConfig,
+    model: &ModelConfig,
+    status: StatusCode,
+    latency_ms: u32,
+) {
+    let status_code = status.as_u16();
+    let health_status = if status.is_success() {
+        ProviderHealthStatus::Ok
+    } else if is_transient_status(status) {
+        ProviderHealthStatus::Error
+    } else {
+        return;
+    };
+    let Some(provider) = config
+        .providers
+        .iter()
+        .find(|provider| provider.name == model.provider)
+    else {
+        return;
+    };
+    state.engine.provider_health().record(
+        ProviderHealth {
+            provider: provider.name.clone(),
+            adapter: state.providers.adapter_name(provider),
+            status: health_status,
+            status_code: Some(status_code),
+            error: None,
+        },
+        latency_ms,
+    );
+}
+
+fn record_provider_dispatch_error(
+    state: &AppState,
+    config: &RouterConfig,
+    model: &ModelConfig,
+    error: &dyn std::fmt::Display,
+    latency_ms: u32,
+) {
+    let Some(provider) = config
+        .providers
+        .iter()
+        .find(|provider| provider.name == model.provider)
+    else {
+        return;
+    };
+    state.engine.provider_health().record(
+        ProviderHealth {
+            provider: provider.name.clone(),
+            adapter: state.providers.adapter_name(provider),
+            status: ProviderHealthStatus::Error,
+            status_code: None,
+            error: Some(error.to_string()),
+        },
+        latency_ms,
+    );
 }
 
 #[cfg(test)]
@@ -3480,6 +3622,21 @@ async fn upstream_response(
                 let stream = ProviderResponse::Upstream { response, permit }
                     .into_stream()
                     .expect("upstream response must expose a stream");
+                let health_state = state.clone();
+                let health_config = state.engine.config();
+                let health_model = model.clone();
+                let stream = stream.map(move |item| {
+                    if let Err(error) = &item {
+                        record_provider_dispatch_error(
+                            &health_state,
+                            &health_config,
+                            &health_model,
+                            error,
+                            selected_latency_ms,
+                        );
+                    }
+                    item
+                });
                 Response::new(Body::from_stream(stream))
             }
             ProviderResponse::Buffered { body, .. } => Response::new(Body::from(body)),
@@ -3518,6 +3675,14 @@ async fn upstream_response(
                 Response::new(Body::from(bytes))
             }
             Err(error) => {
+                let health_config = state.engine.config();
+                record_provider_dispatch_error(
+                    &state,
+                    &health_config,
+                    model,
+                    &error,
+                    selected_latency_ms,
+                );
                 state
                     .metrics
                     .upstream_errors
@@ -4301,6 +4466,28 @@ mod tests {
                 "autohand_router_selection_requests_total_by_model{model=\"strong-ok\"} 1"
             )
         );
+
+        let health = client
+            .get(format!("{router_url}/v1/router/providers"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        let sampled = health["sampled"].as_array().expect("sampled health array");
+        let failing = sampled
+            .iter()
+            .find(|observation| observation["provider"] == "failing")
+            .expect("failing dispatch health observation");
+        assert_eq!(failing["status"], "error");
+        assert_eq!(failing["status_code"], 503);
+        let healthy = sampled
+            .iter()
+            .find(|observation| observation["provider"] == "healthy")
+            .expect("successful dispatch health observation");
+        assert_eq!(healthy["status"], "ok");
+        assert_eq!(healthy["status_code"], 200);
     }
 
     #[tokio::test]

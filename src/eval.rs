@@ -44,9 +44,18 @@ pub enum ExpectedTier {
 pub struct EvalReport {
     pub total: usize,
     pub exact_tier_matches: usize,
+    #[serde(default)]
     pub domain_matches: usize,
+    #[serde(default)]
     pub model_matches: usize,
+    #[serde(default)]
     pub provider_matches: usize,
+    #[serde(default)]
+    pub domain_examples: usize,
+    #[serde(default)]
+    pub model_examples: usize,
+    #[serde(default)]
+    pub provider_examples: usize,
     pub average_cost: f32,
     pub average_capability: f32,
     pub accuracy: f32,
@@ -227,6 +236,9 @@ where
     let mut domain_matches = 0;
     let mut model_matches = 0;
     let mut provider_matches = 0;
+    let mut domain_examples = 0;
+    let mut model_examples = 0;
+    let mut provider_examples = 0;
     let mut total_cost = 0.0;
     let mut total_capability = 0.0;
     let mut misses = Vec::new();
@@ -272,6 +284,7 @@ where
             });
         }
         if let Some(expected_domain) = &example.expected_domain {
+            domain_examples += 1;
             if route.domain.as_ref() == Some(expected_domain) {
                 domain_matches += 1;
             } else {
@@ -283,10 +296,9 @@ where
                     reason: route.reason.clone(),
                 });
             }
-        } else {
-            domain_matches += 1;
         }
         if let Some(expected_model) = &example.expected_model {
+            model_examples += 1;
             if model_matches_expected(&config, &route.model, expected_model) {
                 model_matches += 1;
             } else {
@@ -298,10 +310,9 @@ where
                     reason: route.reason.clone(),
                 });
             }
-        } else {
-            model_matches += 1;
         }
         if let Some(expected_provider) = &example.expected_provider {
+            provider_examples += 1;
             if selected_provider.as_deref() == Some(expected_provider.as_str()) {
                 provider_matches += 1;
             } else {
@@ -313,25 +324,29 @@ where
                     reason: route.reason.clone(),
                 });
             }
-        } else {
-            provider_matches += 1;
         }
     }
 
     let total = examples.len();
     let denominator = total.max(1) as f32;
+    let domain_denominator = domain_examples.max(1) as f32;
+    let model_denominator = model_examples.max(1) as f32;
+    let provider_denominator = provider_examples.max(1) as f32;
     EvalReport {
         total,
         exact_tier_matches,
         domain_matches,
         model_matches,
         provider_matches,
+        domain_examples,
+        model_examples,
+        provider_examples,
         average_cost: total_cost / denominator,
         average_capability: total_capability / denominator,
         accuracy: exact_tier_matches as f32 / denominator,
-        domain_accuracy: domain_matches as f32 / denominator,
-        model_accuracy: model_matches as f32 / denominator,
-        provider_accuracy: provider_matches as f32 / denominator,
+        domain_accuracy: domain_matches as f32 / domain_denominator,
+        model_accuracy: model_matches as f32 / model_denominator,
+        provider_accuracy: provider_matches as f32 / provider_denominator,
         misses,
         domain_misses,
         model_misses,
@@ -957,6 +972,9 @@ mod tests {
 
         assert_eq!(report.model_matches, 1);
         assert_eq!(report.provider_matches, 1);
+        assert_eq!(report.domain_examples, 2);
+        assert_eq!(report.model_examples, 2);
+        assert_eq!(report.provider_examples, 2);
         assert_eq!(report.model_misses.len(), 1);
         assert_eq!(report.provider_misses.len(), 1);
         assert_eq!(report.model_accuracy, 0.5);

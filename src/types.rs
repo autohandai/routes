@@ -259,7 +259,7 @@ pub struct ModelCapabilities {
     pub supports_long_context: bool,
     /// Optional model-level endpoint allowlist. Omitted means every endpoint
     /// exposed by the backing provider remains eligible for this model.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported_endpoints: Option<Vec<ModelEndpoint>>,
 }
 

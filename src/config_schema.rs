@@ -78,6 +78,15 @@ fn defs() -> Value {
         "StorageBackend": string_enum(&["memory", "file"]),
         "BudgetAccountingBackend": string_enum(&["process", "file"]),
         "SafetyRoutingAction": string_enum(&["allow", "reject", "redact", "force_route"]),
+        "ModelEndpoint": string_enum(&[
+            "chat",
+            "responses",
+            "embeddings",
+            "images",
+            "speech",
+            "audio_transcriptions",
+            "audio_translations"
+        ]),
         "ProviderConfig": {
             "type": "object",
             "additionalProperties": false,
@@ -134,7 +143,13 @@ fn defs() -> Value {
                 "supports_json": bool_default(false),
                 "supports_code": bool_default(false),
                 "supports_web_apps": bool_default(false),
-                "supports_long_context": bool_default(false)
+                "supports_long_context": bool_default(false),
+                "supported_endpoints": {
+                    "type": ["array", "null"],
+                    "items": ref_schema("ModelEndpoint"),
+                    "default": null,
+                    "description": "Optional model-level endpoint allowlist; omitted means all provider-supported endpoints."
+                }
             }
         },
         "ClassifierConfig": {
@@ -470,6 +485,11 @@ mod tests {
         assert!(schema["properties"]["models"].is_object());
         assert!(schema["$defs"]["ProviderConfig"].is_object());
         assert!(schema["$defs"]["ModelConfig"].is_object());
+        assert!(schema["$defs"]["ModelEndpoint"].is_object());
+        assert_eq!(
+            schema["$defs"]["ModelCapabilities"]["properties"]["supported_endpoints"]["items"]["$ref"],
+            "#/$defs/ModelEndpoint"
+        );
         assert!(schema["$defs"]["SemanticCacheConfig"].is_object());
         assert!(schema["$defs"]["StickyRoutingConfig"].is_object());
         assert!(schema["$defs"]["ShadowEvalJudgeConfig"].is_object());

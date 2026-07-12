@@ -229,6 +229,18 @@ pub struct ModelConfig {
     pub local: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEndpoint {
+    Chat,
+    Responses,
+    Embeddings,
+    Images,
+    Speech,
+    AudioTranscriptions,
+    AudioTranslations,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelCapabilities {
     #[serde(default)]
@@ -245,6 +257,10 @@ pub struct ModelCapabilities {
     pub supports_web_apps: bool,
     #[serde(default)]
     pub supports_long_context: bool,
+    /// Optional model-level endpoint allowlist. Omitted means every endpoint
+    /// exposed by the backing provider remains eligible for this model.
+    #[serde(default)]
+    pub supported_endpoints: Option<Vec<ModelEndpoint>>,
 }
 
 impl ModelCapabilities {
@@ -258,6 +274,12 @@ impl ModelCapabilities {
             ModelCapability::WebApps => self.supports_web_apps,
             ModelCapability::LongContext => self.supports_long_context,
         }
+    }
+
+    pub fn supports_endpoint(&self, endpoint: ModelEndpoint) -> bool {
+        self.supported_endpoints
+            .as_ref()
+            .is_none_or(|endpoints| endpoints.contains(&endpoint))
     }
 }
 

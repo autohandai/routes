@@ -276,6 +276,19 @@ models:
       supports_long_context: true
 ```
 
+When a provider exposes different models for different APIs, add an optional
+model-level endpoint allowlist. Omit it to keep the provider's configured
+endpoint behavior, or list only the APIs that the model is known to support:
+
+```yaml
+    capabilities:
+      supported_endpoints: [chat, responses, embeddings]
+```
+
+Supported endpoint names are `chat`, `responses`, `embeddings`, `images`,
+`speech`, `audio_transcriptions`, and `audio_translations`. Automatic routes
+and explicit model requests both enforce this allowlist before dispatch.
+
 `/v1/router/multimodel` accepts `required_capabilities` such as `vision`, `audio`, `tools`, `json`, `code`, `web_apps`, and `long_context`. Automatic chat and Responses routing infer `vision`, `tools`, and `json` from OpenAI request payloads; automatic audio routes require `audio`.
 
 Startup validation rejects ambiguous configs: provider names, model IDs, and aliases must be unique; provider URLs and paths must be valid HTTP-style values; timeouts and concurrency limits must be positive.

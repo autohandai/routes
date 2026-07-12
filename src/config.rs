@@ -1,4 +1,4 @@
-use crate::types::{ModelConfig, ProviderConfig, RouterPolicy};
+use crate::types::{ModelConfig, ModelEndpoint, ProviderConfig, RouterPolicy};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -1246,6 +1246,13 @@ impl SemanticCacheConfig {
                 self.embedding_model,
                 provider.name
             );
+            anyhow::ensure!(
+                model
+                    .capabilities
+                    .supports_endpoint(ModelEndpoint::Embeddings),
+                "cache.semantic.embedding_model {} does not support embeddings",
+                self.embedding_model
+            );
         }
         anyhow::ensure!(
             self.similarity_threshold.is_finite()
@@ -1913,6 +1920,28 @@ mod tests {
         config
             .validate()
             .expect("configured embedding model alias is accepted");
+    }
+
+    #[test]
+    fn rejects_semantic_cache_model_without_embedding_endpoint_support() {
+        let mut config = valid_config();
+        config.models[0].capabilities.supported_endpoints =
+            Some(vec![crate::types::ModelEndpoint::Chat]);
+        config.cache.semantic = SemanticCacheConfig {
+            enabled: true,
+            embedding_model: "model-a".to_string(),
+            similarity_threshold: 0.80,
+            ttl_seconds: 60,
+            max_entries: 16,
+            backend: SemanticCacheBackend::Memory,
+            file_path: None,
+            lock_timeout_ms: 1_000,
+        };
+
+        let error = config
+            .validate()
+            .expect_err("model without embedding endpoint support rejected");
+        assert!(error.to_string().contains("does not support embeddings"));
     }
 
     #[test]

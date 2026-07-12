@@ -1454,6 +1454,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: Value::String("hello".to_string()),
+                extra: Default::default(),
             }],
             extra: Default::default(),
         };
@@ -1516,6 +1517,7 @@ mod tests {
                     messages: vec![ChatMessage {
                         role: "user".to_string(),
                         content: Value::String("hello".to_string()),
+                        extra: Default::default(),
                     }],
                     extra: Default::default(),
                 },
@@ -1547,6 +1549,7 @@ mod tests {
                     messages: vec![ChatMessage {
                         role: "user".to_string(),
                         content: Value::String("hello vllm".to_string()),
+                        extra: Default::default(),
                     }],
                     extra: Default::default(),
                 },
@@ -1629,6 +1632,7 @@ mod tests {
                     messages: vec![ChatMessage {
                         role: "user".to_string(),
                         content: Value::String("hello native ollama".to_string()),
+                        extra: Default::default(),
                     }],
                     extra: Default::default(),
                 },
@@ -1664,6 +1668,7 @@ mod tests {
                     messages: vec![ChatMessage {
                         role: "user".to_string(),
                         content: Value::String("hello native llama".to_string()),
+                        extra: Default::default(),
                     }],
                     extra: serde_json::Map::from_iter([
                         ("max_tokens".to_string(), Value::from(12)),

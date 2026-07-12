@@ -607,6 +607,8 @@ pub struct ChatMessage {
     pub role: String,
     #[serde(default)]
     pub content: Value,
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 impl OpenAiChatRequest {
@@ -952,10 +954,12 @@ mod tests {
                 super::ChatMessage {
                     role: "user".to_string(),
                     content: Value::String("first question".to_string()),
+                    extra: Default::default(),
                 },
                 super::ChatMessage {
                     role: "assistant".to_string(),
                     content: Value::String("previous answer".to_string()),
+                    extra: Default::default(),
                 },
             ],
             extra: serde_json::Map::from_iter([("tools".to_string(), serde_json::json!([]))]),
@@ -964,6 +968,45 @@ mod tests {
         let context = request.context_text();
         assert!(context.contains("previous answer"));
         assert!(context.contains("tools"));
+    }
+
+    #[test]
+    fn chat_messages_round_trip_openai_extension_fields() {
+        let request: OpenAiChatRequest = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"}
+                    }],
+                    "name": "assistant-name",
+                    "function_call": {"name": "lookup", "arguments": "{}"},
+                    "future_message_field": {"enabled": true}
+                },
+                {
+                    "role": "tool",
+                    "content": "result",
+                    "tool_call_id": "call_1"
+                }
+            ]
+        }))
+        .expect("chat request deserializes");
+
+        let value = serde_json::to_value(request).expect("chat request serializes");
+        let messages = value
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("serialized messages array");
+
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(messages[0]["name"], "assistant-name");
+        assert_eq!(messages[0]["function_call"]["name"], "lookup");
+        assert_eq!(messages[0]["future_message_field"]["enabled"], true);
+        assert_eq!(messages[1]["tool_call_id"], "call_1");
     }
 
     #[test]
@@ -976,6 +1019,7 @@ mod tests {
                     {"type": "text", "text": "Describe this image as JSON"},
                     {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
                 ]),
+                extra: Default::default(),
             }],
             extra: serde_json::Map::from_iter([
                 ("tools".to_string(), serde_json::json!([])),

@@ -126,6 +126,7 @@ async fn run_provider_conformance_for_model(
                 messages: vec![ChatMessage {
                     role: "user".to_string(),
                     content: Value::String(input.clone()),
+                    extra: Default::default(),
                 }],
                 extra: Default::default(),
             },

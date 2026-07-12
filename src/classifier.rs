@@ -111,6 +111,7 @@ impl SmartClassifier {
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: Value::String(judge_prompt),
+                extra: Default::default(),
             }],
             extra: serde_json::Map::from_iter([
                 ("temperature".to_string(), Value::from(0.0)),

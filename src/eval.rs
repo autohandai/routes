@@ -253,7 +253,7 @@ where
                 allowed_models: example.allowed_models.clone(),
                 allowed_providers: example.allowed_providers.clone(),
                 required_capabilities: example.required_capabilities.clone(),
-                policy: example.policy.clone(),
+                policy: example.policy,
                 default_model: None,
                 max_output_tokens: None,
             })
@@ -367,6 +367,7 @@ fn model_matches_expected(
         .is_some_and(|model| model.aliases.iter().any(|alias| alias == expected_model))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn eval_gate(
     config: &RouterConfig,
     dataset_path: impl AsRef<Path>,

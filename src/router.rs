@@ -188,7 +188,6 @@ where
             };
         }
 
-        let best = best;
         let decision_trace = decision_trace(
             classifications.clone(),
             request.policy,
@@ -467,6 +466,7 @@ impl MultimodelResponse {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scored_candidates(
     candidates: &[&ModelConfig],
     classifications: &Classifications,
@@ -1671,11 +1671,13 @@ mod tests {
     async fn multimodal_first_policy_prefers_multimodal_candidate() {
         let base_engine = engine();
         let mut config = (*base_engine.config()).clone();
-        let mut multimodal_capabilities = crate::types::ModelCapabilities::default();
-        multimodal_capabilities.supports_vision = true;
-        multimodal_capabilities.supports_audio = true;
-        multimodal_capabilities.supports_tools = true;
-        multimodal_capabilities.supports_web_apps = true;
+        let multimodal_capabilities = crate::types::ModelCapabilities {
+            supports_vision: true,
+            supports_audio: true,
+            supports_tools: true,
+            supports_web_apps: true,
+            ..Default::default()
+        };
         config.models.push(ModelConfig {
             id: "multimodal-balanced".to_string(),
             provider: "local".to_string(),

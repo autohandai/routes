@@ -1290,7 +1290,12 @@ impl ShadowEvalConfig {
         );
         if self.enabled {
             anyhow::ensure!(
-                self.output_path.as_deref().unwrap_or_default().trim().len() > 0,
+                !self
+                    .output_path
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty(),
                 "shadow_eval.output_path is required when shadow_eval.enabled is true"
             );
         }

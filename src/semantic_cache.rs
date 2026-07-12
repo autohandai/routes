@@ -148,6 +148,7 @@ impl SemanticCache {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record(
         &self,
         config: &SemanticCacheConfig,

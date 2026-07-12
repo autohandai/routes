@@ -1588,9 +1588,7 @@ fn enforce_safety_route(
     if !config.safety.enabled {
         return None;
     }
-    let Some(safety) = route.safety else {
-        return None;
-    };
+    let safety = route.safety?;
     let action = match safety {
         SafetyLabel::Safe => SafetyRoutingAction::Allow,
         SafetyLabel::Sensitive => config.safety.sensitive_action,
@@ -2614,6 +2612,7 @@ fn eligible_route_models(
     Some(models)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_chat(
     state: Arc<AppState>,
     config: Arc<RouterConfig>,
@@ -2817,6 +2816,7 @@ async fn dispatch_chat(
         .into_response()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_responses(
     state: Arc<AppState>,
     config: Arc<RouterConfig>,
@@ -3697,6 +3697,7 @@ fn reserve_budget(
         .map(|error| error.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upstream_response(
     state: Arc<AppState>,
     upstream: ProviderResponse,
@@ -3974,6 +3975,7 @@ fn spawn_shadow_eval(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn llm_shadow_eval_judgement(
     state: &Arc<AppState>,
     config: &RouterConfig,

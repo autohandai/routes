@@ -6,6 +6,38 @@ Audited revision: `f9ecd4b` (`main`)
 
 Scope: read-only audit of routing quality, reliability, performance, security, OpenAI compatibility, observability, provider behavior, evaluation, and API-gateway readiness.
 
+## Remediation status
+
+All 23 findings are implemented on `main`. The original audit text below remains a historical description of revision `f9ecd4b`; this table is the finding-by-finding implementation ledger.
+
+| Finding | Status | Implementation commit | Primary proof added |
+| --- | --- | --- | --- |
+| D1 | Implemented | `01fd9fa` | Canonical full-history cache scope and collision regressions. |
+| D2 | Implemented | `361034c` | Exact endpoint/capability/context eligibility for explicit and forced routes. |
+| D3 | Implemented | `b2386a6` | Attempt/final outcome counters, failover truth, and streaming usage/error tests. |
+| D4 | Implemented | `ddc98d2` | Unknown-field rejection across every closed config object. |
+| D5 | Implemented | `e8f7cad` | OpenAI error envelopes, mandatory fields, model shape, and OpenAPI parity. |
+| D6 | Implemented | `1fb2b8d` | Bounded blocking workers, advisory locks, atomic writes, corruption and killed-owner tests. |
+| D7 | Implemented | `731df25` | Field-aware redaction across forwarded payloads, classification, and traces. |
+| D8 | Implemented | `517da01` | Conservative explicit endpoint declarations and eligibility diagnostics. |
+| D9 | Implemented | `f6fde4c` | Native-adapter feature contracts, local rejection, and captured transform tests. |
+| A1 | Implemented | `9126965` | Admission, per-credential rate, body-size, slow-upload, and overload controls. |
+| A2 | Implemented | `b9330bd` | Liveness/readiness, concurrent health checks, freshness, and circuit recovery. |
+| A3 | Implemented | `830a28e` | Bounded `Retry-After`, jitter, phase-specific timeouts, and retry interaction tests. |
+| A4 | Implemented | `e2b5a5e` | Bounded latency/queue/retry/stream histograms and Prometheus assertions. |
+| A5 | Implemented | `2e636ff` | Bounded JSONL/background queues, rotation, overflow metrics, and shutdown drain. |
+| A6 | Implemented | `aeee4c8` | Explicit logical-request accounting, credential scopes, persistence, and billable-path tests. |
+| E1 | Implemented | `1acbb61` | Seeded configured-classifier holdout and controlled HTTP runtime gate. |
+| E2 | Implemented | `1e10b36` | Release-blocking quality workflow, dependency policy, and release dependency. |
+| E3 | Implemented | `0f51e7c` | Schema-v2 capability-aware conformance with strict positive/negative validators. |
+| E4 | Implemented | `ed9e38e`, `c1a0c86` | Revision-linked controlled benchmark/support bundle and checked baseline. |
+| L1 | Implemented | `5ff58cb` | Fresh versioned live provider/model promotion gate on protected staging. |
+| L2 | Implemented | `66b0b02` | Credentialed classifier/holdout gate with timeout, invalid-JSON, and 429 injections. |
+| L3 | Implemented | `a63be4b` | Per-profile stream/cancel/usage/capacity gate plus transport failure injections. |
+| L4 | Implemented | `fa8ad87` | Revision/config-matched sustained deployment, RSS/queue/upload, multi-process, corruption, and restart gate. |
+
+The L1-L4 commits implement mandatory protected promotion gates and redacted artifacts; they do not fabricate successful external-provider or staging runs. A release/configuration remains unpromoted until its current credentialed jobs actually pass against the exact reported revision and config fingerprint.
+
 ## Executive summary
 
 The router has a credible deterministic core and unusually broad offline coverage for a young gateway: routing remains available without an external classifier, automatic and explicit requests have intentionally different failover semantics, context and capability filtering are represented in diagnostics, upstream concurrency permits live through streamed bodies, process budgets reserve atomically, and the public contract is generated as OpenAPI 3.1. All required offline gates pass at the audited revision, including 158 tests and a 50-example eval gate at 94% exact-tier accuracy.

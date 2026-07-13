@@ -13,7 +13,14 @@ use futures_util::{StreamExt, stream};
 use reqwest::{Client, Response, StatusCode, multipart};
 use serde::Serialize;
 use serde_json::Value;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
     time::{sleep, timeout},
@@ -107,18 +114,27 @@ impl ProviderResponse {
 
 #[derive(Clone)]
 pub struct ProviderClient {
-    http: Client,
+    http: Arc<HashMap<String, Client>>,
     concurrency: Arc<HashMap<String, Arc<Semaphore>>>,
     adapters: Arc<HashMap<ProviderKind, Arc<dyn ProviderAdapter>>>,
 }
 
 impl ProviderClient {
     pub fn new(config: &RouterConfig) -> Result<Self> {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(120))
-            .pool_idle_timeout(Duration::from_secs(90))
-            .build()
-            .context("failed to build provider HTTP client")?;
+        let http = config
+            .providers
+            .iter()
+            .map(|provider| {
+                Client::builder()
+                    .connect_timeout(provider.connect_timeout())
+                    .pool_idle_timeout(Duration::from_secs(90))
+                    .build()
+                    .with_context(|| {
+                        format!("failed to build HTTP client for provider {}", provider.name)
+                    })
+                    .map(|client| (provider.name.clone(), client))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
         let concurrency = config
             .providers
             .iter()
@@ -129,7 +145,7 @@ impl ProviderClient {
             })
             .collect::<HashMap<_, _>>();
         Ok(Self {
-            http,
+            http: Arc::new(http),
             concurrency: Arc::new(concurrency),
             adapters: Arc::new(provider_adapters()),
         })
@@ -154,7 +170,7 @@ impl ProviderClient {
         );
         let permit = self.acquire_permit(provider).await?;
         self.adapter_for(provider)?
-            .send_chat(&self.http, provider, model, request)
+            .send_chat(self.http_for(provider)?, provider, model, request)
             .await
             .map(|response| response.with_permit(permit))
     }
@@ -172,7 +188,7 @@ impl ProviderClient {
             .with_context(|| format!("provider {} is not configured", model.provider))?;
         let permit = self.acquire_permit(provider).await?;
         self.adapter_for(provider)?
-            .send_responses(&self.http, provider, model, request)
+            .send_responses(self.http_for(provider)?, provider, model, request)
             .await
             .map(|response| response.with_permit(permit))
     }
@@ -190,7 +206,7 @@ impl ProviderClient {
             .with_context(|| format!("provider {} is not configured", model.provider))?;
         let permit = self.acquire_permit(provider).await?;
         self.adapter_for(provider)?
-            .send_embeddings(&self.http, provider, model, request)
+            .send_embeddings(self.http_for(provider)?, provider, model, request)
             .await
             .map(|response| response.with_permit(permit))
     }
@@ -208,7 +224,7 @@ impl ProviderClient {
             .with_context(|| format!("provider {} is not configured", model.provider))?;
         let permit = self.acquire_permit(provider).await?;
         self.adapter_for(provider)?
-            .send_images(&self.http, provider, model, request)
+            .send_images(self.http_for(provider)?, provider, model, request)
             .await
             .map(|response| response.with_permit(permit))
     }
@@ -226,7 +242,7 @@ impl ProviderClient {
             .with_context(|| format!("provider {} is not configured", model.provider))?;
         let permit = self.acquire_permit(provider).await?;
         self.adapter_for(provider)?
-            .send_speech(&self.http, provider, model, request)
+            .send_speech(self.http_for(provider)?, provider, model, request)
             .await
             .map(|response| response.with_permit(permit))
     }
@@ -244,7 +260,7 @@ impl ProviderClient {
             .with_context(|| format!("provider {} is not configured", model.provider))?;
         let permit = self.acquire_permit(provider).await?;
         self.adapter_for(provider)?
-            .send_audio_transcription(&self.http, provider, model, request)
+            .send_audio_transcription(self.http_for(provider)?, provider, model, request)
             .await
             .map(|response| response.with_permit(permit))
     }
@@ -262,14 +278,23 @@ impl ProviderClient {
             .with_context(|| format!("provider {} is not configured", model.provider))?;
         let permit = self.acquire_permit(provider).await?;
         self.adapter_for(provider)?
-            .send_audio_translation(&self.http, provider, model, request)
+            .send_audio_translation(self.http_for(provider)?, provider, model, request)
             .await
             .map(|response| response.with_permit(permit))
     }
 
     pub async fn check_provider(&self, provider: &ProviderConfig) -> ProviderHealth {
         match self.adapter_for(provider) {
-            Ok(adapter) => adapter.check_provider(&self.http, provider).await,
+            Ok(adapter) => match self.http_for(provider) {
+                Ok(http) => adapter.check_provider(http, provider).await,
+                Err(error) => ProviderHealth {
+                    provider: provider.name.clone(),
+                    adapter: provider.kind.chat_adapter_contract().name.to_string(),
+                    status: ProviderHealthStatus::Error,
+                    status_code: None,
+                    error: Some(error.to_string()),
+                },
+            },
             Err(error) => ProviderHealth {
                 provider: provider.name.clone(),
                 adapter: format!("{:?}", provider.kind),
@@ -278,6 +303,15 @@ impl ProviderClient {
                 error: Some(error.to_string()),
             },
         }
+    }
+
+    fn http_for(&self, provider: &ProviderConfig) -> Result<&Client> {
+        self.http.get(&provider.name).with_context(|| {
+            format!(
+                "HTTP client for provider {} is not configured",
+                provider.name
+            )
+        })
     }
 
     pub fn adapter_name(&self, provider: &ProviderConfig) -> String {
@@ -496,21 +530,21 @@ impl ProviderAdapter for OllamaNativeAdapter {
 
         for attempt in 0..attempts {
             let builder = authorized_provider_request(
-                http.post(&url).timeout(provider.timeout()).json(&body),
+                http.post(&url).json(&body),
                 provider,
                 self.default_headers(),
             );
-            match builder.send().await {
+            match send_with_header_timeout(builder, provider).await {
                 Ok(response)
                     if is_transient_status(response.status()) && attempt + 1 < attempts =>
                 {
-                    sleep(backoff(attempt)).await;
+                    sleep(retry_delay(attempt, Some(response.headers()), provider)).await;
                 }
                 Ok(response) => return ollama_chat_response(model, response).await,
                 Err(error)
                     if attempt + 1 < attempts && (error.is_timeout() || error.is_connect()) =>
                 {
-                    sleep(backoff(attempt)).await;
+                    sleep(retry_delay(attempt, None, provider)).await;
                 }
                 Err(error) => return Err(error).context("upstream native Ollama chat failed"),
             }
@@ -522,12 +556,8 @@ impl ProviderAdapter for OllamaNativeAdapter {
     async fn check_provider(&self, http: &Client, provider: &ProviderConfig) -> ProviderHealth {
         let path = provider.health_path.as_deref().unwrap_or("/api/tags");
         let url = join_url(&provider.base_url, path);
-        let request = authorized_provider_request(
-            http.get(url).timeout(provider.timeout()),
-            provider,
-            self.default_headers(),
-        );
-        match request.send().await {
+        let request = authorized_provider_request(http.get(url), provider, self.default_headers());
+        match send_with_header_timeout(request, provider).await {
             Ok(response) => ProviderHealth {
                 provider: provider.name.clone(),
                 adapter: self.name().to_string(),
@@ -779,21 +809,21 @@ impl ProviderAdapter for LlamaCppNativeAdapter {
 
         for attempt in 0..attempts {
             let builder = authorized_provider_request(
-                http.post(&url).timeout(provider.timeout()).json(&body),
+                http.post(&url).json(&body),
                 provider,
                 self.default_headers(),
             );
-            match builder.send().await {
+            match send_with_header_timeout(builder, provider).await {
                 Ok(response)
                     if is_transient_status(response.status()) && attempt + 1 < attempts =>
                 {
-                    sleep(backoff(attempt)).await;
+                    sleep(retry_delay(attempt, Some(response.headers()), provider)).await;
                 }
                 Ok(response) => return llama_cpp_completion_response(model, response).await,
                 Err(error)
                     if attempt + 1 < attempts && (error.is_timeout() || error.is_connect()) =>
                 {
-                    sleep(backoff(attempt)).await;
+                    sleep(retry_delay(attempt, None, provider)).await;
                 }
                 Err(error) => {
                     return Err(error).context("upstream native llama.cpp completion failed");
@@ -807,12 +837,8 @@ impl ProviderAdapter for LlamaCppNativeAdapter {
     async fn check_provider(&self, http: &Client, provider: &ProviderConfig) -> ProviderHealth {
         let path = provider.health_path.as_deref().unwrap_or("/health");
         let url = join_url(&provider.base_url, path);
-        let request = authorized_provider_request(
-            http.get(url).timeout(provider.timeout()),
-            provider,
-            self.default_headers(),
-        );
-        match request.send().await {
+        let request = authorized_provider_request(http.get(url), provider, self.default_headers());
+        match send_with_header_timeout(request, provider).await {
             Ok(response) => ProviderHealth {
                 provider: provider.name.clone(),
                 adapter: self.name().to_string(),
@@ -1172,15 +1198,15 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
 
         for attempt in 0..attempts {
             let builder = authorized_provider_request(
-                http.post(&url).timeout(provider.timeout()).json(&body),
+                http.post(&url).json(&body),
                 provider,
                 self.default_headers(),
             );
-            match builder.send().await {
+            match send_with_header_timeout(builder, provider).await {
                 Ok(response)
                     if is_transient_status(response.status()) && attempt + 1 < attempts =>
                 {
-                    sleep(backoff(attempt)).await;
+                    sleep(retry_delay(attempt, Some(response.headers()), provider)).await;
                 }
                 Ok(response) => {
                     return Ok(ProviderResponse::Upstream {
@@ -1191,7 +1217,7 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
                 Err(error)
                     if attempt + 1 < attempts && (error.is_timeout() || error.is_connect()) =>
                 {
-                    sleep(backoff(attempt)).await;
+                    sleep(retry_delay(attempt, None, provider)).await;
                 }
                 Err(error) => return Err(error).context("upstream request failed"),
             }
@@ -1211,12 +1237,8 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
             };
         };
         let url = join_url(&provider.base_url, path);
-        let request = authorized_provider_request(
-            http.get(url).timeout(provider.timeout()),
-            provider,
-            self.default_headers(),
-        );
-        match request.send().await {
+        let request = authorized_provider_request(http.get(url), provider, self.default_headers());
+        match send_with_header_timeout(request, provider).await {
             Ok(response) => ProviderHealth {
                 provider: provider.name.clone(),
                 adapter: self.name().to_string(),
@@ -1255,15 +1277,15 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
 
         for attempt in 0..attempts {
             let builder = authorized_provider_request(
-                http.post(&url).timeout(provider.timeout()).json(&body),
+                http.post(&url).json(&body),
                 provider,
                 self.default_headers(),
             );
-            match builder.send().await {
+            match send_with_header_timeout(builder, provider).await {
                 Ok(response)
                     if is_transient_status(response.status()) && attempt + 1 < attempts =>
                 {
-                    sleep(backoff(attempt)).await;
+                    sleep(retry_delay(attempt, Some(response.headers()), provider)).await;
                 }
                 Ok(response) => {
                     return Ok(ProviderResponse::Upstream {
@@ -1274,7 +1296,7 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
                 Err(error)
                     if attempt + 1 < attempts && (error.is_timeout() || error.is_connect()) =>
                 {
-                    sleep(backoff(attempt)).await;
+                    sleep(retry_delay(attempt, None, provider)).await;
                 }
                 Err(error) => return Err(error).context("upstream responses request failed"),
             }
@@ -1300,15 +1322,15 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
 
         for attempt in 0..attempts {
             let builder = authorized_provider_request(
-                http.post(&url).timeout(provider.timeout()).json(&body),
+                http.post(&url).json(&body),
                 provider,
                 self.default_headers(),
             );
-            match builder.send().await {
+            match send_with_header_timeout(builder, provider).await {
                 Ok(response)
                     if is_transient_status(response.status()) && attempt + 1 < attempts =>
                 {
-                    sleep(backoff(attempt)).await;
+                    sleep(retry_delay(attempt, Some(response.headers()), provider)).await;
                 }
                 Ok(response) => {
                     return Ok(ProviderResponse::Upstream {
@@ -1319,7 +1341,7 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
                 Err(error)
                     if attempt + 1 < attempts && (error.is_timeout() || error.is_connect()) =>
                 {
-                    sleep(backoff(attempt)).await;
+                    sleep(retry_delay(attempt, None, provider)).await;
                 }
                 Err(error) => return Err(error).context("upstream embeddings request failed"),
             }
@@ -1345,15 +1367,15 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
 
         for attempt in 0..attempts {
             let builder = authorized_provider_request(
-                http.post(&url).timeout(provider.timeout()).json(&body),
+                http.post(&url).json(&body),
                 provider,
                 self.default_headers(),
             );
-            match builder.send().await {
+            match send_with_header_timeout(builder, provider).await {
                 Ok(response)
                     if is_transient_status(response.status()) && attempt + 1 < attempts =>
                 {
-                    sleep(backoff(attempt)).await;
+                    sleep(retry_delay(attempt, Some(response.headers()), provider)).await;
                 }
                 Ok(response) => {
                     return Ok(ProviderResponse::Upstream {
@@ -1364,7 +1386,7 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
                 Err(error)
                     if attempt + 1 < attempts && (error.is_timeout() || error.is_connect()) =>
                 {
-                    sleep(backoff(attempt)).await;
+                    sleep(retry_delay(attempt, None, provider)).await;
                 }
                 Err(error) => return Err(error).context("upstream images request failed"),
             }
@@ -1390,15 +1412,15 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
 
         for attempt in 0..attempts {
             let builder = authorized_provider_request(
-                http.post(&url).timeout(provider.timeout()).json(&body),
+                http.post(&url).json(&body),
                 provider,
                 self.default_headers(),
             );
-            match builder.send().await {
+            match send_with_header_timeout(builder, provider).await {
                 Ok(response)
                     if is_transient_status(response.status()) && attempt + 1 < attempts =>
                 {
-                    sleep(backoff(attempt)).await;
+                    sleep(retry_delay(attempt, Some(response.headers()), provider)).await;
                 }
                 Ok(response) => {
                     return Ok(ProviderResponse::Upstream {
@@ -1409,7 +1431,7 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
                 Err(error)
                     if attempt + 1 < attempts && (error.is_timeout() || error.is_connect()) =>
                 {
-                    sleep(backoff(attempt)).await;
+                    sleep(retry_delay(attempt, None, provider)).await;
                 }
                 Err(error) => return Err(error).context("upstream speech request failed"),
             }
@@ -1479,14 +1501,11 @@ async fn send_audio_multipart(
 
     for attempt in 0..attempts {
         let form = audio_multipart_form(request.clone(), model)?;
-        let builder = authorized_provider_request(
-            http.post(&url).timeout(provider.timeout()).multipart(form),
-            provider,
-            default_headers,
-        );
-        match builder.send().await {
+        let builder =
+            authorized_provider_request(http.post(&url).multipart(form), provider, default_headers);
+        match send_with_header_timeout(builder, provider).await {
             Ok(response) if is_transient_status(response.status()) && attempt + 1 < attempts => {
-                sleep(backoff(attempt)).await;
+                sleep(retry_delay(attempt, Some(response.headers()), provider)).await;
             }
             Ok(response) => {
                 return Ok(ProviderResponse::Upstream {
@@ -1495,7 +1514,7 @@ async fn send_audio_multipart(
                 });
             }
             Err(error) if attempt + 1 < attempts && (error.is_timeout() || error.is_connect()) => {
-                sleep(backoff(attempt)).await;
+                sleep(retry_delay(attempt, None, provider)).await;
             }
             Err(error) => return Err(error).context(error_context),
         }
@@ -1525,8 +1544,20 @@ fn audio_multipart_form(
 }
 
 impl ProviderConfig {
-    pub fn timeout(&self) -> Duration {
+    pub fn response_header_timeout(&self) -> Duration {
         Duration::from_millis(self.timeout_ms)
+    }
+
+    pub fn connect_timeout(&self) -> Duration {
+        Duration::from_millis(self.connect_timeout_ms)
+    }
+
+    pub fn stream_idle_timeout(&self) -> Duration {
+        Duration::from_millis(self.stream_idle_timeout_ms)
+    }
+
+    pub fn retry_max_delay(&self) -> Duration {
+        Duration::from_millis(self.retry_max_delay_ms)
     }
 }
 
@@ -1553,8 +1584,100 @@ pub fn is_transient_status(status: StatusCode) -> bool {
         || status.is_server_error()
 }
 
-fn backoff(attempt: u8) -> Duration {
-    Duration::from_millis(100 * 2_u64.pow(attempt as u32))
+#[derive(Debug, thiserror::Error)]
+enum ProviderSendError {
+    #[error("provider response headers exceeded {timeout_ms} ms")]
+    HeaderTimeout { timeout_ms: u64 },
+    #[error(transparent)]
+    Http(#[from] reqwest::Error),
+}
+
+impl ProviderSendError {
+    fn is_timeout(&self) -> bool {
+        matches!(self, Self::HeaderTimeout { .. })
+            || matches!(self, Self::Http(error) if error.is_timeout())
+    }
+
+    fn is_connect(&self) -> bool {
+        matches!(self, Self::Http(error) if error.is_connect())
+    }
+}
+
+async fn send_with_header_timeout(
+    request: reqwest::RequestBuilder,
+    provider: &ProviderConfig,
+) -> std::result::Result<Response, ProviderSendError> {
+    timeout(provider.response_header_timeout(), request.send())
+        .await
+        .map_err(|_| ProviderSendError::HeaderTimeout {
+            timeout_ms: provider.timeout_ms,
+        })?
+        .map_err(ProviderSendError::Http)
+}
+
+static RETRY_ENTROPY: AtomicU64 = AtomicU64::new(1);
+
+fn retry_delay(
+    attempt: u8,
+    headers: Option<&reqwest::header::HeaderMap>,
+    provider: &ProviderConfig,
+) -> Duration {
+    let guided = headers
+        .and_then(|headers| headers.get(reqwest::header::RETRY_AFTER))
+        .is_some();
+    let delay = retry_delay_with_entropy(attempt, headers, provider, retry_entropy());
+    tracing::debug!(
+        provider = provider.name,
+        attempt,
+        delay_ms = delay.as_millis(),
+        reason = if guided { "retry_after" } else { "backoff" },
+        "provider retry scheduled"
+    );
+    delay
+}
+
+fn retry_delay_with_entropy(
+    attempt: u8,
+    headers: Option<&reqwest::header::HeaderMap>,
+    provider: &ProviderConfig,
+    entropy: u64,
+) -> Duration {
+    if let Some(retry_after) = headers
+        .and_then(|headers| headers.get(reqwest::header::RETRY_AFTER))
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_retry_after)
+    {
+        return retry_after.min(provider.retry_max_delay());
+    }
+    let exponential_ms = 100_u64
+        .saturating_mul(2_u64.saturating_pow(attempt.into()))
+        .min(provider.retry_max_delay_ms);
+    Duration::from_millis(entropy % exponential_ms.saturating_add(1))
+}
+
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    if let Ok(seconds) = value.trim().parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let deadline = httpdate::parse_http_date(value).ok()?;
+    Some(
+        deadline
+            .duration_since(SystemTime::now())
+            .unwrap_or_default(),
+    )
+}
+
+fn retry_entropy() -> u64 {
+    let counter = RETRY_ENTROPY.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or_default();
+    let mut value = counter ^ nanos.rotate_left(17);
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value.wrapping_mul(0x94d0_49bb_1331_11eb) ^ (value >> 31)
 }
 
 fn join_url(base: &str, path: &str) -> String {
@@ -1577,7 +1700,9 @@ mod tests {
             RouterPolicy,
         },
     };
-    use axum::{Json, Router, extract::State, http::HeaderMap, routing::post};
+    use axum::{
+        Json, Router, extract::State, http::HeaderMap, response::IntoResponse, routing::post,
+    };
     use std::sync::Mutex;
     use tokio::net::TcpListener;
 
@@ -1588,6 +1713,85 @@ mod tests {
         assert!(is_transient_status(StatusCode::BAD_GATEWAY));
         assert!(!is_transient_status(StatusCode::BAD_REQUEST));
         assert!(!is_transient_status(StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn retry_after_seconds_and_dates_are_honored_with_a_configured_cap() {
+        let config = provider_test_config("http://unused".to_string());
+        let mut provider = config.providers[0].clone();
+        provider.retry_max_delay_ms = 1_500;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "10".parse().unwrap());
+        assert_eq!(
+            retry_delay_with_entropy(0, Some(&headers), &provider, 0),
+            Duration::from_millis(1_500)
+        );
+
+        let deadline = SystemTime::now() + Duration::from_secs(1);
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            httpdate::fmt_http_date(deadline).parse().unwrap(),
+        );
+        let date_delay = retry_delay_with_entropy(0, Some(&headers), &provider, 0);
+        assert!(date_delay <= Duration::from_secs(1));
+    }
+
+    #[test]
+    fn full_jitter_stays_within_exponential_cap_and_desynchronizes_clients() {
+        let config = provider_test_config("http://unused".to_string());
+        let provider = &config.providers[0];
+        let delays = (0..32)
+            .map(|entropy| retry_delay_with_entropy(3, None, provider, entropy).as_millis())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(delays.iter().all(|delay| *delay <= 800));
+        assert!(delays.len() > 1);
+    }
+
+    #[tokio::test]
+    async fn response_header_timeout_is_distinct_from_connect_and_stream_idle_timeouts() {
+        let base_url = spawn_retry_server(75, false).await.0;
+        let mut config = provider_test_config(base_url);
+        config.providers[0].connect_timeout_ms = 250;
+        config.providers[0].timeout_ms = 20;
+        config.providers[0].stream_idle_timeout_ms = 500;
+        config.providers[0].retries = 0;
+        let client = ProviderClient::new(&config).unwrap();
+        let model = config.find_model("responses-model").unwrap();
+        let error = match client
+            .send_chat(&config, model, native_chat_request())
+            .await
+        {
+            Ok(_) => panic!("headers must time out before the stream policy applies"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("response headers exceeded 20 ms"),
+            "{error:#}"
+        );
+        assert_eq!(
+            config.providers[0].connect_timeout(),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            config.providers[0].stream_idle_timeout(),
+            Duration::from_millis(500)
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_after_retries_the_same_explicit_provider_without_failover() {
+        let (base_url, calls) = spawn_retry_server(0, true).await;
+        let mut config = provider_test_config(base_url);
+        config.providers[0].retries = 1;
+        config.providers[0].retry_max_delay_ms = 50;
+        let client = ProviderClient::new(&config).unwrap();
+        let model = config.find_model("responses-model").unwrap();
+        let response = client
+            .send_chat(&config, model, native_chat_request())
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]
@@ -2160,6 +2364,46 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn spawn_retry_server(delay_ms: u64, retry_once: bool) -> (String, Arc<AtomicU64>) {
+        async fn chat(
+            State((delay_ms, retry_once, calls)): State<(u64, bool, Arc<AtomicU64>)>,
+        ) -> axum::response::Response {
+            let call = calls.fetch_add(1, Ordering::Relaxed);
+            if delay_ms > 0 {
+                sleep(Duration::from_millis(delay_ms)).await;
+            }
+            if retry_once && call == 0 {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(reqwest::header::RETRY_AFTER, "0")],
+                    Json(serde_json::json!({"error":{"message":"retry"}})),
+                )
+                    .into_response();
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id":"chatcmpl-retry",
+                    "object":"chat.completion",
+                    "model":"responses-model",
+                    "choices":[{"message":{"role":"assistant","content":"ok"}}]
+                })),
+            )
+                .into_response()
+        }
+
+        let calls = Arc::new(AtomicU64::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(chat))
+            .with_state((delay_ms, retry_once, calls.clone()));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), calls)
+    }
+
     async fn spawn_ollama_native_server() -> (String, Arc<Mutex<Option<Value>>>) {
         async fn chat(
             State(captured): State<Arc<Mutex<Option<Value>>>>,
@@ -2267,6 +2511,9 @@ mod tests {
                 audio_translations_path: Some("/custom/translations".to_string()),
                 health_path: None,
                 timeout_ms: 1_000,
+                connect_timeout_ms: 5_000,
+                stream_idle_timeout_ms: 30_000,
+                retry_max_delay_ms: 30_000,
                 retries: 0,
                 max_concurrency: None,
                 queue_timeout_ms: None,
@@ -2317,6 +2564,9 @@ mod tests {
                 audio_translations_path: None,
                 health_path: Some("/api/tags".to_string()),
                 timeout_ms: 1_000,
+                connect_timeout_ms: 5_000,
+                stream_idle_timeout_ms: 30_000,
+                retry_max_delay_ms: 30_000,
                 retries: 0,
                 max_concurrency: None,
                 queue_timeout_ms: None,
@@ -2367,6 +2617,9 @@ mod tests {
                 audio_translations_path: None,
                 health_path: Some("/health".to_string()),
                 timeout_ms: 1_000,
+                connect_timeout_ms: 5_000,
+                stream_idle_timeout_ms: 30_000,
+                retry_max_delay_ms: 30_000,
                 retries: 0,
                 max_concurrency: None,
                 queue_timeout_ms: None,

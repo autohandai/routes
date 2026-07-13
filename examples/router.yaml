@@ -265,7 +265,11 @@ providers:
     audio_transcriptions_path: /v1/audio/transcriptions
     audio_translations_path: /v1/audio/translations
     health_path: /api/tags
+    # Connection, response-header, and response-stream idle phases are independent.
+    connect_timeout_ms: 5000
     timeout_ms: 120000
+    stream_idle_timeout_ms: 30000
+    retry_max_delay_ms: 30000
     retries: 1
     max_concurrency: 2
     queue_timeout_ms: 5000

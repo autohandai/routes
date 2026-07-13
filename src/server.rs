@@ -5146,19 +5146,41 @@ async fn upstream_response(
                     terminal: false,
                     final_http_recorded,
                 };
+                let stream_idle_timeout = state
+                    .engine
+                    .config()
+                    .providers
+                    .iter()
+                    .find(|provider| provider.name == model.provider)
+                    .map(ProviderConfig::stream_idle_timeout)
+                    .unwrap_or_else(|| Duration::from_secs(30));
                 let stream = stream::unfold(
-                    (Box::pin(upstream_stream), observer),
-                    |(mut upstream, mut observer)| async move {
-                        match upstream.as_mut().next().await {
-                            Some(Ok(bytes)) => {
-                                observer.on_chunk(&bytes);
-                                Some((Ok(bytes), (upstream, observer)))
-                            }
-                            Some(Err(error)) => {
+                    (Box::pin(upstream_stream), observer, stream_idle_timeout),
+                    |(mut upstream, mut observer, stream_idle_timeout)| async move {
+                        match timeout(stream_idle_timeout, upstream.as_mut().next()).await {
+                            Err(_) => {
+                                let error = io::Error::new(
+                                    io::ErrorKind::TimedOut,
+                                    format!(
+                                        "upstream stream idle timeout exceeded {} ms",
+                                        stream_idle_timeout.as_millis()
+                                    ),
+                                );
                                 observer.on_error(&error);
-                                Some((Err(error), (upstream, observer)))
+                                Some((Err(error), (upstream, observer, stream_idle_timeout)))
                             }
-                            None => {
+                            Ok(Some(Ok(bytes))) => {
+                                observer.on_chunk(&bytes);
+                                Some((Ok(bytes), (upstream, observer, stream_idle_timeout)))
+                            }
+                            Ok(Some(Err(error))) => {
+                                observer.on_error(&error);
+                                Some((
+                                    Err(io::Error::other(error.to_string())),
+                                    (upstream, observer, stream_idle_timeout),
+                                ))
+                            }
+                            Ok(None) => {
                                 observer.on_end();
                                 None
                             }
@@ -6165,6 +6187,42 @@ mod tests {
         assert!(streaming.status().is_success());
         let body = streaming.text().await.unwrap();
         assert!(body.contains("[DONE]"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn provider_stream_idle_timeout_is_distinct_from_request_body_timeout() {
+        let upstream_url = spawn_slow_streaming_chat_upstream().await;
+        let mut config = semantic_cache_config(upstream_url);
+        config.runtime.ingress.body_idle_timeout_ms = 500;
+        config.providers[0].stream_idle_timeout_ms = 20;
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "cache-model",
+                "messages": [{"role": "user", "content": "stream slowly"}],
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        assert!(
+            response.text().await.is_err(),
+            "upstream stream must terminate after its idle deadline"
+        );
+        sleep(Duration::from_millis(10)).await;
+        let metrics = client
+            .get(format!("{router_url}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(metrics["upstream_stream_errors"], 1);
     }
 
     #[tokio::test]
@@ -9338,6 +9396,9 @@ mod tests {
                     audio_translations_path: Some("/v1/audio/translations".to_string()),
                     health_path: None,
                     timeout_ms: 1_000,
+                    connect_timeout_ms: 5_000,
+                    stream_idle_timeout_ms: 30_000,
+                    retry_max_delay_ms: 30_000,
                     retries: 0,
                     max_concurrency: None,
                     queue_timeout_ms: None,
@@ -9358,6 +9419,9 @@ mod tests {
                     audio_translations_path: Some("/v1/audio/translations".to_string()),
                     health_path: None,
                     timeout_ms: 1_000,
+                    connect_timeout_ms: 5_000,
+                    stream_idle_timeout_ms: 30_000,
+                    retry_max_delay_ms: 30_000,
                     retries: 0,
                     max_concurrency: None,
                     queue_timeout_ms: None,
@@ -9438,6 +9502,9 @@ mod tests {
                 audio_translations_path: Some("/custom/translations".to_string()),
                 health_path: None,
                 timeout_ms: 1_000,
+                connect_timeout_ms: 5_000,
+                stream_idle_timeout_ms: 30_000,
+                retry_max_delay_ms: 30_000,
                 retries: 0,
                 max_concurrency: None,
                 queue_timeout_ms: None,
@@ -9496,6 +9563,9 @@ mod tests {
                 audio_translations_path: Some("/v1/audio/translations".to_string()),
                 health_path: None,
                 timeout_ms: 1_000,
+                connect_timeout_ms: 5_000,
+                stream_idle_timeout_ms: 30_000,
+                retry_max_delay_ms: 30_000,
                 retries: 0,
                 max_concurrency: None,
                 queue_timeout_ms: None,
@@ -9561,6 +9631,9 @@ mod tests {
                 audio_translations_path: Some("/v1/audio/translations".to_string()),
                 health_path: None,
                 timeout_ms: 1_000,
+                connect_timeout_ms: 5_000,
+                stream_idle_timeout_ms: 30_000,
+                retry_max_delay_ms: 30_000,
                 retries: 0,
                 max_concurrency: None,
                 queue_timeout_ms: None,
@@ -9637,6 +9710,9 @@ mod tests {
                 audio_translations_path: Some("/v1/audio/translations".to_string()),
                 health_path: None,
                 timeout_ms: 1_000,
+                connect_timeout_ms: 5_000,
+                stream_idle_timeout_ms: 30_000,
+                retry_max_delay_ms: 30_000,
                 retries: 0,
                 max_concurrency: None,
                 queue_timeout_ms: None,
@@ -9707,6 +9783,9 @@ mod tests {
                 audio_translations_path: Some("/v1/audio/translations".to_string()),
                 health_path: None,
                 timeout_ms: 1_000,
+                connect_timeout_ms: 5_000,
+                stream_idle_timeout_ms: 30_000,
+                retry_max_delay_ms: 30_000,
                 retries: 0,
                 max_concurrency: None,
                 queue_timeout_ms: None,
@@ -9782,6 +9861,9 @@ mod tests {
                 audio_translations_path: Some("/v1/audio/translations".to_string()),
                 health_path: None,
                 timeout_ms: 1_000,
+                connect_timeout_ms: 5_000,
+                stream_idle_timeout_ms: 30_000,
+                retry_max_delay_ms: 30_000,
                 retries: 0,
                 max_concurrency: None,
                 queue_timeout_ms: None,

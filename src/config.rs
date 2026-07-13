@@ -1266,6 +1266,21 @@ fn validate_provider(provider: &ProviderConfig) -> Result<()> {
         "provider {} timeout_ms must be greater than zero",
         provider.name
     );
+    anyhow::ensure!(
+        provider.connect_timeout_ms > 0,
+        "provider {} connect_timeout_ms must be greater than zero",
+        provider.name
+    );
+    anyhow::ensure!(
+        provider.stream_idle_timeout_ms > 0,
+        "provider {} stream_idle_timeout_ms must be greater than zero",
+        provider.name
+    );
+    anyhow::ensure!(
+        provider.retry_max_delay_ms > 0,
+        "provider {} retry_max_delay_ms must be greater than zero",
+        provider.name
+    );
     if let Some(queue_timeout_ms) = provider.queue_timeout_ms {
         anyhow::ensure!(
             queue_timeout_ms > 0,
@@ -1881,6 +1896,9 @@ mod tests {
                 audio_translations_path: Some("/v1/audio/translations".to_string()),
                 health_path: Some("/health".to_string()),
                 timeout_ms: 1_000,
+                connect_timeout_ms: 5_000,
+                stream_idle_timeout_ms: 30_000,
+                retry_max_delay_ms: 30_000,
                 retries: 0,
                 max_concurrency: Some(1),
                 queue_timeout_ms: Some(1_000),
@@ -2050,6 +2068,30 @@ mod tests {
 
         let error = config.validate().expect_err("zero queue timeout rejected");
         assert!(error.to_string().contains("queue_timeout_ms"));
+    }
+
+    #[test]
+    fn rejects_zero_provider_transport_phase_timeouts() {
+        type ProviderMutation = fn(&mut ProviderConfig);
+        let cases: [(&str, ProviderMutation); 3] = [
+            ("connect_timeout_ms", |provider| {
+                provider.connect_timeout_ms = 0
+            }),
+            ("stream_idle_timeout_ms", |provider| {
+                provider.stream_idle_timeout_ms = 0
+            }),
+            ("retry_max_delay_ms", |provider| {
+                provider.retry_max_delay_ms = 0
+            }),
+        ];
+        for (field, mutate) in cases {
+            let mut config = valid_config();
+            mutate(&mut config.providers[0]);
+            let error = config
+                .validate()
+                .expect_err("zero provider transport policy rejected");
+            assert!(error.to_string().contains(field), "{error}");
+        }
     }
 
     #[test]

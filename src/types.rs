@@ -165,6 +165,12 @@ pub struct ProviderConfig {
     pub health_path: Option<String>,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default = "default_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
+    #[serde(default = "default_stream_idle_timeout_ms")]
+    pub stream_idle_timeout_ms: u64,
+    #[serde(default = "default_retry_max_delay_ms")]
+    pub retry_max_delay_ms: u64,
     #[serde(default = "default_retries")]
     pub retries: u8,
     #[serde(default)]
@@ -286,6 +292,18 @@ fn default_chat_path() -> String {
 
 fn default_timeout_ms() -> u64 {
     120_000
+}
+
+fn default_connect_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_stream_idle_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_retry_max_delay_ms() -> u64 {
+    30_000
 }
 
 fn default_retries() -> u8 {
@@ -1513,6 +1531,9 @@ mod tests {
                 audio_translations_path: Some("/v1/audio/translations".to_string()),
                 health_path: None,
                 timeout_ms: 1_000,
+                connect_timeout_ms: 5_000,
+                stream_idle_timeout_ms: 30_000,
+                retry_max_delay_ms: 30_000,
                 retries: 0,
                 max_concurrency: None,
                 queue_timeout_ms: None,

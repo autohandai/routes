@@ -1426,7 +1426,7 @@ fn version_evidence(value: Option<String>, header: &str) -> VersionEvidence {
     }
 }
 
-fn config_fingerprint(config: &RouterConfig) -> Result<String> {
+pub fn config_fingerprint(config: &RouterConfig) -> Result<String> {
     let mut redacted = config.clone();
     redacted.auth.bearer_tokens.clear();
     for provider in &mut redacted.providers {

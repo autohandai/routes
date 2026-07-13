@@ -15,13 +15,18 @@ use autohand_router::{
         run_load_suite, run_load_test,
     },
     openapi,
+    promotion::evaluate_provider_promotion_gate,
     router::RoutingEngine,
     runtime_gate::run_runtime_gate,
     server::{self, AppState},
     types::{ClassifyResponse, MultimodelRequest, RouterPolicy, SelectedClassifications},
 };
 use clap::{Parser, Subcommand};
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Debug, Parser)]
@@ -195,6 +200,15 @@ enum Command {
     ProviderConformanceMatrix {
         #[arg(default_value = "Verify provider adapter conformance")]
         input: String,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    ProviderPromotionGate {
+        artifact: PathBuf,
+        #[arg(long, default_value_t = 86_400)]
+        max_age_seconds: u64,
+        #[arg(long)]
+        allow_unreported_versions: bool,
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -641,6 +655,37 @@ async fn main() -> Result<()> {
                     report.passed,
                     report.failed,
                     report.total
+                );
+            }
+            Ok(())
+        }
+        Command::ProviderPromotionGate {
+            artifact,
+            max_age_seconds,
+            allow_unreported_versions,
+            output,
+        } => {
+            let config = RouterConfig::from_path(&cli.config)?;
+            let evaluated_unix_seconds = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or_default();
+            let report = evaluate_provider_promotion_gate(
+                &config,
+                &artifact,
+                evaluated_unix_seconds,
+                max_age_seconds,
+                !allow_unreported_versions,
+            )?;
+            if let Some(path) = output {
+                fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+                println!("wrote provider promotion report {}", path.display());
+            }
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.pass {
+                anyhow::bail!(
+                    "provider promotion gate failed: {}",
+                    report.failures.join("; ")
                 );
             }
             Ok(())

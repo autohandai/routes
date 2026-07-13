@@ -662,7 +662,7 @@ async fn spawn_controlled_provider() -> Result<(String, JoinHandle<()>)> {
     Ok((format!("http://{address}"), task))
 }
 
-fn controlled_router_config(provider_url: &str) -> Result<RouterConfig> {
+pub(crate) fn controlled_router_config(provider_url: &str) -> Result<RouterConfig> {
     let yaml = format!(
         r#"
 bind: 127.0.0.1:0

@@ -1,0 +1,67 @@
+name: Staging live evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_path:
+        description: Config available to the staging runner
+        required: true
+        default: docs/examples/router.production.yaml
+        type: string
+      max_artifact_age_seconds:
+        description: Maximum accepted conformance artifact age
+        required: true
+        default: "3600"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  provider-promotion:
+    name: Live provider/model promotion gate
+    runs-on:
+      - self-hosted
+      - router-staging
+    environment: router-staging
+    timeout-minutes: 30
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+    steps:
+      - name: Checkout candidate revision
+        uses: actions/checkout@v4
+
+      - name: Validate staging config
+        run: cargo run --locked -- --config "${{ inputs.config_path }}" validate
+
+      - name: Run live provider/model conformance
+        id: conformance
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts/live
+          cargo run --locked -- --config "${{ inputs.config_path }}" \
+            provider-conformance-matrix \
+            "staging promotion ${GITHUB_SHA}" \
+            --output artifacts/live/provider-conformance.json
+
+      - name: Enforce fresh versioned promotion evidence
+        if: steps.conformance.outcome == 'success'
+        run: |
+          cargo run --locked -- --config "${{ inputs.config_path }}" \
+            provider-promotion-gate artifacts/live/provider-conformance.json \
+            --max-age-seconds "${{ inputs.max_artifact_age_seconds }}" \
+            --output artifacts/live/provider-promotion.json
+
+      - name: Upload sanitized live evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-provider-evidence-${{ github.sha }}
+          path: artifacts/live/
+          if-no-files-found: error
+
+      - name: Preserve conformance failure
+        if: steps.conformance.outcome != 'success'
+        run: exit 1

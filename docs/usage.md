@@ -381,6 +381,17 @@ runtime:
 
 Every declared endpoint for every configured provider/model pair must have a passing matrix entry. Missing, failed, duplicate, unsupported-schema-version, or mismatched reports fail config loading before the server starts.
 
+Before promotion, apply the stricter freshness/version gate to the newly generated live matrix:
+
+```bash
+cargo run --locked -- --config router.production.yaml \
+  provider-promotion-gate artifacts/live/provider-conformance.json \
+  --max-age-seconds 3600 \
+  --output artifacts/live/provider-promotion.json
+```
+
+The command fails non-zero for stale or config-mismatched evidence, unreported provider/model versions, and every skipped or failed advertised endpoint/feature. See [Credentialed staging evidence](live-evidence.md) for the protected runner workflow.
+
 ## Evaluation and Calibration
 
 Evaluation datasets are JSONL files with prompt, expected tier, optional domain, optional exact model/provider expectations, policy, filters, and required capabilities:

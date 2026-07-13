@@ -14,6 +14,7 @@ pub mod judge;
 pub mod load;
 pub mod metrics;
 pub mod openapi;
+pub mod promotion;
 pub mod provider;
 pub mod router;
 pub mod runtime_gate;

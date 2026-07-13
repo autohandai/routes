@@ -744,7 +744,9 @@ impl OpenAiResponsesRequest {
         if self.extra.contains_key("tools") || self.extra.contains_key("tool_choice") {
             push_unique(&mut capabilities, ModelCapability::Tools);
         }
-        if response_format_requires_json(self.extra.get("response_format")) {
+        if response_format_requires_json(self.extra.get("response_format"))
+            || responses_text_format_requires_json(self.extra.get("text"))
+        {
             push_unique(&mut capabilities, ModelCapability::Json);
         }
         capabilities
@@ -853,6 +855,16 @@ fn response_format_requires_json(value: Option<&Value>) -> bool {
     value
         .and_then(Value::as_object)
         .and_then(|object| object.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind == "json_object" || kind == "json_schema")
+}
+
+fn responses_text_format_requires_json(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_object)
+        .and_then(|text| text.get("format"))
+        .and_then(Value::as_object)
+        .and_then(|format| format.get("type"))
         .and_then(Value::as_str)
         .is_some_and(|kind| kind == "json_object" || kind == "json_schema")
 }
@@ -1099,6 +1111,26 @@ mod tests {
             request.required_capabilities(),
             vec![ModelCapability::Vision]
         );
+    }
+
+    #[test]
+    fn responses_request_detects_text_format_json_requirement() {
+        let request = OpenAiResponsesRequest {
+            model: "auto".to_string(),
+            input: Value::String("Return structured JSON".to_string()),
+            extra: serde_json::Map::from_iter([(
+                "text".to_string(),
+                serde_json::json!({
+                    "format": {
+                        "type": "json_schema",
+                        "name": "answer",
+                        "schema": {"type": "object"}
+                    }
+                }),
+            )]),
+        };
+
+        assert_eq!(request.required_capabilities(), vec![ModelCapability::Json]);
     }
 
     #[test]

@@ -438,6 +438,7 @@ cargo run -- evidence-validate artifacts/release-evidence
 cargo run -- --config examples/router.yaml provider-conformance-matrix
 cargo run -- --config router.with-judge.yaml classifier-live-gate examples/eval.production.jsonl
 cargo run -- --config router.production.yaml stream-live-gate --revision "$(git rev-parse HEAD)"
+cargo run -- --config router.production.yaml deployment-live-gate --url https://router-staging.example.com --revision "$(git rev-parse HEAD)"
 ```
 
 Routes is designed to be composable. New routing ideas should usually land behind the classifier boundary, scoring-policy boundary, provider adapter boundary, or eval tooling rather than inside HTTP handlers. Start with [CONTRIBUTING.md](CONTRIBUTING.md), then choose a small change with a clear validation path.

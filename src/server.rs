@@ -5,6 +5,7 @@ use crate::{
         BudgetAccountingScope, BudgetConfig, IngressConfig, RouterConfig, SafetyRoutingAction,
         bind_is_loopback,
     },
+    conformance::config_fingerprint,
     openapi,
     provider::{
         ProviderClient, ProviderHealth, ProviderHealthStatus, ProviderResponse,
@@ -44,6 +45,8 @@ use bytes::Bytes;
 use futures_util::{StreamExt, stream};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
+#[cfg(target_os = "linux")]
+use std::fs;
 use std::{
     collections::HashMap,
     fmt::Write as _,
@@ -379,6 +382,8 @@ pub struct AppState {
     pub sticky_routing: StickyRoutingStore,
     pub ingress: IngressController,
     pub background_tasks: BackgroundTasks,
+    pub deployment_revision: String,
+    pub config_fnv1a_64: String,
 }
 
 impl AppState {
@@ -399,6 +404,9 @@ impl AppState {
                 config.shadow_eval.max_pending_tasks,
                 config.shadow_eval.max_concurrent_tasks,
             ),
+            deployment_revision: std::env::var("AUTOHAND_ROUTER_REVISION")
+                .unwrap_or_else(|_| "unreported".to_string()),
+            config_fnv1a_64: config_fingerprint(config)?,
         })
     }
 }
@@ -519,6 +527,10 @@ pub struct RouterMetrics {
 
 #[derive(Debug, Serialize)]
 struct MetricsSnapshot {
+    deployment_revision: String,
+    config_fnv1a_64: String,
+    process_rss_bytes: Option<u64>,
+    process_peak_rss_bytes: Option<u64>,
     route_requests: u64,
     classify_requests: u64,
     chat_requests: u64,
@@ -670,9 +682,16 @@ impl RouterMetrics {
         accounting: &BudgetAccounting,
         judge: JudgeMetricsSnapshot,
         lifecycle: BackgroundLifecycleSnapshot,
+        deployment_revision: &str,
+        config_fnv1a_64: &str,
     ) -> MetricsSnapshot {
         let estimated_cost_micros = self.estimated_cost_micros.load(Ordering::Relaxed);
+        let (process_rss_bytes, process_peak_rss_bytes) = process_memory_bytes();
         MetricsSnapshot {
+            deployment_revision: deployment_revision.to_string(),
+            config_fnv1a_64: config_fnv1a_64.to_string(),
+            process_rss_bytes,
+            process_peak_rss_bytes,
             route_requests: self.route_requests.load(Ordering::Relaxed),
             classify_requests: self.classify_requests.load(Ordering::Relaxed),
             chat_requests: self.chat_requests.load(Ordering::Relaxed),
@@ -1645,6 +1664,8 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Json<MetricsSnapshot> {
                 &state.accounting,
                 judge,
                 lifecycle_snapshot(&state),
+                &state.deployment_revision,
+                &state.config_fnv1a_64,
             )
             .await,
     )
@@ -1660,6 +1681,8 @@ async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> Response {
             &state.accounting,
             judge,
             lifecycle_snapshot(&state),
+            &state.deployment_revision,
+            &state.config_fnv1a_64,
         )
         .await;
     (
@@ -1683,6 +1706,30 @@ fn lifecycle_snapshot(state: &AppState) -> BackgroundLifecycleSnapshot {
 
 fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     let mut output = String::new();
+    push_metric_family(
+        &mut output,
+        "autohand_router_process_resident_memory_bytes",
+        "gauge",
+        "Current router process resident memory in bytes when available.",
+    );
+    push_optional_metric(
+        &mut output,
+        "autohand_router_process_resident_memory_bytes",
+        &[],
+        snapshot.process_rss_bytes,
+    );
+    push_metric_family(
+        &mut output,
+        "autohand_router_process_peak_resident_memory_bytes",
+        "gauge",
+        "Peak router process resident memory in bytes when available.",
+    );
+    push_optional_metric(
+        &mut output,
+        "autohand_router_process_peak_resident_memory_bytes",
+        &[],
+        snapshot.process_peak_rss_bytes,
+    );
     push_metric_family(
         &mut output,
         "autohand_router_requests_total",
@@ -1976,6 +2023,25 @@ fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     );
     output.push_str(&crate::metrics::prometheus());
     output
+}
+
+fn process_memory_bytes() -> (Option<u64>, Option<u64>) {
+    #[cfg(target_os = "linux")]
+    {
+        let status = fs::read_to_string("/proc/self/status").ok();
+        let parse = |name: &str| {
+            status.as_deref()?.lines().find_map(|line| {
+                let value = line.strip_prefix(name)?.trim();
+                let kib = value.split_whitespace().next()?.parse::<u64>().ok()?;
+                Some(kib.saturating_mul(1024))
+            })
+        };
+        return (parse("VmRSS:"), parse("VmHWM:"));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        (None, None)
+    }
 }
 
 fn push_selection_metrics(
@@ -7463,6 +7529,8 @@ mod tests {
         assert_eq!(metrics["chat_requests"], 1);
         assert_eq!(metrics["failover_attempts"], 1);
         assert_eq!(metrics["failover_successes"], 1);
+        assert_eq!(metrics["deployment_revision"], "test");
+        assert!(metrics["config_fnv1a_64"].as_str().is_some());
         assert_eq!(metrics["selected_models"], 1);
         assert_eq!(metrics["budget"]["used_chat_requests"], 1);
         assert_eq!(metrics["per_model"][0]["id"], "strong-ok");
@@ -7490,6 +7558,8 @@ mod tests {
             )
         );
         for metric in [
+            "autohand_router_process_resident_memory_bytes",
+            "autohand_router_process_peak_resident_memory_bytes",
             "autohand_router_request_headers_duration_ms_bucket",
             "autohand_router_routing_duration_ms_bucket",
             "autohand_router_provider_queue_duration_ms_bucket",
@@ -10157,6 +10227,8 @@ mod tests {
                 config.shadow_eval.max_pending_tasks,
                 config.shadow_eval.max_concurrent_tasks,
             ),
+            deployment_revision: "test".to_string(),
+            config_fnv1a_64: crate::conformance::config_fingerprint(&config).unwrap(),
         };
         tokio::spawn(async move {
             axum::serve(listener, app(state)).await.unwrap();

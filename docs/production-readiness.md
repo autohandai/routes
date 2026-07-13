@@ -22,6 +22,7 @@ The router is not considered production-complete until these requirements are tr
 - A protected self-hosted staging workflow runs the live matrix and a fail-closed provider promotion gate. Freshness, redacted config identity, reported provider/model versions, every advertised endpoint, and every advertised streaming/tools/JSON/vision/audio probe must pass; raw failure artifacts are retained and unadvertised skips remain explicitly justified.
 - A separate staging job requires a live `llm_judge`/`route_llm` adapter to meet success, fallback, p95, and seeded-holdout accuracy thresholds. Its redacted aggregate artifact also proves timeout, invalid-JSON, and 429 responses each produce one deterministic heuristic fallback with the expected counters.
 - A third staging job gates every advertised provider/model stream profile on SSE framing, first-chunk/completion bounds, terminal usage, byte-for-byte passthrough, cancellation accounting, released concurrency capacity, and post-cancel readiness. Credential-free injections separately prove capped `Retry-After`, incomplete-body error propagation/counters, zero leaked streams, and bounded active-stream shutdown.
+- A fourth staging job requires an already deployed candidate to report the exact Git revision and redacted config fingerprint, then enforces sustained mixed unary/stream/multipart p95, p99, error, provider-queue, and Linux peak-RSS thresholds. It also proves multipart size boundaries, exact multi-process file-budget admission under contention, stale-lock reuse, corrupt-ledger fail-closed behavior, restart persistence, and bounded two-replica rolling replacement in controlled OS processes.
 - Current endpoints are implemented: `/v1/router/classify`, `/v1/router/multimodel`, `/v1/router/raw`, and `/v1/router/{provider}`.
 - OpenAI-compatible chat proxying works for local Ollama through a configured alias.
 - OpenAI-compatible chat forwarding is isolated behind a provider adapter registry with explicit provider kinds for generic OpenAI-compatible services, Ollama, llama.cpp, vLLM, OpenRouter, and Cloudflare AI Gateway.
@@ -56,5 +57,5 @@ The router is not considered production-complete until these requirements are tr
 - Capture and publish live judge-smoke artifacts from actual configured local and hosted models.
 - Grow the production eval gate with real traffic and provider-specific traces beyond the current curated 24-example suite.
 - Extend the replayable optimizer beyond deterministic search toward learned GEPA-style prompt/program optimization when enough held-out traffic exists.
-- Add published sustained load-suite artifacts from real deployment targets, including provider queue behavior and production external-counter tests.
+- Retain successful deployment-gate artifacts per release and extend the staging workload when new endpoint/provider classes are promoted.
 - Add recorded upstream conformance fixtures for multipart audio endpoints across real providers.

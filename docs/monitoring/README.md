@@ -21,3 +21,4 @@ scrape_configs:
 
 The alert rules assume a Prometheus `job` label of `autohand-router`. If your scrape job uses a different label, update the selectors before loading the rules.
 
+`/metrics` reports `deployment_revision`, the secret-redacted `config_fnv1a_64`, and Linux current/peak RSS. Prometheus exposes the RSS values as `autohand_router_process_resident_memory_bytes` and `autohand_router_process_peak_resident_memory_bytes`. Set `AUTOHAND_ROUTER_REVISION` to the immutable deployed Git SHA so staging evidence can reject revision drift.

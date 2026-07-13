@@ -6,6 +6,7 @@ pub mod classifier_gate;
 pub mod config;
 pub mod config_schema;
 pub mod conformance;
+pub mod deployment_gate;
 pub mod eval;
 pub mod evidence;
 mod file_state;

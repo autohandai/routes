@@ -5,6 +5,7 @@ use autohand_router::{
     classifier_gate::{ClassifierLiveGateConfig, run_classifier_live_gate},
     config_schema,
     conformance::{run_provider_conformance, run_provider_conformance_matrix},
+    deployment_gate::{DeploymentLiveGateConfig, run_budget_worker, run_deployment_live_gate},
     eval::{
         EvalCoverageMinimums, calibrate_thresholds, configured_eval_gate, eval_gate_with_coverage,
         evaluate, load_jsonl, optimize_with_artifact, seeded_holdout,
@@ -256,6 +257,61 @@ enum Command {
         shutdown_timeout_ms: u64,
         #[arg(long)]
         output: Option<PathBuf>,
+    },
+    DeploymentLiveGate {
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        url: String,
+        #[arg(long, env = "AUTOHAND_ROUTER_TOKEN", hide_env_values = true)]
+        bearer_token: Option<String>,
+        #[arg(long, env = "GITHUB_SHA", default_value = "working-tree")]
+        revision: String,
+        #[arg(long, default_value_t = 300)]
+        duration_seconds: u64,
+        #[arg(long, default_value_t = 4)]
+        requests_per_second: u64,
+        #[arg(long, default_value_t = 8)]
+        concurrency: usize,
+        #[arg(long, default_value_t = 25)]
+        min_samples_per_scenario: u64,
+        #[arg(long, default_value_t = 5_000)]
+        max_p95_ms: u64,
+        #[arg(long, default_value_t = 10_000)]
+        max_p99_ms: u64,
+        #[arg(long, default_value_t = 0.01)]
+        max_error_rate: f64,
+        #[arg(long, default_value_t = 1_000)]
+        max_queue_p95_ms: u64,
+        #[arg(long, default_value_t = 1_073_741_824)]
+        max_peak_rss_bytes: u64,
+        #[arg(long)]
+        allow_missing_rss: bool,
+        #[arg(long)]
+        allow_unreported_target_revision: bool,
+        #[arg(long, default_value_t = 10_000)]
+        max_recovery_ms: u64,
+        #[arg(long, default_value_t = 4)]
+        accounting_processes: usize,
+        #[arg(long, default_value_t = 100)]
+        accounting_limit: u64,
+        #[arg(long, default_value_t = 67_108_864)]
+        max_upload_probe_bytes: u64,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    #[command(hide = true)]
+    DeploymentBudgetWorker {
+        #[arg(long)]
+        ledger: PathBuf,
+        #[arg(long)]
+        limit: u64,
+        #[arg(long)]
+        attempts: u64,
+        #[arg(long)]
+        worker_id: String,
+        #[arg(long)]
+        start_file: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
     },
 }
 
@@ -812,6 +868,99 @@ async fn main() -> Result<()> {
             if !report.pass {
                 anyhow::bail!("stream live gate failed: {}", report.failures.join("; "));
             }
+            Ok(())
+        }
+        Command::DeploymentLiveGate {
+            url,
+            bearer_token,
+            revision,
+            duration_seconds,
+            requests_per_second,
+            concurrency,
+            min_samples_per_scenario,
+            max_p95_ms,
+            max_p99_ms,
+            max_error_rate,
+            max_queue_p95_ms,
+            max_peak_rss_bytes,
+            allow_missing_rss,
+            allow_unreported_target_revision,
+            max_recovery_ms,
+            accounting_processes,
+            accounting_limit,
+            max_upload_probe_bytes,
+            output,
+        } => {
+            let config = RouterConfig::from_path(&cli.config)?;
+            let failure_revision = revision.clone();
+            let failure_output = output.clone();
+            let report = match run_deployment_live_gate(
+                &config,
+                DeploymentLiveGateConfig {
+                    base_url: url,
+                    bearer_token,
+                    revision,
+                    duration: std::time::Duration::from_secs(duration_seconds),
+                    requests_per_second,
+                    concurrency,
+                    min_samples_per_scenario,
+                    max_p95_ms,
+                    max_p99_ms,
+                    max_error_rate,
+                    max_queue_p95_ms,
+                    max_peak_rss_bytes,
+                    require_rss: !allow_missing_rss,
+                    require_target_revision: !allow_unreported_target_revision,
+                    max_recovery_ms,
+                    accounting_processes,
+                    accounting_limit,
+                    max_upload_probe_bytes,
+                    worker_executable: std::env::current_exe()?,
+                },
+            )
+            .await
+            {
+                Ok(report) => report,
+                Err(error) => {
+                    if let Some(path) = failure_output {
+                        fs::write(
+                            &path,
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "schema_version": 1,
+                                "artifact_kind": "staging_deployment_live_gate_error",
+                                "source_revision": failure_revision,
+                                "payloads_redacted": true,
+                                "pass": false,
+                                "error": error.to_string()
+                            }))?,
+                        )?;
+                        println!("wrote deployment live-gate failure {}", path.display());
+                    }
+                    return Err(error);
+                }
+            };
+            if let Some(path) = output {
+                fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+                println!("wrote deployment live-gate report {}", path.display());
+            }
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.pass {
+                anyhow::bail!(
+                    "deployment live gate failed: {}",
+                    report.failures.join("; ")
+                );
+            }
+            Ok(())
+        }
+        Command::DeploymentBudgetWorker {
+            ledger,
+            limit,
+            attempts,
+            worker_id,
+            start_file,
+            output,
+        } => {
+            run_budget_worker(&ledger, limit, attempts, worker_id, &start_file, &output).await?;
             Ok(())
         }
     }

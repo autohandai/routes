@@ -116,6 +116,7 @@ See [../examples/router.production.yaml](../examples/router.production.yaml) for
 docker build -t autohand-router:local .
 docker run --rm -p 8080:8080 \
   -e AUTOHAND_ROUTER_TOKEN=dev-token \
+  -e AUTOHAND_ROUTER_REVISION="$(git rev-parse HEAD)" \
   -e OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
   autohand-router:local
 ```
@@ -137,4 +138,5 @@ cargo run -- --config docs/examples/router.production.yaml validate
 cargo run -- --config examples/router.yaml eval-gate examples/eval.production.jsonl --min-examples 50 --min-accuracy 0.90 --min-domain-accuracy 0.90 --min-model-accuracy 0.95 --min-provider-accuracy 0.95 --output router.eval-gate.json
 cargo run -- --config docs/examples/router.production.yaml provider-conformance-matrix --output router.provider-matrix.json
 cargo run -- load-suite --url https://router.example.com --output router.load-suite.json
+cargo run -- --config docs/examples/router.production.yaml deployment-live-gate --url https://router.example.com --revision "$(git rev-parse HEAD)" --output router.deployment-gate.json
 ```

@@ -550,7 +550,7 @@ fn unix_seconds() -> u64 {
         .unwrap_or_default()
 }
 
-async fn spawn_controlled_provider() -> Result<(String, JoinHandle<()>)> {
+pub(crate) async fn spawn_controlled_provider() -> Result<(String, JoinHandle<()>)> {
     async fn chat(Json(request): Json<Value>) -> axum::response::Response {
         if request.get("stream").and_then(Value::as_bool) == Some(true) {
             return Response::builder()

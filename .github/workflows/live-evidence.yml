@@ -18,6 +18,16 @@ on:
         required: true
         default: examples/eval.production.jsonl
         type: string
+      deployment_url:
+        description: Already deployed candidate router base URL
+        required: true
+        default: http://127.0.0.1:8080
+        type: string
+      deployment_duration_seconds:
+        description: Sustained mixed-workload measurement window
+        required: true
+        default: "300"
+        type: string
 
 permissions:
   contents: read
@@ -156,4 +166,54 @@ jobs:
 
       - name: Preserve stream gate failure
         if: steps.streams.outcome != 'success'
+        run: exit 1
+
+  deployment-promotion:
+    name: Sustained deployment promotion gate
+    runs-on:
+      - self-hosted
+      - router-staging
+    environment: router-staging
+    timeout-minutes: 45
+    env:
+      AUTOHAND_ROUTER_TOKEN: ${{ secrets.AUTOHAND_ROUTER_TOKEN }}
+
+    steps:
+      - name: Checkout candidate revision
+        uses: actions/checkout@v4
+
+      - name: Run revision-matched sustained deployment gate
+        id: deployment
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts/live
+          cargo run --locked -- --config "${{ inputs.config_path }}" \
+            deployment-live-gate \
+            --url "${{ inputs.deployment_url }}" \
+            --revision "${GITHUB_SHA}" \
+            --duration-seconds "${{ inputs.deployment_duration_seconds }}" \
+            --requests-per-second 4 \
+            --concurrency 8 \
+            --min-samples-per-scenario 25 \
+            --max-p95-ms 5000 \
+            --max-p99-ms 10000 \
+            --max-error-rate 0.01 \
+            --max-queue-p95-ms 1000 \
+            --max-peak-rss-bytes 1073741824 \
+            --max-recovery-ms 10000 \
+            --accounting-processes 4 \
+            --accounting-limit 100 \
+            --max-upload-probe-bytes 67108864 \
+            --output artifacts/live/deployment-promotion.json
+
+      - name: Upload sanitized deployment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-deployment-evidence-${{ github.sha }}
+          path: artifacts/live/deployment-promotion.json
+          if-no-files-found: error
+
+      - name: Preserve deployment gate failure
+        if: steps.deployment.outcome != 'success'
         run: exit 1

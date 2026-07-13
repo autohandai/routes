@@ -114,7 +114,7 @@ curl -s http://127.0.0.1:8080/metrics/prometheus
 curl -s http://127.0.0.1:8080/v1/router/providers
 ```
 
-`/metrics` includes bounded histogram summaries, and `/metrics/prometheus` exports cumulative bucket, sum, and count series for request-to-headers, route decisions, provider queue wait, upstream headers, upstream body, retry delay, stream first chunk, and stream duration. Labels are limited to fixed endpoint/outcome values plus configured provider/model identifiers; request paths and prompt content never become labels. Streaming time-to-first-chunk and full stream duration are separate from the non-streaming upstream-body distribution.
+`/metrics` includes the deployment revision from `AUTOHAND_ROUTER_REVISION`, a secret-redacted config fingerprint, Linux current/peak RSS, and bounded histogram summaries. `/metrics/prometheus` exports the memory gauges plus cumulative bucket, sum, and count series for request-to-headers, route decisions, provider queue wait, upstream headers, upstream body, retry delay, stream first chunk, and stream duration. Labels are limited to fixed endpoint/outcome values plus configured provider/model identifiers; request paths and prompt content never become labels. Streaming time-to-first-chunk and full stream duration are separate from the non-streaming upstream-body distribution.
 
 Provider config supports `kind`, `base_url`, `connect_timeout_ms`, `timeout_ms` (response headers), `stream_idle_timeout_ms`, `retries`, `retry_max_delay_ms`, `health_path`, endpoint paths, `max_concurrency`, and `queue_timeout_ms`. Supported provider kinds are `open_ai_compatible`, `ollama`, `ollama_native`, `llama_cpp`, `llama_cpp_native`, `vllm`, `openrouter`, and `cloudflare_ai_gateway`.
 
@@ -425,6 +425,29 @@ cargo run --locked -- --config router.production.yaml \
 ```
 
 The command requires byte-for-byte SSE passthrough, terminal usage, bounded completion and cancellation, released provider capacity, and healthy readiness after cancellation. It also runs credential-free `Retry-After`, mid-body-close, and active-stream shutdown injections. Advertised profiles cannot skip; native adapters whose declared contract rejects streaming are recorded as justified skips. Run this only in a controlled environment because it contacts every advertised provider/model pair in the selected config.
+
+Gate an already deployed candidate under a sustained mixed workload:
+
+```bash
+export AUTOHAND_ROUTER_TOKEN='staging-test-token'
+cargo run --locked -- --config router.production.yaml \
+  deployment-live-gate \
+  --url https://router-staging.example.com \
+  --revision "$(git rev-parse HEAD)" \
+  --duration-seconds 300 \
+  --requests-per-second 4 \
+  --concurrency 8 \
+  --min-samples-per-scenario 25 \
+  --max-p95-ms 5000 \
+  --max-p99-ms 10000 \
+  --max-error-rate 0.01 \
+  --max-queue-p95-ms 1000 \
+  --max-peak-rss-bytes 1073741824 \
+  --max-recovery-ms 10000 \
+  --output artifacts/live/deployment-promotion.json
+```
+
+The deployed router must set `AUTOHAND_ROUTER_REVISION` to that exact revision; the gate also matches its `/metrics` config fingerprint to the supplied config. It measures unary, streaming, and bounded multipart traffic, queue buckets, RSS, and one just-below/above multipart boundary pair. Credential-free side probes use multiple OS processes to prove shared file-budget atomicity, stale-lock reuse, corrupt-ledger fail-closed behavior, state persistence after worker restart, and bounded two-replica rolling replacement. `--allow-unreported-target-revision` and `--allow-missing-rss` are local diagnostic escape hatches; the protected staging workflow uses neither.
 
 ## Evaluation and Calibration
 

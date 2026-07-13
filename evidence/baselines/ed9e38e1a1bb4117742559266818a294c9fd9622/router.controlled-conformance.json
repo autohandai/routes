@@ -1,0 +1,180 @@
+{
+  "schema_version": 2,
+  "generated_unix_seconds": 1783935882,
+  "router_version": "0.1.0",
+  "config_fnv1a_64": "9838b817c77b1afe",
+  "input": "controlled evidence",
+  "total": 1,
+  "passed": 1,
+  "failed": 0,
+  "pass": true,
+  "reports": [
+    {
+      "schema_version": 2,
+      "generated_unix_seconds": 1783935882,
+      "router_version": "0.1.0",
+      "config_fnv1a_64": "9838b817c77b1afe",
+      "provider": "controlled-provider",
+      "provider_kind": "open_ai_compatible",
+      "provider_version": {
+        "value": "controlled-provider-1",
+        "source": "response_header:x-provider-version"
+      },
+      "model": "controlled-model",
+      "model_version": {
+        "value": "controlled-model-1",
+        "source": "response_header:x-model-version"
+      },
+      "input": "controlled evidence",
+      "pass": true,
+      "health": {
+        "provider": "controlled-provider",
+        "adapter": "open_ai_compatible",
+        "status": "unknown",
+        "status_code": null,
+        "error": "health_path is not configured"
+      },
+      "chat": {
+        "configured": true,
+        "skip_reason": null,
+        "status": 200,
+        "content_type": "application/json",
+        "openai_chat_shape": true,
+        "response_model_matches": true,
+        "assistant_content_present": true,
+        "usage_present": true,
+        "negative_schema_rejected": true,
+        "prompt_tokens": 1,
+        "completion_tokens": 1,
+        "total_tokens": 2,
+        "error": null
+      },
+      "features": [
+        {
+          "feature": "streaming",
+          "declared": true,
+          "attempted": true,
+          "status": 200,
+          "content_type": "text/event-stream",
+          "pass": true,
+          "skip_reason": null,
+          "error": null
+        },
+        {
+          "feature": "tools",
+          "declared": true,
+          "attempted": true,
+          "status": 200,
+          "content_type": "application/json",
+          "pass": true,
+          "skip_reason": null,
+          "error": null
+        },
+        {
+          "feature": "json",
+          "declared": true,
+          "attempted": true,
+          "status": 200,
+          "content_type": "application/json",
+          "pass": true,
+          "skip_reason": null,
+          "error": null
+        },
+        {
+          "feature": "vision",
+          "declared": true,
+          "attempted": true,
+          "status": 200,
+          "content_type": "application/json",
+          "pass": true,
+          "skip_reason": null,
+          "error": null
+        },
+        {
+          "feature": "audio",
+          "declared": true,
+          "attempted": true,
+          "status": null,
+          "content_type": null,
+          "pass": true,
+          "skip_reason": null,
+          "error": null
+        }
+      ],
+      "endpoints": [
+        {
+          "endpoint": "responses",
+          "configured": true,
+          "status": 200,
+          "content_type": "application/json",
+          "fixture": "OpenAI Responses text input",
+          "positive_schema_valid": true,
+          "negative_schema_rejected": true,
+          "pass": true,
+          "skip_reason": null,
+          "error": null
+        },
+        {
+          "endpoint": "embeddings",
+          "configured": true,
+          "status": 200,
+          "content_type": "application/json",
+          "fixture": "single string embedding input",
+          "positive_schema_valid": true,
+          "negative_schema_rejected": true,
+          "pass": true,
+          "skip_reason": null,
+          "error": null
+        },
+        {
+          "endpoint": "images",
+          "configured": true,
+          "status": 200,
+          "content_type": "application/json",
+          "fixture": "single image-generation prompt",
+          "positive_schema_valid": true,
+          "negative_schema_rejected": true,
+          "pass": true,
+          "skip_reason": null,
+          "error": null
+        },
+        {
+          "endpoint": "speech",
+          "configured": true,
+          "status": 200,
+          "content_type": "audio/wav",
+          "fixture": "alloy voice audio output",
+          "positive_schema_valid": true,
+          "negative_schema_rejected": true,
+          "pass": true,
+          "skip_reason": null,
+          "error": null
+        },
+        {
+          "endpoint": "audio_transcriptions",
+          "configured": true,
+          "status": 200,
+          "content_type": "application/json",
+          "fixture": "bounded WAV multipart transcription",
+          "positive_schema_valid": true,
+          "negative_schema_rejected": true,
+          "pass": true,
+          "skip_reason": null,
+          "error": null
+        },
+        {
+          "endpoint": "audio_translations",
+          "configured": true,
+          "status": 200,
+          "content_type": "application/json",
+          "fixture": "bounded WAV multipart translation",
+          "positive_schema_valid": true,
+          "negative_schema_rejected": true,
+          "pass": true,
+          "skip_reason": null,
+          "error": null
+        }
+      ]
+    }
+  ]
+}

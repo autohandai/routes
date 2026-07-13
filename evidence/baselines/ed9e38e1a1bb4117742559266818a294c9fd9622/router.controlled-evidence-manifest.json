@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "controlled_release_evidence_manifest",
+  "generated_unix_seconds": 1783935883,
+  "source_revision": "ed9e38e1a1bb4117742559266818a294c9fd9622",
+  "router_version": "0.1.0",
+  "config_fnv1a_64": "9838b817c77b1afe",
+  "benchmark_file": "router.controlled-benchmark.json",
+  "benchmark_fnv1a_64": "4064368a6f052ff6",
+  "conformance_file": "router.controlled-conformance.json",
+  "conformance_fnv1a_64": "c268eca2412f10aa",
+  "provider_class": "controlled_local_mock",
+  "includes_external_provider_variability": false,
+  "pass": true,
+  "replay_command": "cargo run --locked -- controlled-evidence --revision ed9e38e1a1bb4117742559266818a294c9fd9622 --runs 5 --requests-per-scenario 100 --concurrency 8 --slo-p95-ms 250 --slo-error-rate 0 --output-dir evidence/baselines/ed9e38e1a1bb4117742559266818a294c9fd9622"
+}

@@ -1,0 +1,1095 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "controlled_router_overhead_benchmark",
+  "generated_unix_seconds": 1783935883,
+  "source_revision": "ed9e38e1a1bb4117742559266818a294c9fd9622",
+  "router_version": "0.1.0",
+  "config_fnv1a_64": "9838b817c77b1afe",
+  "environment": {
+    "os": "macos",
+    "architecture": "aarch64",
+    "logical_cpus": 16,
+    "rust_target_family": "unix"
+  },
+  "workload": {
+    "warmup_requests_per_scenario": 1,
+    "measured_runs": 5,
+    "requests_per_scenario_per_run": 100,
+    "concurrency": 8,
+    "scenarios": [
+      {
+        "name": "router_multimodel",
+        "path": "/v1/router/multimodel"
+      },
+      {
+        "name": "chat_auto",
+        "path": "/v1/chat/completions"
+      },
+      {
+        "name": "responses_auto",
+        "path": "/v1/responses"
+      },
+      {
+        "name": "embeddings_auto",
+        "path": "/v1/embeddings"
+      },
+      {
+        "name": "images_auto",
+        "path": "/v1/images/generations"
+      },
+      {
+        "name": "speech_auto",
+        "path": "/v1/audio/speech"
+      }
+    ]
+  },
+  "thresholds": {
+    "p95_ms": 250,
+    "error_rate": 0.0,
+    "required_successful_runs": 5
+  },
+  "variability": {
+    "provider_class": "controlled_local_mock",
+    "includes_external_provider_variability": false,
+    "interpretation": "Measures router plus loopback mock overhead; it does not substantiate latency claims for external providers."
+  },
+  "resource_observation": {
+    "peak_rss_bytes": null,
+    "method": "unavailable_on_this_platform"
+  },
+  "runs": [
+    {
+      "schema_version": 1,
+      "base_url": "http://127.0.0.1:55522",
+      "requests_per_scenario": 100,
+      "concurrency": 8,
+      "total_requests": 600,
+      "pass": true,
+      "reports": [
+        {
+          "scenario": "router_multimodel",
+          "path": "/v1/router/multimodel",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/router/multimodel",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 5,
+            "requests_per_second": 17355.461546805513,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "chat_auto",
+          "path": "/v1/chat/completions",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/chat/completions",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 9,
+            "requests_per_second": 10023.973334627095,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 1,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "responses_auto",
+          "path": "/v1/responses",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/responses",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 8,
+            "requests_per_second": 11192.619497162614,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "embeddings_auto",
+          "path": "/v1/embeddings",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/embeddings",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 8,
+            "requests_per_second": 12457.436055357855,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "images_auto",
+          "path": "/v1/images/generations",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/images/generations",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 7,
+            "requests_per_second": 13427.32460557234,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "speech_auto",
+          "path": "/v1/audio/speech",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/audio/speech",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 11,
+            "requests_per_second": 8550.419214228445,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 1,
+              "p95_ms": 1,
+              "p99_ms": 2,
+              "max_ms": 2
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "schema_version": 1,
+      "base_url": "http://127.0.0.1:55522",
+      "requests_per_scenario": 100,
+      "concurrency": 8,
+      "total_requests": 600,
+      "pass": true,
+      "reports": [
+        {
+          "scenario": "router_multimodel",
+          "path": "/v1/router/multimodel",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/router/multimodel",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 8,
+            "requests_per_second": 12318.68436450987,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 1,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "chat_auto",
+          "path": "/v1/chat/completions",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/chat/completions",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 8,
+            "requests_per_second": 11763.148994985957,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "responses_auto",
+          "path": "/v1/responses",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/responses",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 7,
+            "requests_per_second": 13277.641593433833,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "embeddings_auto",
+          "path": "/v1/embeddings",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/embeddings",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 6,
+            "requests_per_second": 14399.194336278497,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 0,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "images_auto",
+          "path": "/v1/images/generations",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/images/generations",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 6,
+            "requests_per_second": 15339.973701149087,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 0,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "speech_auto",
+          "path": "/v1/audio/speech",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/audio/speech",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 6,
+            "requests_per_second": 15883.731088432673,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 0,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "schema_version": 1,
+      "base_url": "http://127.0.0.1:55522",
+      "requests_per_scenario": 100,
+      "concurrency": 8,
+      "total_requests": 600,
+      "pass": true,
+      "reports": [
+        {
+          "scenario": "router_multimodel",
+          "path": "/v1/router/multimodel",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/router/multimodel",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 5,
+            "requests_per_second": 18790.666525611396,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 0,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "chat_auto",
+          "path": "/v1/chat/completions",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/chat/completions",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 7,
+            "requests_per_second": 12928.179695492241,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "responses_auto",
+          "path": "/v1/responses",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/responses",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 7,
+            "requests_per_second": 12641.291717526798,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "embeddings_auto",
+          "path": "/v1/embeddings",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/embeddings",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 7,
+            "requests_per_second": 12665.577089288265,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "images_auto",
+          "path": "/v1/images/generations",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/images/generations",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 6,
+            "requests_per_second": 15285.356979576776,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 0,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "speech_auto",
+          "path": "/v1/audio/speech",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/audio/speech",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 6,
+            "requests_per_second": 16372.528730513417,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 0,
+              "p99_ms": 0,
+              "max_ms": 0
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "schema_version": 1,
+      "base_url": "http://127.0.0.1:55522",
+      "requests_per_scenario": 100,
+      "concurrency": 8,
+      "total_requests": 600,
+      "pass": true,
+      "reports": [
+        {
+          "scenario": "router_multimodel",
+          "path": "/v1/router/multimodel",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/router/multimodel",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 5,
+            "requests_per_second": 18338.529249954154,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "chat_auto",
+          "path": "/v1/chat/completions",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/chat/completions",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 8,
+            "requests_per_second": 11784.6941099981,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "responses_auto",
+          "path": "/v1/responses",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/responses",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 8,
+            "requests_per_second": 11501.52395192363,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "embeddings_auto",
+          "path": "/v1/embeddings",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/embeddings",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 7,
+            "requests_per_second": 13233.713467341444,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "images_auto",
+          "path": "/v1/images/generations",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/images/generations",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 6,
+            "requests_per_second": 14591.084847158385,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 0,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "speech_auto",
+          "path": "/v1/audio/speech",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/audio/speech",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 6,
+            "requests_per_second": 15288.864752867732,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "schema_version": 1,
+      "base_url": "http://127.0.0.1:55522",
+      "requests_per_scenario": 100,
+      "concurrency": 8,
+      "total_requests": 600,
+      "pass": true,
+      "reports": [
+        {
+          "scenario": "router_multimodel",
+          "path": "/v1/router/multimodel",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/router/multimodel",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 4,
+            "requests_per_second": 20481.663176591264,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 0,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "chat_auto",
+          "path": "/v1/chat/completions",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/chat/completions",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 8,
+            "requests_per_second": 12021.156755042604,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "responses_auto",
+          "path": "/v1/responses",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/responses",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 8,
+            "requests_per_second": 12375.02615771154,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "embeddings_auto",
+          "path": "/v1/embeddings",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/embeddings",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 7,
+            "requests_per_second": 13563.844541522387,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 0,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "images_auto",
+          "path": "/v1/images/generations",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/images/generations",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 7,
+            "requests_per_second": 14201.352167545281,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 1,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        },
+        {
+          "scenario": "speech_auto",
+          "path": "/v1/audio/speech",
+          "report": {
+            "target": "http://127.0.0.1:55522/v1/audio/speech",
+            "requests": 100,
+            "concurrency": 8,
+            "successes": 100,
+            "failures": 0,
+            "error_rate": 0.0,
+            "duration_ms": 6,
+            "requests_per_second": 14831.843969001446,
+            "latency": {
+              "min_ms": 0,
+              "p50_ms": 0,
+              "p90_ms": 0,
+              "p95_ms": 0,
+              "p99_ms": 1,
+              "max_ms": 1
+            },
+            "slo": {
+              "p95_ms_threshold": 250,
+              "error_rate_threshold": 0.0,
+              "pass": true
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "aggregates": [
+    {
+      "scenario": "router_multimodel",
+      "path": "/v1/router/multimodel",
+      "runs": 5,
+      "p95_ms": {
+        "minimum": 0.0,
+        "mean": 0.6,
+        "maximum": 1.0,
+        "confidence_95_lower": 0.119900010414497,
+        "confidence_95_upper": 1.080099989585503
+      },
+      "p99_ms": {
+        "minimum": 1.0,
+        "mean": 1.0,
+        "maximum": 1.0,
+        "confidence_95_lower": 1.0,
+        "confidence_95_upper": 1.0
+      },
+      "requests_per_second": {
+        "minimum": 12318.68436450987,
+        "mean": 17457.000972694437,
+        "maximum": 20481.663176591264,
+        "confidence_95_lower": 14751.173404271667,
+        "confidence_95_upper": 20162.828541117207
+      },
+      "maximum_error_rate": 0.0,
+      "pass": true
+    },
+    {
+      "scenario": "chat_auto",
+      "path": "/v1/chat/completions",
+      "runs": 5,
+      "p95_ms": {
+        "minimum": 1.0,
+        "mean": 1.0,
+        "maximum": 1.0,
+        "confidence_95_lower": 1.0,
+        "confidence_95_upper": 1.0
+      },
+      "p99_ms": {
+        "minimum": 1.0,
+        "mean": 1.0,
+        "maximum": 1.0,
+        "confidence_95_lower": 1.0,
+        "confidence_95_upper": 1.0
+      },
+      "requests_per_second": {
+        "minimum": 10023.973334627095,
+        "mean": 11704.230578029199,
+        "maximum": 12928.179695492241,
+        "confidence_95_lower": 10781.602989359682,
+        "confidence_95_upper": 12626.858166698716
+      },
+      "maximum_error_rate": 0.0,
+      "pass": true
+    },
+    {
+      "scenario": "responses_auto",
+      "path": "/v1/responses",
+      "runs": 5,
+      "p95_ms": {
+        "minimum": 1.0,
+        "mean": 1.0,
+        "maximum": 1.0,
+        "confidence_95_lower": 1.0,
+        "confidence_95_upper": 1.0
+      },
+      "p99_ms": {
+        "minimum": 1.0,
+        "mean": 1.0,
+        "maximum": 1.0,
+        "confidence_95_lower": 1.0,
+        "confidence_95_upper": 1.0
+      },
+      "requests_per_second": {
+        "minimum": 11192.619497162614,
+        "mean": 12197.620583551683,
+        "maximum": 13277.641593433833,
+        "confidence_95_lower": 11452.647827155197,
+        "confidence_95_upper": 12942.59333994817
+      },
+      "maximum_error_rate": 0.0,
+      "pass": true
+    },
+    {
+      "scenario": "embeddings_auto",
+      "path": "/v1/embeddings",
+      "runs": 5,
+      "p95_ms": {
+        "minimum": 0.0,
+        "mean": 0.6,
+        "maximum": 1.0,
+        "confidence_95_lower": 0.119900010414497,
+        "confidence_95_upper": 1.080099989585503
+      },
+      "p99_ms": {
+        "minimum": 1.0,
+        "mean": 1.0,
+        "maximum": 1.0,
+        "confidence_95_lower": 1.0,
+        "confidence_95_upper": 1.0
+      },
+      "requests_per_second": {
+        "minimum": 12457.436055357855,
+        "mean": 13263.95309795769,
+        "maximum": 14399.194336278497,
+        "confidence_95_lower": 12586.668075895992,
+        "confidence_95_upper": 13941.238120019389
+      },
+      "maximum_error_rate": 0.0,
+      "pass": true
+    },
+    {
+      "scenario": "images_auto",
+      "path": "/v1/images/generations",
+      "runs": 5,
+      "p95_ms": {
+        "minimum": 0.0,
+        "mean": 0.4,
+        "maximum": 1.0,
+        "confidence_95_lower": 0.0,
+        "confidence_95_upper": 0.8800999895855031
+      },
+      "p99_ms": {
+        "minimum": 1.0,
+        "mean": 1.0,
+        "maximum": 1.0,
+        "confidence_95_lower": 1.0,
+        "confidence_95_upper": 1.0
+      },
+      "requests_per_second": {
+        "minimum": 13427.32460557234,
+        "mean": 14569.018460200376,
+        "maximum": 15339.973701149087,
+        "confidence_95_lower": 13869.619278719752,
+        "confidence_95_upper": 15268.417641680999
+      },
+      "maximum_error_rate": 0.0,
+      "pass": true
+    },
+    {
+      "scenario": "speech_auto",
+      "path": "/v1/audio/speech",
+      "runs": 5,
+      "p95_ms": {
+        "minimum": 0.0,
+        "mean": 0.4,
+        "maximum": 1.0,
+        "confidence_95_lower": 0.0,
+        "confidence_95_upper": 0.8800999895855031
+      },
+      "p99_ms": {
+        "minimum": 0.0,
+        "mean": 1.0,
+        "maximum": 2.0,
+        "confidence_95_lower": 0.38019357860699765,
+        "confidence_95_upper": 1.6198064213930023
+      },
+      "requests_per_second": {
+        "minimum": 8550.419214228445,
+        "mean": 14185.477551008744,
+        "maximum": 16372.528730513417,
+        "confidence_95_lower": 11377.255334429776,
+        "confidence_95_upper": 16993.699767587714
+      },
+      "maximum_error_rate": 0.0,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "failures": [],
+  "replay_command": "cargo run --locked -- controlled-evidence --revision ed9e38e1a1bb4117742559266818a294c9fd9622 --runs 5 --requests-per-scenario 100 --concurrency 8 --slo-p95-ms 250 --slo-error-rate 0 --output-dir evidence/baselines/ed9e38e1a1bb4117742559266818a294c9fd9622"
+}

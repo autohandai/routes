@@ -30,7 +30,7 @@ use anyhow::Result;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Multipart, Path, State},
+    extract::{FromRequest, Multipart, Path, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -38,7 +38,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::{StreamExt, stream};
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -90,6 +90,45 @@ struct ModelEligibilityRequest {
     required_capabilities: Vec<ModelCapability>,
     estimated_input_tokens: u32,
     requested_output_tokens: u32,
+}
+
+struct OpenAiJson<T>(T);
+
+#[async_trait::async_trait]
+impl<S, T> FromRequest<S> for OpenAiJson<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = Response;
+
+    async fn from_request(
+        request: Request<Body>,
+        state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(request, state).await {
+            Ok(Json(value)) => Ok(Self(value)),
+            Err(rejection) => Err(json_rejection_response(rejection)),
+        }
+    }
+}
+
+fn json_rejection_response(rejection: JsonRejection) -> Response {
+    let status = rejection.status();
+    let code = match status {
+        StatusCode::PAYLOAD_TOO_LARGE => "request_too_large",
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported_media_type",
+        _ => "invalid_json",
+    };
+    (
+        status,
+        Json(ProviderClient::invalid_request_error_json(
+            rejection.body_text(),
+            None,
+            Some(code),
+        )),
+    )
+        .into_response()
 }
 
 #[derive(Clone)]
@@ -1457,6 +1496,7 @@ async fn models(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
             serde_json::json!({
                 "id": model.id,
                 "object": "model",
+                "created": 0,
                 "owned_by": model.provider,
                 "aliases": model.aliases,
                 "local": model.local,
@@ -1470,7 +1510,7 @@ async fn models(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
 
 async fn classify(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<ClassifyRequest>,
+    OpenAiJson(request): OpenAiJson<ClassifyRequest>,
 ) -> Json<ClassifyResponse> {
     state
         .metrics
@@ -1487,7 +1527,7 @@ async fn classify(
 
 async fn raw_router(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<crate::types::RawRouterRequest>,
+    OpenAiJson(request): OpenAiJson<crate::types::RawRouterRequest>,
 ) -> Json<crate::types::RawRouterResponse> {
     state
         .metrics
@@ -1520,7 +1560,7 @@ fn legacy_raw_difficulty(
 async fn provider_router(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
-    Json(request): Json<crate::types::ProviderRouterRequest>,
+    OpenAiJson(request): OpenAiJson<crate::types::ProviderRouterRequest>,
 ) -> Response {
     let config = state.engine.config();
     if !config
@@ -1560,7 +1600,7 @@ async fn provider_router(
 
 async fn multimodel(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<MultimodelRequest>,
+    OpenAiJson(request): OpenAiJson<MultimodelRequest>,
 ) -> Json<crate::types::MultimodelResponse> {
     state.metrics.route_requests.fetch_add(1, Ordering::Relaxed);
     let input = request.input.clone();
@@ -1580,8 +1620,18 @@ async fn multimodel(
 
 async fn chat_completions(
     State(state): State<Arc<AppState>>,
-    Json(mut request): Json<OpenAiChatRequest>,
+    OpenAiJson(mut request): OpenAiJson<OpenAiChatRequest>,
 ) -> Response {
+    if request.model.trim().is_empty() {
+        return invalid_request_response("model must not be empty", Some("model"), "invalid_model");
+    }
+    if request.messages.is_empty() {
+        return invalid_request_response(
+            "messages must contain at least one item",
+            Some("messages"),
+            "invalid_messages",
+        );
+    }
     let prompt = request.prompt_text();
     let requested_model = request.model.clone();
     let config = state.engine.config();
@@ -1716,8 +1766,14 @@ async fn chat_completions(
 
 async fn responses(
     State(state): State<Arc<AppState>>,
-    Json(mut request): Json<OpenAiResponsesRequest>,
+    OpenAiJson(mut request): OpenAiJson<OpenAiResponsesRequest>,
 ) -> Response {
+    if request.model.trim().is_empty() {
+        return invalid_request_response("model must not be empty", Some("model"), "invalid_model");
+    }
+    if request.input.is_null() {
+        return invalid_request_response("input must not be null", Some("input"), "invalid_input");
+    }
     let prompt = request.prompt_text();
     let requested_model = request.model.clone();
     let config = state.engine.config();
@@ -2148,8 +2204,14 @@ fn record_sticky_routing(
 
 async fn embeddings(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<OpenAiEmbeddingsRequest>,
+    OpenAiJson(request): OpenAiJson<OpenAiEmbeddingsRequest>,
 ) -> Response {
+    if request.model.trim().is_empty() {
+        return invalid_request_response("model must not be empty", Some("model"), "invalid_model");
+    }
+    if request.input.is_null() {
+        return invalid_request_response("input must not be null", Some("input"), "invalid_input");
+    }
     let prompt = request.prompt_text();
     let requested_model = request.model.clone();
     let config = state.engine.config();
@@ -2233,8 +2295,18 @@ async fn embeddings(
 
 async fn images_generations(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<OpenAiImagesRequest>,
+    OpenAiJson(request): OpenAiJson<OpenAiImagesRequest>,
 ) -> Response {
+    if request.model.trim().is_empty() {
+        return invalid_request_response("model must not be empty", Some("model"), "invalid_model");
+    }
+    if request.prompt.trim().is_empty() {
+        return invalid_request_response(
+            "prompt must not be empty",
+            Some("prompt"),
+            "invalid_prompt",
+        );
+    }
     let prompt = request.prompt_text();
     let requested_model = request.model.clone();
     let config = state.engine.config();
@@ -2313,8 +2385,17 @@ async fn images_generations(
 
 async fn audio_speech(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<OpenAiSpeechRequest>,
+    OpenAiJson(request): OpenAiJson<OpenAiSpeechRequest>,
 ) -> Response {
+    if request.model.trim().is_empty() {
+        return invalid_request_response("model must not be empty", Some("model"), "invalid_model");
+    }
+    if request.input.trim().is_empty() {
+        return invalid_request_response("input must not be empty", Some("input"), "invalid_input");
+    }
+    if request.voice.trim().is_empty() {
+        return invalid_request_response("voice must not be empty", Some("voice"), "invalid_voice");
+    }
     let prompt = request.prompt_text();
     let requested_model = request.model.clone();
     let config = state.engine.config();
@@ -4917,6 +4998,18 @@ fn invalid_router_model_response(model: &str) -> Response {
         .into_response()
 }
 
+fn invalid_request_response(message: &str, param: Option<&str>, code: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ProviderClient::invalid_request_error_json(
+            message,
+            param,
+            Some(code),
+        )),
+    )
+        .into_response()
+}
+
 fn elapsed_millis_u32(started: Instant) -> u32 {
     started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32
 }
@@ -5140,6 +5233,104 @@ mod tests {
                 .contains("exceeds window 32")
         );
         assert_eq!(calls.load(AtomicOrdering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn json_rejections_and_missing_fields_use_openai_error_envelopes() {
+        let (upstream_url, calls) = spawn_counting_chat_upstream("cache-model").await;
+        let config = semantic_cache_config(upstream_url);
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let cases = [
+            ("application/json", "{", StatusCode::BAD_REQUEST),
+            (
+                "application/json",
+                r#"{"model":"cache-model"}"#,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "text/plain",
+                r#"{"model":"cache-model","messages":[]}"#,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            ),
+        ];
+        for (content_type, body, expected_status) in cases {
+            let response = client
+                .post(format!("{router_url}/v1/chat/completions"))
+                .header(reqwest::header::CONTENT_TYPE, content_type)
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected_status);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok()),
+                Some("application/json")
+            );
+            assert!(
+                response
+                    .headers()
+                    .contains_key("x-autohand-router-request-id")
+            );
+            let error = response.json::<Value>().await.unwrap();
+            assert_eq!(error["error"]["type"], "invalid_request_error");
+            assert!(error["error"].get("param").is_some());
+            assert!(error["error"]["code"].is_string());
+        }
+
+        let empty_messages = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&serde_json::json!({"model":"cache-model","messages":[]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(empty_messages.status(), StatusCode::BAD_REQUEST);
+        let error = empty_messages.json::<Value>().await.unwrap();
+        assert_eq!(error["error"]["param"], "messages");
+        assert_eq!(error["error"]["code"], "invalid_messages");
+
+        let oversized = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(format!(
+                "{{\"model\":\"cache-model\",\"messages\":[{{\"role\":\"user\",\"content\":\"{}\"}}]}}",
+                "x".repeat(2_100_000)
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let error = oversized.json::<Value>().await.unwrap();
+        assert_eq!(error["error"]["code"], "request_too_large");
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn model_list_includes_openai_base_shape_and_router_extensions() {
+        let (upstream_url, _calls) = spawn_counting_chat_upstream("cache-model").await;
+        let mut config = semantic_cache_config(upstream_url);
+        config.models[0].capabilities.supported_endpoints =
+            Some(vec![ModelEndpoint::Chat, ModelEndpoint::Responses]);
+        let router_url = spawn_router(config).await;
+
+        let response = reqwest::get(format!("{router_url}/v1/models"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let models = response.json::<Value>().await.unwrap();
+        let model = &models["data"][0];
+        assert_eq!(model["id"], "cache-model");
+        assert_eq!(model["object"], "model");
+        assert!(model["created"].is_u64());
+        assert_eq!(model["owned_by"], "cache-provider");
+        assert_eq!(
+            model["capabilities"]["supported_endpoints"],
+            serde_json::json!(["chat", "responses"])
+        );
     }
 
     #[tokio::test]

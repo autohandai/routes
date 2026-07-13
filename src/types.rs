@@ -571,7 +571,6 @@ pub struct RouteScoreComponents {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiChatRequest {
     pub model: String,
-    #[serde(default)]
     pub messages: Vec<ChatMessage>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
@@ -580,7 +579,6 @@ pub struct OpenAiChatRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiResponsesRequest {
     pub model: String,
-    #[serde(default)]
     pub input: Value,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
@@ -589,7 +587,6 @@ pub struct OpenAiResponsesRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiEmbeddingsRequest {
     pub model: String,
-    #[serde(default)]
     pub input: Value,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
@@ -1134,6 +1131,22 @@ mod tests {
         };
 
         assert_eq!(request.required_capabilities(), vec![ModelCapability::Json]);
+    }
+
+    #[test]
+    fn openai_request_types_require_endpoint_mandatory_fields() {
+        assert!(
+            serde_json::from_value::<OpenAiChatRequest>(serde_json::json!({"model":"auto"}))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<OpenAiResponsesRequest>(serde_json::json!({"model":"auto"}))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<OpenAiEmbeddingsRequest>(serde_json::json!({"model":"auto"}))
+                .is_err()
+        );
     }
 
     #[test]

@@ -91,7 +91,11 @@ pub fn spec() -> Value {
                                 }
                             }
                         },
-                        "401": { "$ref": "#/components/responses/Unauthorized" }
+                        "400": { "$ref": "#/components/responses/RouterError" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "413": { "$ref": "#/components/responses/RouterError" },
+                        "415": { "$ref": "#/components/responses/RouterError" },
+                        "422": { "$ref": "#/components/responses/RouterError" }
                     }
                 }
             },
@@ -116,7 +120,11 @@ pub fn spec() -> Value {
                                 }
                             }
                         },
-                        "401": { "$ref": "#/components/responses/Unauthorized" }
+                        "400": { "$ref": "#/components/responses/RouterError" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "413": { "$ref": "#/components/responses/RouterError" },
+                        "415": { "$ref": "#/components/responses/RouterError" },
+                        "422": { "$ref": "#/components/responses/RouterError" }
                     }
                 }
             },
@@ -149,8 +157,12 @@ pub fn spec() -> Value {
                                 }
                             }
                         },
+                        "400": { "$ref": "#/components/responses/RouterError" },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
-                        "404": { "$ref": "#/components/responses/RouterError" }
+                        "404": { "$ref": "#/components/responses/RouterError" },
+                        "413": { "$ref": "#/components/responses/RouterError" },
+                        "415": { "$ref": "#/components/responses/RouterError" },
+                        "422": { "$ref": "#/components/responses/RouterError" }
                     }
                 }
             },
@@ -174,7 +186,11 @@ pub fn spec() -> Value {
                                 }
                             }
                         },
-                        "401": { "$ref": "#/components/responses/Unauthorized" }
+                        "400": { "$ref": "#/components/responses/RouterError" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "413": { "$ref": "#/components/responses/RouterError" },
+                        "415": { "$ref": "#/components/responses/RouterError" },
+                        "422": { "$ref": "#/components/responses/RouterError" }
                     }
                 }
             },
@@ -245,6 +261,9 @@ pub fn spec() -> Value {
                         },
                         "400": { "$ref": "#/components/responses/RouterError" },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "413": { "$ref": "#/components/responses/RouterError" },
+                        "415": { "$ref": "#/components/responses/RouterError" },
+                        "422": { "$ref": "#/components/responses/RouterError" },
                         "429": { "$ref": "#/components/responses/RouterError" },
                         "502": { "$ref": "#/components/responses/RouterError" }
                     }
@@ -288,6 +307,9 @@ pub fn spec() -> Value {
                         },
                         "400": { "$ref": "#/components/responses/RouterError" },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "413": { "$ref": "#/components/responses/RouterError" },
+                        "415": { "$ref": "#/components/responses/RouterError" },
+                        "422": { "$ref": "#/components/responses/RouterError" },
                         "429": { "$ref": "#/components/responses/RouterError" },
                         "502": { "$ref": "#/components/responses/RouterError" }
                     }
@@ -324,6 +346,9 @@ pub fn spec() -> Value {
                         },
                         "400": { "$ref": "#/components/responses/RouterError" },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "413": { "$ref": "#/components/responses/RouterError" },
+                        "415": { "$ref": "#/components/responses/RouterError" },
+                        "422": { "$ref": "#/components/responses/RouterError" },
                         "429": { "$ref": "#/components/responses/RouterError" },
                         "502": { "$ref": "#/components/responses/RouterError" }
                     }
@@ -360,6 +385,9 @@ pub fn spec() -> Value {
                         },
                         "400": { "$ref": "#/components/responses/RouterError" },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "413": { "$ref": "#/components/responses/RouterError" },
+                        "415": { "$ref": "#/components/responses/RouterError" },
+                        "422": { "$ref": "#/components/responses/RouterError" },
                         "429": { "$ref": "#/components/responses/RouterError" },
                         "502": { "$ref": "#/components/responses/RouterError" }
                     }
@@ -402,6 +430,9 @@ pub fn spec() -> Value {
                         },
                         "400": { "$ref": "#/components/responses/RouterError" },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "413": { "$ref": "#/components/responses/RouterError" },
+                        "415": { "$ref": "#/components/responses/RouterError" },
+                        "422": { "$ref": "#/components/responses/RouterError" },
                         "429": { "$ref": "#/components/responses/RouterError" },
                         "502": { "$ref": "#/components/responses/RouterError" }
                     }
@@ -441,6 +472,9 @@ pub fn spec() -> Value {
                         },
                         "400": { "$ref": "#/components/responses/RouterError" },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "413": { "$ref": "#/components/responses/RouterError" },
+                        "415": { "$ref": "#/components/responses/RouterError" },
+                        "422": { "$ref": "#/components/responses/RouterError" },
                         "429": { "$ref": "#/components/responses/RouterError" },
                         "502": { "$ref": "#/components/responses/RouterError" }
                     }
@@ -480,6 +514,9 @@ pub fn spec() -> Value {
                         },
                         "400": { "$ref": "#/components/responses/RouterError" },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "413": { "$ref": "#/components/responses/RouterError" },
+                        "415": { "$ref": "#/components/responses/RouterError" },
+                        "422": { "$ref": "#/components/responses/RouterError" },
                         "429": { "$ref": "#/components/responses/RouterError" },
                         "502": { "$ref": "#/components/responses/RouterError" }
                     }
@@ -565,9 +602,11 @@ fn schemas() -> Value {
                     "type": "object",
                     "properties": {
                         "message": { "type": "string" },
-                        "type": { "type": "string" }
+                        "type": { "type": "string" },
+                        "param": { "type": ["string", "null"] },
+                        "code": { "type": ["string", "null"] }
                     },
-                    "required": ["message", "type"]
+                    "required": ["message", "type", "param", "code"]
                 }
             },
             "required": ["error"]
@@ -800,7 +839,11 @@ fn schemas() -> Value {
                 "supports_json": { "type": "boolean" },
                 "supports_code": { "type": "boolean" },
                 "supports_web_apps": { "type": "boolean" },
-                "supports_long_context": { "type": "boolean" }
+                "supports_long_context": { "type": "boolean" },
+                "supported_endpoints": {
+                    "type": ["array", "null"],
+                    "items": { "type": "string", "enum": ["chat", "responses", "embeddings", "images", "speech", "audio_transcriptions", "audio_translations"] }
+                }
             }
         },
         "RouterPolicy": {
@@ -906,13 +949,14 @@ fn schemas() -> Value {
             "properties": {
                 "id": { "type": "string" },
                 "object": { "type": "string" },
+                "created": { "type": "integer" },
                 "owned_by": { "type": "string" },
                 "aliases": { "type": "array", "items": { "type": "string" } },
                 "local": { "type": "boolean" },
                 "context_window": { "type": ["integer", "null"] },
                 "capabilities": { "$ref": "#/components/schemas/ModelCapabilities" }
             },
-            "required": ["id", "object", "owned_by", "aliases", "local", "capabilities"]
+            "required": ["id", "object", "created", "owned_by", "aliases", "local", "capabilities"]
         },
         "ProviderHealth": {
             "type": "object",
@@ -1110,6 +1154,47 @@ mod tests {
         assert!(
             spec["components"]["schemas"]["RouteScoreComponents"]["properties"]
                 ["multimodal_score_boost"]
+                .is_object()
+        );
+    }
+
+    #[test]
+    fn openapi_models_local_rejections_and_extensions_match_runtime() {
+        let spec = spec();
+
+        for path in [
+            "/v1/router/classify",
+            "/v1/router/raw",
+            "/v1/router/{provider}",
+            "/v1/router/multimodel",
+            "/v1/chat/completions",
+            "/v1/responses",
+            "/v1/embeddings",
+            "/v1/images/generations",
+            "/v1/audio/speech",
+        ] {
+            for status in ["400", "413", "415", "422"] {
+                assert_eq!(
+                    spec["paths"][path]["post"]["responses"][status]["$ref"],
+                    "#/components/responses/RouterError",
+                    "missing OpenAI-shaped {status} response for {path}"
+                );
+            }
+        }
+
+        assert_eq!(
+            spec["components"]["schemas"]["RouterError"]["properties"]["error"]["required"],
+            json!(["message", "type", "param", "code"])
+        );
+        assert!(
+            spec["components"]["schemas"]["ModelInfo"]["required"]
+                .as_array()
+                .expect("model info required fields")
+                .iter()
+                .any(|field| field == "created")
+        );
+        assert!(
+            spec["components"]["schemas"]["ModelCapabilities"]["properties"]["supported_endpoints"]
                 .is_object()
         );
     }

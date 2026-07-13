@@ -307,10 +307,29 @@ impl ProviderClient {
     }
 
     pub fn error_json(message: impl Into<String>) -> Value {
+        Self::typed_error_json(message, "autohand_router_error", None, None)
+    }
+
+    pub fn invalid_request_error_json(
+        message: impl Into<String>,
+        param: Option<&str>,
+        code: Option<&str>,
+    ) -> Value {
+        Self::typed_error_json(message, "invalid_request_error", param, code)
+    }
+
+    fn typed_error_json(
+        message: impl Into<String>,
+        error_type: &str,
+        param: Option<&str>,
+        code: Option<&str>,
+    ) -> Value {
         serde_json::json!({
             "error": {
                 "message": message.into(),
-                "type": "autohand_router_error"
+                "type": error_type,
+                "param": param,
+                "code": code
             }
         })
     }

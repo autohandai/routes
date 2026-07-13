@@ -116,6 +116,25 @@ curl -s http://127.0.0.1:8080/v1/router/providers
 
 Provider config supports `kind`, `base_url`, `timeout_ms`, `retries`, `health_path`, endpoint paths, `max_concurrency`, and `queue_timeout_ms`. Supported provider kinds are `open_ai_compatible`, `ollama`, `ollama_native`, `llama_cpp`, `llama_cpp_native`, `vllm`, `openrouter`, and `cloudflare_ai_gateway`.
 
+### Ingress Resource Controls
+
+Request admission is configured independently from provider concurrency. JSON and multipart limits plus the request-body idle timeout are enabled by default. Global admission and per-credential rate limits are opt-in so localhost development remains frictionless:
+
+```yaml
+runtime:
+  ingress:
+    max_json_body_bytes: 2097152
+    max_multipart_body_bytes: 33554432
+    body_idle_timeout_ms: 30000
+    max_in_flight_requests: 256
+    admission_queue_timeout_ms: 100
+    per_credential_requests_per_minute: 600
+```
+
+`max_in_flight_requests` bounds work admitted into the router; requests that cannot enter within `admission_queue_timeout_ms` receive an OpenAI-shaped `503 router_overloaded`. Rate limits are isolated by configured bearer credential and return `429 rate_limit_exceeded`. Oversized bodies return `413 request_too_large`, and stalled uploads return `408 request_timeout`. Every rejection includes `x-autohand-router-request-id`.
+
+The idle deadline only watches request-body progress. It is not a total request deadline and does not terminate long-lived streaming responses. Provider `max_concurrency` and `queue_timeout_ms` still apply immediately before each upstream dispatch.
+
 ### Native Chat Adapter Contracts
 
 Native adapters are intentionally narrower than OpenAI-compatible adapters. The router validates their request contract before provider admission, so unsupported fields never reach the upstream and are never silently discarded. Explicit requests receive `unsupported_adapter_feature`; automatic requests exclude incompatible native candidates and report the adapter exclusions when no eligible model remains.

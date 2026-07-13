@@ -266,6 +266,25 @@ pub struct RuntimeConfig {
     /// model endpoint before the config is accepted.
     #[serde(default)]
     pub provider_conformance_artifact: Option<String>,
+    #[serde(default)]
+    pub ingress: IngressConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IngressConfig {
+    #[serde(default = "default_max_json_body_bytes")]
+    pub max_json_body_bytes: usize,
+    #[serde(default = "default_max_multipart_body_bytes")]
+    pub max_multipart_body_bytes: usize,
+    #[serde(default = "default_body_idle_timeout_ms")]
+    pub body_idle_timeout_ms: u64,
+    #[serde(default)]
+    pub max_in_flight_requests: Option<usize>,
+    #[serde(default = "default_admission_queue_timeout_ms")]
+    pub admission_queue_timeout_ms: u64,
+    #[serde(default)]
+    pub per_credential_requests_per_minute: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -606,6 +625,20 @@ impl Default for RuntimeConfig {
             graceful_shutdown_timeout_ms: default_graceful_shutdown_timeout_ms(),
             provider_health_sampler: ProviderHealthSamplerConfig::default(),
             provider_conformance_artifact: None,
+            ingress: IngressConfig::default(),
+        }
+    }
+}
+
+impl Default for IngressConfig {
+    fn default() -> Self {
+        Self {
+            max_json_body_bytes: default_max_json_body_bytes(),
+            max_multipart_body_bytes: default_max_multipart_body_bytes(),
+            body_idle_timeout_ms: default_body_idle_timeout_ms(),
+            max_in_flight_requests: None,
+            admission_queue_timeout_ms: default_admission_queue_timeout_ms(),
+            per_credential_requests_per_minute: None,
         }
     }
 }
@@ -718,6 +751,22 @@ fn default_llm_judge_timeout_ms() -> u64 {
 
 fn default_graceful_shutdown_timeout_ms() -> u64 {
     30_000
+}
+
+fn default_max_json_body_bytes() -> usize {
+    2 * 1024 * 1024
+}
+
+fn default_max_multipart_body_bytes() -> usize {
+    32 * 1024 * 1024
+}
+
+fn default_body_idle_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_admission_queue_timeout_ms() -> u64 {
+    100
 }
 
 fn default_provider_health_interval_ms() -> u64 {
@@ -1234,6 +1283,41 @@ impl RuntimeConfig {
             anyhow::ensure!(
                 !path.trim().is_empty(),
                 "runtime.provider_conformance_artifact cannot be empty"
+            );
+        }
+        self.ingress.validate()?;
+        Ok(())
+    }
+}
+
+impl IngressConfig {
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.max_json_body_bytes > 0,
+            "runtime.ingress.max_json_body_bytes must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.max_multipart_body_bytes > 0,
+            "runtime.ingress.max_multipart_body_bytes must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.body_idle_timeout_ms > 0,
+            "runtime.ingress.body_idle_timeout_ms must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.admission_queue_timeout_ms > 0,
+            "runtime.ingress.admission_queue_timeout_ms must be greater than zero"
+        );
+        if let Some(limit) = self.max_in_flight_requests {
+            anyhow::ensure!(
+                limit > 0,
+                "runtime.ingress.max_in_flight_requests must be greater than zero"
+            );
+        }
+        if let Some(limit) = self.per_credential_requests_per_minute {
+            anyhow::ensure!(
+                limit > 0,
+                "runtime.ingress.per_credential_requests_per_minute must be greater than zero"
             );
         }
         Ok(())
@@ -1791,6 +1875,7 @@ mod tests {
             "safety",
             "sticky_routing",
             "runtime",
+            "runtime.ingress",
             "runtime.provider_health_sampler",
             "scoring",
             "scoring.balanced",
@@ -2129,6 +2214,37 @@ mod tests {
                 .to_string()
                 .contains("runtime.provider_health_sampler.interval_ms")
         );
+    }
+
+    #[test]
+    fn rejects_zero_ingress_resource_limits() {
+        type ConfigMutation = fn(&mut RouterConfig);
+        let cases: [(&str, ConfigMutation); 6] = [
+            ("max_json_body_bytes", |config| {
+                config.runtime.ingress.max_json_body_bytes = 0
+            }),
+            ("max_multipart_body_bytes", |config| {
+                config.runtime.ingress.max_multipart_body_bytes = 0
+            }),
+            ("body_idle_timeout_ms", |config| {
+                config.runtime.ingress.body_idle_timeout_ms = 0
+            }),
+            ("max_in_flight_requests", |config| {
+                config.runtime.ingress.max_in_flight_requests = Some(0)
+            }),
+            ("admission_queue_timeout_ms", |config| {
+                config.runtime.ingress.admission_queue_timeout_ms = 0
+            }),
+            ("per_credential_requests_per_minute", |config| {
+                config.runtime.ingress.per_credential_requests_per_minute = Some(0)
+            }),
+        ];
+        for (field, mutate) in cases {
+            let mut config = valid_config();
+            mutate(&mut config);
+            let error = config.validate().expect_err("zero ingress limit rejected");
+            assert!(error.to_string().contains(field), "{error}");
+        }
     }
 
     #[test]

@@ -224,7 +224,20 @@ fn defs() -> Value {
             "properties": {
                 "graceful_shutdown_timeout_ms": integer_min_default(1, 30000),
                 "provider_health_sampler": ref_schema("ProviderHealthSamplerConfig"),
-                "provider_conformance_artifact": nullable_string()
+                "provider_conformance_artifact": nullable_string(),
+                "ingress": ref_schema("IngressConfig")
+            }
+        },
+        "IngressConfig": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "max_json_body_bytes": integer_min_default(1, 2097152),
+                "max_multipart_body_bytes": integer_min_default(1, 33554432),
+                "body_idle_timeout_ms": integer_min_default(1, 30000),
+                "max_in_flight_requests": nullable_integer_min(1),
+                "admission_queue_timeout_ms": integer_min_default(1, 100),
+                "per_credential_requests_per_minute": nullable_integer_min(1)
             }
         },
         "ProviderHealthSamplerConfig": {
@@ -540,6 +553,10 @@ mod tests {
         assert!(
             schema["$defs"]["RuntimeConfig"]["properties"]["provider_conformance_artifact"]
                 .is_object()
+        );
+        assert_eq!(
+            schema["$defs"]["IngressConfig"]["properties"]["max_json_body_bytes"]["default"],
+            2_097_152
         );
     }
 }

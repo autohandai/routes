@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 pub fn spec() -> Value {
-    json!({
+    let mut spec = json!({
         "openapi": "3.1.0",
         "info": {
             "title": "Autohand Router",
@@ -590,7 +590,35 @@ pub fn spec() -> Value {
             },
             "schemas": schemas()
         }
-    })
+    });
+    for (path, method) in [
+        ("/v1/router/raw", "post"),
+        ("/v1/router/classify", "post"),
+        ("/v1/router/multimodel", "post"),
+        ("/v1/router/providers", "get"),
+        ("/v1/router/{provider}", "post"),
+        ("/v1/models", "get"),
+        ("/v1/chat/completions", "post"),
+        ("/v1/responses", "post"),
+        ("/v1/embeddings", "post"),
+        ("/v1/images/generations", "post"),
+        ("/v1/audio/speech", "post"),
+        ("/v1/audio/transcriptions", "post"),
+        ("/v1/audio/translations", "post"),
+        ("/metrics", "get"),
+        ("/metrics/prometheus", "get"),
+    ] {
+        let responses = spec["paths"][path][method]["responses"]
+            .as_object_mut()
+            .expect("protected OpenAPI operation has responses");
+        for status in ["408", "429", "503"] {
+            responses.insert(
+                status.to_string(),
+                json!({ "$ref": "#/components/responses/RouterError" }),
+            );
+        }
+    }
+    spec
 }
 
 fn schemas() -> Value {
@@ -1172,8 +1200,10 @@ mod tests {
             "/v1/embeddings",
             "/v1/images/generations",
             "/v1/audio/speech",
+            "/v1/audio/transcriptions",
+            "/v1/audio/translations",
         ] {
-            for status in ["400", "413", "415", "422"] {
+            for status in ["400", "408", "413", "415", "422", "429", "503"] {
                 assert_eq!(
                     spec["paths"][path]["post"]["responses"][status]["$ref"],
                     "#/components/responses/RouterError",

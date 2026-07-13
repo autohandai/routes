@@ -1,7 +1,7 @@
 use crate::{
     accounting::{BudgetAccounting, BudgetReservation},
     classifier::{JudgeMetricsSnapshot, SmartClassifier, classify_safety_deterministically},
-    config::{BudgetConfig, RouterConfig, SafetyRoutingAction, bind_is_loopback},
+    config::{BudgetConfig, IngressConfig, RouterConfig, SafetyRoutingAction, bind_is_loopback},
     openapi,
     provider::{
         ProviderClient, ProviderHealth, ProviderHealthStatus, ProviderResponse,
@@ -30,8 +30,8 @@ use crate::{
 use anyhow::Result;
 use axum::{
     Json, Router,
-    body::Body,
-    extract::{FromRequest, Multipart, Path, State, rejection::JsonRejection},
+    body::{Body, to_bytes},
+    extract::{DefaultBodyLimit, FromRequest, Multipart, Path, State},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -44,6 +44,7 @@ use serde_json::Value;
 use std::{
     collections::HashMap,
     fmt::Write as _,
+    io,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -52,7 +53,7 @@ use std::{
 };
 use tokio::{
     net::TcpListener,
-    sync::oneshot,
+    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
     time::{sleep, timeout},
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -95,41 +96,187 @@ struct ModelEligibilityRequest {
 
 struct OpenAiJson<T>(T);
 
+struct OpenAiMultipart(Multipart);
+
 #[async_trait::async_trait]
-impl<S, T> FromRequest<S> for OpenAiJson<T>
+impl<T> FromRequest<Arc<AppState>> for OpenAiJson<T>
 where
-    S: Send + Sync,
     T: DeserializeOwned,
 {
     type Rejection = Response;
 
     async fn from_request(
         request: Request<Body>,
-        state: &S,
+        state: &Arc<AppState>,
     ) -> std::result::Result<Self, Self::Rejection> {
-        match Json::<T>::from_request(request, state).await {
-            Ok(Json(value)) => Ok(Self(value)),
-            Err(rejection) => Err(json_rejection_response(rejection)),
+        let content_type_is_json = request
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                let media_type = value.split(';').next().unwrap_or_default().trim();
+                media_type == "application/json" || media_type.ends_with("+json")
+            });
+        if !content_type_is_json {
+            return Err(invalid_request_status_response(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "expected request with `Content-Type: application/json`",
+                None,
+                "unsupported_media_type",
+            ));
         }
+        let limit = state.engine.config().runtime.ingress.max_json_body_bytes;
+        let body = to_bytes(request.into_body(), limit)
+            .await
+            .map_err(|error| {
+                let message = error.to_string();
+                if message.contains("length limit") {
+                    invalid_request_status_response(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        &format!("JSON request body exceeds configured {limit}-byte limit"),
+                        None,
+                        "request_too_large",
+                    )
+                } else if message.contains("body idle timeout") {
+                    invalid_request_status_response(
+                        StatusCode::REQUEST_TIMEOUT,
+                        "request body idle timeout exceeded",
+                        None,
+                        "request_timeout",
+                    )
+                } else {
+                    invalid_request_status_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("failed to read JSON request body: {message}"),
+                        None,
+                        "invalid_json",
+                    )
+                }
+            })?;
+        serde_json::from_slice::<T>(&body)
+            .map(Self)
+            .map_err(|error| {
+                let status = if error.classify() == serde_json::error::Category::Data {
+                    StatusCode::UNPROCESSABLE_ENTITY
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                invalid_request_status_response(status, &error.to_string(), None, "invalid_json")
+            })
     }
 }
 
-fn json_rejection_response(rejection: JsonRejection) -> Response {
-    let status = rejection.status();
-    let code = match status {
-        StatusCode::PAYLOAD_TOO_LARGE => "request_too_large",
-        StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported_media_type",
-        _ => "invalid_json",
-    };
+#[async_trait::async_trait]
+impl FromRequest<Arc<AppState>> for OpenAiMultipart {
+    type Rejection = Response;
+
+    async fn from_request(
+        request: Request<Body>,
+        state: &Arc<AppState>,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        Multipart::from_request(request, state)
+            .await
+            .map(Self)
+            .map_err(|rejection| {
+                let body_text = rejection.body_text();
+                let timed_out = body_text.contains("body idle timeout");
+                let status = if timed_out {
+                    StatusCode::REQUEST_TIMEOUT
+                } else {
+                    rejection.status()
+                };
+                let code = if status == StatusCode::PAYLOAD_TOO_LARGE {
+                    "request_too_large"
+                } else if timed_out {
+                    "request_timeout"
+                } else {
+                    "invalid_multipart"
+                };
+                invalid_request_status_response(status, &body_text, None, code)
+            })
+    }
+}
+
+fn invalid_request_status_response(
+    status: StatusCode,
+    message: &str,
+    param: Option<&str>,
+    code: &str,
+) -> Response {
     (
         status,
         Json(ProviderClient::invalid_request_error_json(
-            rejection.body_text(),
-            None,
+            message,
+            param,
             Some(code),
         )),
     )
         .into_response()
+}
+
+#[derive(Clone)]
+pub struct IngressController {
+    config: IngressConfig,
+    permits: Option<Arc<Semaphore>>,
+    rate_windows: Arc<Mutex<HashMap<String, CredentialRateWindow>>>,
+}
+
+#[derive(Clone, Copy)]
+struct CredentialRateWindow {
+    started: Instant,
+    requests: u64,
+}
+
+impl IngressController {
+    pub fn new(config: &IngressConfig) -> Self {
+        Self {
+            config: config.clone(),
+            permits: config
+                .max_in_flight_requests
+                .map(|limit| Arc::new(Semaphore::new(limit))),
+            rate_windows: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn check_rate(&self, credential: &str, now: Instant) -> bool {
+        let Some(limit) = self.config.per_credential_requests_per_minute else {
+            return true;
+        };
+        let Ok(mut windows) = self.rate_windows.lock() else {
+            return false;
+        };
+        let window = windows
+            .entry(credential.to_string())
+            .or_insert(CredentialRateWindow {
+                started: now,
+                requests: 0,
+            });
+        if now.duration_since(window.started) >= Duration::from_secs(60) {
+            *window = CredentialRateWindow {
+                started: now,
+                requests: 0,
+            };
+        }
+        if window.requests >= limit {
+            return false;
+        }
+        window.requests += 1;
+        true
+    }
+
+    async fn acquire(&self) -> std::result::Result<Option<OwnedSemaphorePermit>, ()> {
+        let Some(permits) = &self.permits else {
+            return Ok(None);
+        };
+        timeout(
+            Duration::from_millis(self.config.admission_queue_timeout_ms),
+            permits.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| ())?
+        .map(Some)
+        .map_err(|_| ())
+    }
 }
 
 #[derive(Clone)]
@@ -143,6 +290,7 @@ pub struct AppState {
     pub semantic_cache: SemanticCache,
     pub shadow_eval: ShadowEvalLogger,
     pub sticky_routing: StickyRoutingStore,
+    pub ingress: IngressController,
 }
 
 #[derive(Clone)]
@@ -187,25 +335,26 @@ impl RequestAuthenticator {
         })
     }
 
+    #[cfg(test)]
     fn authorized(&self, headers: &HeaderMap) -> bool {
+        self.credential_scope(headers).is_some()
+    }
+
+    fn credential_scope(&self, headers: &HeaderMap) -> Option<String> {
         if self.tokens.is_empty() {
-            return true;
+            return Some("anonymous".to_string());
         }
-        let Some(value) = headers
+        let value = headers
             .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-        else {
-            return false;
-        };
-        let Some((scheme, token)) = value.split_once(' ') else {
-            return false;
-        };
+            .and_then(|value| value.to_str().ok())?;
+        let (scheme, token) = value.split_once(' ')?;
         if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
-            return false;
+            return None;
         }
         self.tokens
             .iter()
-            .any(|allowed| constant_time_eq(allowed.as_bytes(), token.as_bytes()))
+            .position(|allowed| constant_time_eq(allowed.as_bytes(), token.as_bytes()))
+            .map(|index| format!("credential-{index}"))
     }
 
     fn is_enabled(&self) -> bool {
@@ -767,6 +916,12 @@ fn snapshot_upstream_outcomes(
 
 pub fn app(state: AppState) -> Router {
     let state = Arc::new(state);
+    let max_multipart_body_bytes = state
+        .engine
+        .config()
+        .runtime
+        .ingress
+        .max_multipart_body_bytes;
     Router::new()
         .route("/health", get(health))
         .route("/openapi.json", get(openapi_json))
@@ -785,6 +940,7 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/audio/translations", post(audio_translations))
         .route("/metrics", get(metrics))
         .route("/metrics/prometheus", get(prometheus_metrics))
+        .layer(DefaultBodyLimit::max(max_multipart_body_bytes))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             request_context,
@@ -917,7 +1073,9 @@ async fn request_context(
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    if !is_public_request(&request) && !state.auth.authorized(request.headers()) {
+    let public = is_public_request(&request);
+    let credential = state.auth.credential_scope(request.headers());
+    if !public && credential.is_none() {
         state.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
         let mut response = (
             StatusCode::UNAUTHORIZED,
@@ -933,9 +1091,100 @@ async fn request_context(
         return response;
     }
 
+    if !public {
+        let limit = request_body_limit(&state.ingress.config, request.uri().path());
+        if request
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|length| length > limit)
+        {
+            let mut response = invalid_request_status_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &format!("request body exceeds configured {limit}-byte limit"),
+                None,
+                "request_too_large",
+            );
+            insert_request_id(response.headers_mut(), &request_id);
+            return response;
+        }
+        if !state
+            .ingress
+            .check_rate(credential.as_deref().unwrap_or("anonymous"), Instant::now())
+        {
+            let mut response = invalid_request_status_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                "credential request rate limit exceeded",
+                None,
+                "rate_limit_exceeded",
+            );
+            insert_request_id(response.headers_mut(), &request_id);
+            return response;
+        }
+    }
+
+    let _admission_permit = if public {
+        None
+    } else {
+        match state.ingress.acquire().await {
+            Ok(permit) => permit,
+            Err(()) => {
+                let mut response = invalid_request_status_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "router admission queue is saturated",
+                    None,
+                    "router_overloaded",
+                );
+                insert_request_id(response.headers_mut(), &request_id);
+                return response;
+            }
+        }
+    };
+
+    let request = with_body_idle_timeout(
+        request,
+        Duration::from_millis(state.ingress.config.body_idle_timeout_ms),
+    );
+
     let mut response = next.run(request).await;
     insert_request_id(response.headers_mut(), &request_id);
     response
+}
+
+fn request_body_limit(config: &IngressConfig, path: &str) -> usize {
+    if matches!(path, "/v1/audio/transcriptions" | "/v1/audio/translations") {
+        config.max_multipart_body_bytes
+    } else {
+        config.max_json_body_bytes
+    }
+}
+
+fn with_body_idle_timeout(request: Request<Body>, idle_timeout: Duration) -> Request<Body> {
+    let (parts, body) = request.into_parts();
+    let stream = stream::unfold(
+        (body.into_data_stream(), false),
+        move |(mut body, finished)| async move {
+            if finished {
+                return None;
+            }
+            match timeout(idle_timeout, body.next()).await {
+                Ok(Some(Ok(bytes))) => Some((Ok::<Bytes, io::Error>(bytes), (body, false))),
+                Ok(Some(Err(error))) => {
+                    Some((Err(io::Error::other(error.to_string())), (body, true)))
+                }
+                Ok(None) => None,
+                Err(_) => Some((
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "request body idle timeout exceeded",
+                    )),
+                    (body, true),
+                )),
+            }
+        },
+    );
+    Request::from_parts(parts, Body::from_stream(stream))
 }
 
 fn is_public_request(request: &Request<Body>) -> bool {
@@ -2692,7 +2941,7 @@ async fn audio_speech(
 
 async fn audio_transcriptions(
     State(state): State<Arc<AppState>>,
-    multipart: Multipart,
+    OpenAiMultipart(multipart): OpenAiMultipart,
 ) -> Response {
     let request = match parse_audio_multipart(multipart).await {
         Ok(request) => request,
@@ -2707,7 +2956,10 @@ async fn audio_transcriptions(
     audio_multipart_endpoint(state, request, AudioMultipartEndpoint::Transcription).await
 }
 
-async fn audio_translations(State(state): State<Arc<AppState>>, multipart: Multipart) -> Response {
+async fn audio_translations(
+    State(state): State<Arc<AppState>>,
+    OpenAiMultipart(multipart): OpenAiMultipart,
+) -> Response {
     let request = match parse_audio_multipart(multipart).await {
         Ok(request) => request,
         Err(message) => {
@@ -5365,13 +5617,13 @@ fn elapsed_millis_u32(started: Instant) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, RequestAuthenticator, RouterMetrics, RoutingEndpoint, StreamingUsageParser,
-        UsageAccounting, app, budget_violation, constant_time_eq, is_known_router_model,
-        legacy_raw_difficulty, model_ineligibility_reason, parse_router_model_policy,
-        prometheus_escape, redact_sensitive_text, semantic_cache_identity_for_chat,
-        semantic_cache_identity_for_responses, semantic_cache_plan_for_route,
-        semantic_cache_safe_for_request, supported_model_ids, supported_provider_names,
-        usage_from_value,
+        AppState, IngressController, RequestAuthenticator, RouterMetrics, RoutingEndpoint,
+        StreamingUsageParser, UsageAccounting, app, budget_violation, constant_time_eq,
+        is_known_router_model, legacy_raw_difficulty, model_ineligibility_reason,
+        parse_router_model_policy, prometheus_escape, redact_sensitive_text,
+        semantic_cache_identity_for_chat, semantic_cache_identity_for_responses,
+        semantic_cache_plan_for_route, semantic_cache_safe_for_request, supported_model_ids,
+        supported_provider_names, usage_from_value,
     };
     use crate::{
         classifier::SmartClassifier,
@@ -5401,8 +5653,10 @@ mod tests {
         routing::post,
     };
     use bytes::Bytes;
+    use futures_util::{future::join_all, stream as futures_stream};
     use serde_json::Value;
     use std::{
+        io,
         sync::{
             Arc, Mutex,
             atomic::{AtomicU64, Ordering as AtomicOrdering},
@@ -5719,6 +5973,186 @@ mod tests {
         let error = oversized.json::<Value>().await.unwrap();
         assert_eq!(error["error"]["code"], "request_too_large");
         assert_eq!(calls.load(AtomicOrdering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn ingress_rejects_oversized_json_and_multipart_with_request_ids() {
+        let (upstream_url, calls) = spawn_counting_chat_upstream("cache-model").await;
+        let mut config = semantic_cache_config(upstream_url);
+        config.runtime.ingress.max_json_body_bytes = 128;
+        config.runtime.ingress.max_multipart_body_bytes = 256;
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let json_response = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "cache-model",
+                "messages": [{"role": "user", "content": "x".repeat(256)}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(json_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            json_response
+                .headers()
+                .contains_key("x-autohand-router-request-id")
+        );
+        let error = json_response.json::<Value>().await.unwrap();
+        assert_eq!(error["error"]["code"], "request_too_large");
+
+        let multipart_response = client
+            .post(format!("{router_url}/v1/audio/transcriptions"))
+            .multipart(
+                reqwest::multipart::Form::new()
+                    .text("model", "cache-model")
+                    .part(
+                        "file",
+                        reqwest::multipart::Part::bytes(vec![b'a'; 512]).file_name("large.wav"),
+                    ),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(multipart_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            multipart_response
+                .headers()
+                .contains_key("x-autohand-router-request-id")
+        );
+        let error = multipart_response.json::<Value>().await.unwrap();
+        assert_eq!(error["error"]["code"], "request_too_large");
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn ingress_times_out_a_stalled_request_body_without_timing_out_streaming_response() {
+        let upstream_url = spawn_slow_streaming_chat_upstream().await;
+        let mut config = semantic_cache_config(upstream_url);
+        config.runtime.ingress.body_idle_timeout_ms = 20;
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let chunks = futures_stream::unfold(0_u8, |step| async move {
+            match step {
+                0 => Some((
+                    Ok::<Bytes, io::Error>(Bytes::from_static(
+                        br#"{"model":"cache-model","messages":[{"role":"user","content":"#,
+                    )),
+                    1,
+                )),
+                1 => {
+                    sleep(Duration::from_millis(75)).await;
+                    Some((Ok(Bytes::from_static(br#"hello"}]}"#)), 2))
+                }
+                _ => None,
+            }
+        });
+        let stalled = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(reqwest::Body::wrap_stream(chunks))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stalled.status(), StatusCode::REQUEST_TIMEOUT);
+        let error = stalled.json::<Value>().await.unwrap();
+        assert_eq!(error["error"]["code"], "request_timeout");
+
+        let streaming = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "cache-model",
+                "messages": [{"role": "user", "content": "stream slowly"}],
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(streaming.status().is_success());
+        let body = streaming.text().await.unwrap();
+        assert!(body.contains("[DONE]"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn ingress_enforces_global_admission_and_per_credential_fairness() {
+        let (upstream_url, calls) = spawn_delayed_chat_upstream(100).await;
+        let mut config = semantic_cache_config(upstream_url);
+        config.auth.bearer_tokens = vec!["token-a".to_string(), "token-b".to_string()];
+        config.runtime.ingress.max_in_flight_requests = Some(1);
+        config.runtime.ingress.admission_queue_timeout_ms = 10;
+        config.runtime.ingress.per_credential_requests_per_minute = Some(1);
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+        let request_body = serde_json::json!({
+            "model": "cache-model",
+            "messages": [{"role": "user", "content": "hold admission"}]
+        });
+
+        let first_client = client.clone();
+        let first_url = router_url.clone();
+        let first_body = request_body.clone();
+        let first = tokio::spawn(async move {
+            first_client
+                .post(format!("{first_url}/v1/chat/completions"))
+                .bearer_auth("token-a")
+                .json(&first_body)
+                .send()
+                .await
+                .unwrap()
+        });
+        for _ in 0..50 {
+            if calls.load(AtomicOrdering::Relaxed) == 1 {
+                break;
+            }
+            sleep(Duration::from_millis(2)).await;
+        }
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 1);
+
+        let flood = (0..8).map(|_| {
+            client
+                .post(format!("{router_url}/v1/chat/completions"))
+                .bearer_auth("token-b")
+                .json(&request_body)
+                .send()
+        });
+        let responses = join_all(flood).await;
+        let mut overloaded = 0;
+        let mut rate_limited = 0;
+        for response in responses {
+            let response = response.unwrap();
+            assert!(
+                response
+                    .headers()
+                    .contains_key("x-autohand-router-request-id")
+            );
+            match response.status() {
+                StatusCode::SERVICE_UNAVAILABLE => {
+                    overloaded += 1;
+                    let error = response.json::<Value>().await.unwrap();
+                    assert_eq!(error["error"]["code"], "router_overloaded");
+                }
+                StatusCode::TOO_MANY_REQUESTS => {
+                    rate_limited += 1;
+                    let error = response.json::<Value>().await.unwrap();
+                    assert_eq!(error["error"]["code"], "rate_limit_exceeded");
+                }
+                status => panic!("unexpected flood response {status}"),
+            }
+        }
+        assert!(overloaded >= 1);
+        assert!(rate_limited >= 1);
+        assert!(first.await.unwrap().status().is_success());
+
+        let token_a_limited = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .bearer_auth("token-a")
+            .json(&request_body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(token_a_limited.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]
@@ -8113,6 +8547,76 @@ mod tests {
         (format!("http://{addr}"), calls)
     }
 
+    async fn spawn_delayed_chat_upstream(delay_ms: u64) -> (String, Arc<AtomicU64>) {
+        async fn chat(
+            axum::extract::State((delay_ms, calls)): axum::extract::State<(u64, Arc<AtomicU64>)>,
+        ) -> axum::response::Response {
+            calls.fetch_add(1, AtomicOrdering::Relaxed);
+            sleep(Duration::from_millis(delay_ms)).await;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": "chatcmpl-delayed",
+                    "object": "chat.completion",
+                    "model": "cache-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
+                })),
+            )
+                .into_response()
+        }
+
+        let calls = Arc::new(AtomicU64::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(chat))
+            .with_state((delay_ms, calls.clone()));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), calls)
+    }
+
+    async fn spawn_slow_streaming_chat_upstream() -> String {
+        async fn chat() -> axum::response::Response {
+            let chunks = futures_stream::unfold(0_u8, |step| async move {
+                if step >= 3 {
+                    return None;
+                }
+                if step > 0 {
+                    sleep(Duration::from_millis(50)).await;
+                }
+                let chunk = match step {
+                    0 => "data: {\"choices\":[{\"delta\":{\"content\":\"slow\"}}]}\n\n",
+                    1 => {
+                        "data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n"
+                    }
+                    _ => "data: [DONE]\n\n",
+                };
+                Some((Ok::<Bytes, io::Error>(Bytes::from(chunk)), step + 1))
+            });
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                Body::from_stream(chunks),
+            )
+                .into_response()
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route("/v1/chat/completions", post(chat));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
     async fn spawn_counting_responses_upstream(model_id: &'static str) -> (String, Arc<AtomicU64>) {
         async fn responses(
             axum::extract::State((model_id, calls)): axum::extract::State<(
@@ -8614,6 +9118,7 @@ mod tests {
             shadow_eval: crate::shadow_eval::ShadowEvalLogger::new(&config.shadow_eval),
             sticky_routing: crate::sticky::StickyRoutingStore::from_config(&config.sticky_routing)
                 .unwrap(),
+            ingress: IngressController::new(&config.runtime.ingress),
         };
         tokio::spawn(async move {
             axum::serve(listener, app(state)).await.unwrap();

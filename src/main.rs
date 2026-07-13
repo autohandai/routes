@@ -15,7 +15,7 @@ use autohand_router::{
     provider::ProviderClient,
     router::RoutingEngine,
     semantic_cache::SemanticCache,
-    server::{self, AppState, RequestAuthenticator},
+    server::{self, AppState, IngressController, RequestAuthenticator},
     shadow_eval::ShadowEvalLogger,
     sticky::StickyRoutingStore,
     telemetry::DecisionLogger,
@@ -228,6 +228,7 @@ async fn main() -> Result<()> {
                 semantic_cache: SemanticCache::from_config(&config.cache.semantic)?,
                 shadow_eval: ShadowEvalLogger::new(&config.shadow_eval),
                 sticky_routing: StickyRoutingStore::from_config(&config.sticky_routing)?,
+                ingress: IngressController::new(&config.runtime.ingress),
             };
             server::serve(state, &bind).await
         }

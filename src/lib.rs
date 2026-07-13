@@ -8,6 +8,7 @@ pub mod conformance;
 pub mod eval;
 mod file_state;
 pub mod health;
+pub mod jsonl_writer;
 pub mod judge;
 pub mod load;
 pub mod metrics;

@@ -200,13 +200,18 @@ shadow_eval:
   sample_rate: 0.01
   output_path: router.shadow-eval.jsonl
   include_bodies: false
+  writer_queue_capacity: 1024
+  max_file_bytes: 67108864
+  retained_files: 5
+  max_pending_tasks: 64
+  max_concurrent_tasks: 4
   judge:
     enabled: true
     model: qwen-classifier
     timeout_ms: 5000
 ```
 
-The router returns the selected model response normally, then sends the same prompt to the next scored candidate in the background. The JSONL artifact records selected/shadow model IDs, providers, HTTP status, latency, body sizes, optional truncated bodies, and a winner judgement.
+The router returns the selected model response normally, then sends the same prompt to the next scored candidate through a bounded background pool. `max_pending_tasks` bounds running plus queued evaluations and `max_concurrent_tasks` bounds simultaneous provider work. The JSONL artifact records selected/shadow model IDs, providers, HTTP status, latency, body sizes, optional truncated bodies, and a winner judgement.
 
 ## Safety Routing
 
@@ -264,9 +269,12 @@ Decision traces are optional JSONL records for building evaluation datasets from
 telemetry:
   decision_log_path: ./data/router-decisions.jsonl
   include_inputs: false
+  queue_capacity: 1024
+  max_file_bytes: 67108864
+  retained_files: 5
 ```
 
-When enabled, `/v1/router/multimodel` and automatic chat routing write selected model/provider, classifications, token estimates, policy, candidates, and fallback status. Inputs are redacted unless `include_inputs` is set to `true`.
+When enabled, `/v1/router/multimodel` and automatic chat routing enqueue selected model/provider, classifications, token estimates, policy, candidates, and fallback status without awaiting disk I/O. Inputs are redacted unless `include_inputs` is set to `true`. Dedicated FIFO writers rotate at `max_file_bytes`, retain the configured number of files, drop new records when their bounded queue is full, and expose written/dropped/error/rotation counters. Graceful shutdown drains admitted background evaluations and flushes both JSONL queues within the configured shutdown window.
 
 ## Auth
 

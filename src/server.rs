@@ -53,7 +53,7 @@ use std::{
 };
 use tokio::{
     net::TcpListener,
-    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
+    sync::{Notify, OwnedSemaphorePermit, Semaphore, oneshot},
     time::{sleep, timeout},
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -221,6 +221,86 @@ pub struct IngressController {
     rate_windows: Arc<Mutex<HashMap<String, CredentialRateWindow>>>,
 }
 
+#[derive(Clone)]
+pub struct BackgroundTasks {
+    pending: Arc<Semaphore>,
+    concurrent: Arc<Semaphore>,
+    active: Arc<AtomicU64>,
+    dropped: Arc<AtomicU64>,
+    notify: Arc<Notify>,
+}
+
+pub struct BackgroundTaskPermit {
+    _pending: OwnedSemaphorePermit,
+    concurrent: Arc<Semaphore>,
+    active: Arc<AtomicU64>,
+    notify: Arc<Notify>,
+}
+
+impl BackgroundTasks {
+    pub fn new(max_pending: usize, max_concurrent: usize) -> Self {
+        Self {
+            pending: Arc::new(Semaphore::new(max_pending)),
+            concurrent: Arc::new(Semaphore::new(max_concurrent)),
+            active: Arc::new(AtomicU64::new(0)),
+            dropped: Arc::new(AtomicU64::new(0)),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    fn try_start(&self) -> Option<BackgroundTaskPermit> {
+        let pending = match self.pending.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+        };
+        self.active.fetch_add(1, Ordering::Relaxed);
+        Some(BackgroundTaskPermit {
+            _pending: pending,
+            concurrent: self.concurrent.clone(),
+            active: self.active.clone(),
+            notify: self.notify.clone(),
+        })
+    }
+
+    async fn drain(&self, timeout_duration: Duration) -> bool {
+        timeout(timeout_duration, async {
+            while self.active.load(Ordering::Relaxed) > 0 {
+                let notified = self.notify.notified();
+                if self.active.load(Ordering::Relaxed) == 0 {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    fn active(&self) -> u64 {
+        self.active.load(Ordering::Relaxed)
+    }
+}
+
+impl BackgroundTaskPermit {
+    async fn enter(&self) -> Option<OwnedSemaphorePermit> {
+        self.concurrent.clone().acquire_owned().await.ok()
+    }
+}
+
+impl Drop for BackgroundTaskPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CredentialRateWindow {
     started: Instant,
@@ -291,6 +371,7 @@ pub struct AppState {
     pub shadow_eval: ShadowEvalLogger,
     pub sticky_routing: StickyRoutingStore,
     pub ingress: IngressController,
+    pub background_tasks: BackgroundTasks,
 }
 
 #[derive(Clone)]
@@ -446,6 +527,15 @@ struct MetricsSnapshot {
     histograms: Vec<crate::metrics::HistogramSnapshot>,
     budget: BudgetSnapshot,
     judge: JudgeMetricsSnapshot,
+    lifecycle: BackgroundLifecycleSnapshot,
+}
+
+#[derive(Debug, Serialize)]
+struct BackgroundLifecycleSnapshot {
+    decision_writer: crate::jsonl_writer::JsonlWriterStats,
+    shadow_writer: crate::jsonl_writer::JsonlWriterStats,
+    shadow_tasks_active: u64,
+    shadow_tasks_dropped: u64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -507,6 +597,7 @@ impl RouterMetrics {
         budget: Option<&BudgetConfig>,
         accounting: &BudgetAccounting,
         judge: JudgeMetricsSnapshot,
+        lifecycle: BackgroundLifecycleSnapshot,
     ) -> MetricsSnapshot {
         let estimated_cost_micros = self.estimated_cost_micros.load(Ordering::Relaxed);
         MetricsSnapshot {
@@ -551,6 +642,7 @@ impl RouterMetrics {
             histograms: crate::metrics::snapshots(),
             budget: BudgetSnapshot::from_config(budget, accounting).await,
             judge,
+            lifecycle,
         }
     }
 
@@ -990,10 +1082,27 @@ pub fn app(state: AppState) -> Router {
 
 pub async fn serve(state: AppState, bind: &str) -> Result<()> {
     let shutdown_timeout = state.engine.config().runtime.graceful_shutdown_timeout();
+    let telemetry = state.telemetry.clone();
+    let shadow_eval = state.shadow_eval.clone();
+    let background_tasks = state.background_tasks.clone();
     start_provider_health_sampler(&state);
     let listener = TcpListener::bind(bind).await?;
     info!("listening on http://{}", listener.local_addr()?);
     serve_with_shutdown_timeout(listener, app(state), shutdown_timeout).await?;
+    let drained = background_tasks.drain(shutdown_timeout).await;
+    let (telemetry_stats, shadow_stats) = tokio::join!(
+        telemetry.flush(shutdown_timeout),
+        shadow_eval.flush(shutdown_timeout)
+    );
+    info!(
+        background_drained = drained,
+        background_dropped = background_tasks.dropped(),
+        decision_flushed = telemetry_stats.written,
+        decision_dropped = telemetry_stats.dropped,
+        shadow_flushed = shadow_stats.written,
+        shadow_dropped = shadow_stats.dropped,
+        "background lifecycle drain complete"
+    );
     Ok(())
 }
 
@@ -1327,7 +1436,12 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Json<MetricsSnapshot> {
     Json(
         state
             .metrics
-            .snapshot_with_budget(Some(&config.budget), &state.accounting, judge)
+            .snapshot_with_budget(
+                Some(&config.budget),
+                &state.accounting,
+                judge,
+                lifecycle_snapshot(&state),
+            )
             .await,
     )
 }
@@ -1337,7 +1451,12 @@ async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> Response {
     let judge = state.engine.classifier().judge_metrics();
     let snapshot = state
         .metrics
-        .snapshot_with_budget(Some(&config.budget), &state.accounting, judge)
+        .snapshot_with_budget(
+            Some(&config.budget),
+            &state.accounting,
+            judge,
+            lifecycle_snapshot(&state),
+        )
         .await;
     (
         [(
@@ -1347,6 +1466,15 @@ async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> Response {
         render_prometheus_metrics(&snapshot),
     )
         .into_response()
+}
+
+fn lifecycle_snapshot(state: &AppState) -> BackgroundLifecycleSnapshot {
+    BackgroundLifecycleSnapshot {
+        decision_writer: state.telemetry.stats(),
+        shadow_writer: state.shadow_eval.stats(),
+        shadow_tasks_active: state.background_tasks.active(),
+        shadow_tasks_dropped: state.background_tasks.dropped(),
+    }
 }
 
 fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
@@ -1586,6 +1714,37 @@ fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     push_upstream_outcome_metrics(&mut output, &snapshot.upstream_outcomes);
     push_budget_metrics(&mut output, &snapshot.budget);
     push_judge_metrics(&mut output, &snapshot.judge);
+    for (kind, stats) in [
+        ("decision", &snapshot.lifecycle.decision_writer),
+        ("shadow", &snapshot.lifecycle.shadow_writer),
+    ] {
+        for (outcome, value) in [
+            ("accepted", stats.accepted),
+            ("written", stats.written),
+            ("dropped", stats.dropped),
+            ("errors", stats.errors),
+            ("rotations", stats.rotations),
+        ] {
+            push_labeled_metric(
+                &mut output,
+                "autohand_router_jsonl_writer_events_total",
+                &[("writer", kind), ("outcome", outcome)],
+                value,
+            );
+        }
+    }
+    push_labeled_metric(
+        &mut output,
+        "autohand_router_background_tasks",
+        &[("state", "active")],
+        snapshot.lifecycle.shadow_tasks_active,
+    );
+    push_labeled_metric(
+        &mut output,
+        "autohand_router_background_tasks",
+        &[("state", "dropped")],
+        snapshot.lifecycle.shadow_tasks_dropped,
+    );
     output.push_str(&crate::metrics::prometheus());
     output
 }
@@ -5419,7 +5578,18 @@ fn spawn_shadow_eval(
     selected_body: Bytes,
     dispatch: ShadowEvalDispatch,
 ) {
+    let Some(task_permit) = state.background_tasks.try_start() else {
+        state
+            .metrics
+            .shadow_eval_errors
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    };
     tokio::spawn(async move {
+        let Some(_concurrency_permit) = task_permit.enter().await else {
+            return;
+        };
+        let _task_permit = task_permit;
         let config = state.engine.config();
         let selected_provider = selected_model.provider.clone();
         let selected_model_id = selected_model.id.clone();
@@ -5832,9 +6002,9 @@ fn elapsed_millis_u32(started: Instant) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, IngressController, RequestAuthenticator, RouterMetrics, RoutingEndpoint,
-        StreamingUsageParser, UsageAccounting, app, budget_violation, constant_time_eq,
-        is_known_router_model, legacy_raw_difficulty, model_ineligibility_reason,
+        AppState, BackgroundTasks, IngressController, RequestAuthenticator, RouterMetrics,
+        RoutingEndpoint, StreamingUsageParser, UsageAccounting, app, budget_violation,
+        constant_time_eq, is_known_router_model, legacy_raw_difficulty, model_ineligibility_reason,
         parse_router_model_policy, prometheus_escape, redact_sensitive_text,
         semantic_cache_identity_for_chat, semantic_cache_identity_for_responses,
         semantic_cache_plan_for_route, semantic_cache_safe_for_request, supported_model_ids,
@@ -5906,6 +6076,23 @@ mod tests {
             super::request_endpoint_label("/v1/router/configured-provider"),
             "provider_router"
         );
+    }
+
+    #[tokio::test]
+    async fn background_task_admission_is_bounded_and_drain_waits_for_active_work() {
+        let tasks = BackgroundTasks::new(2, 1);
+        let first = tasks.try_start().expect("first task admitted");
+        let second = tasks.try_start().expect("second task queued");
+        assert!(tasks.try_start().is_none());
+        assert_eq!(tasks.active(), 2);
+        assert_eq!(tasks.dropped(), 1);
+        assert!(!tasks.drain(Duration::from_millis(5)).await);
+
+        drop(first);
+        assert_eq!(tasks.active(), 1);
+        drop(second);
+        assert!(tasks.drain(Duration::from_millis(50)).await);
+        assert_eq!(tasks.active(), 0);
     }
 
     #[test]
@@ -8164,6 +8351,7 @@ mod tests {
         config.telemetry = TelemetryConfig {
             decision_log_path: Some(trace_path.to_string_lossy().to_string()),
             include_inputs: true,
+            ..Default::default()
         };
         let router_url = spawn_router(config).await;
         let client = reqwest::Client::new();
@@ -9504,6 +9692,10 @@ mod tests {
             sticky_routing: crate::sticky::StickyRoutingStore::from_config(&config.sticky_routing)
                 .unwrap(),
             ingress: IngressController::new(&config.runtime.ingress),
+            background_tasks: BackgroundTasks::new(
+                config.shadow_eval.max_pending_tasks,
+                config.shadow_eval.max_concurrent_tasks,
+            ),
         };
         tokio::spawn(async move {
             axum::serve(listener, app(state)).await.unwrap();
@@ -9815,6 +10007,7 @@ mod tests {
                 include_bodies: false,
                 max_body_chars: 256,
                 judge: Default::default(),
+                ..Default::default()
             },
             safety: Default::default(),
             sticky_routing: Default::default(),

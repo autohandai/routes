@@ -218,7 +218,10 @@ fn defs() -> Value {
             "additionalProperties": false,
             "properties": {
                 "decision_log_path": nullable_string(),
-                "include_inputs": bool_default(false)
+                "include_inputs": bool_default(false),
+                "queue_capacity": integer_min_default(1, 1024),
+                "max_file_bytes": integer_min_default(1, 67108864),
+                "retained_files": integer_min_default(1, 5)
             }
         },
         "RuntimeConfig": {
@@ -287,6 +290,11 @@ fn defs() -> Value {
                 "output_path": nullable_string(),
                 "include_bodies": bool_default(false),
                 "max_body_chars": integer_min_default(1, 4096),
+                "writer_queue_capacity": integer_min_default(1, 1024),
+                "max_file_bytes": integer_min_default(1, 67108864),
+                "retained_files": integer_min_default(1, 5),
+                "max_pending_tasks": integer_min_default(1, 64),
+                "max_concurrent_tasks": integer_min_default(1, 4),
                 "judge": ref_schema("ShadowEvalJudgeConfig")
             }
         },

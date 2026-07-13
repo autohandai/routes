@@ -1,38 +1,44 @@
-use crate::{config::TelemetryConfig, types::MultimodelResponse};
+use crate::{
+    config::TelemetryConfig,
+    jsonl_writer::{AsyncJsonlWriter, JsonlWriterStats},
+    types::MultimodelResponse,
+};
 use serde_json::{Value, json};
 use std::{
-    fs::OpenOptions,
-    io::Write,
-    path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    path::PathBuf,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct DecisionLogger {
-    path: Option<PathBuf>,
+    writer: AsyncJsonlWriter,
     include_inputs: bool,
 }
 
 impl DecisionLogger {
     pub fn new(config: &TelemetryConfig) -> Self {
         Self {
-            path: config.decision_log_path.as_ref().map(PathBuf::from),
+            writer: AsyncJsonlWriter::new(
+                config.decision_log_path.as_ref().map(PathBuf::from),
+                config.queue_capacity,
+                config.max_file_bytes,
+                config.retained_files,
+            ),
             include_inputs: config.include_inputs,
         }
     }
 
     pub fn disabled() -> Self {
         Self {
-            path: None,
+            writer: AsyncJsonlWriter::new(None, 1, 1, 1),
             include_inputs: false,
         }
     }
 
     pub async fn record_route(&self, source: &str, input: &str, response: &MultimodelResponse) {
-        let Some(path) = self.path.clone() else {
+        if !self.writer.enabled() {
             return;
-        };
+        }
         let mut event = json!({
             "timestamp_ms": unix_timestamp_ms(),
             "source": source,
@@ -67,26 +73,18 @@ impl DecisionLogger {
             event["input"] = Value::String(input.to_string());
         }
 
-        if let Err(error) = append_jsonl(path, event).await {
-            warn!(?error, "failed to write router decision trace");
+        if !self.writer.try_write(event) {
+            tracing::warn!("decision trace queue is full; dropping record");
         }
     }
-}
 
-async fn append_jsonl(path: PathBuf, value: Value) -> std::io::Result<()> {
-    tokio::task::spawn_blocking(move || append_jsonl_blocking(&path, &value))
-        .await
-        .unwrap_or_else(|error| Err(std::io::Error::other(error)))
-}
-
-fn append_jsonl_blocking(path: &Path, value: &Value) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    pub async fn flush(&self, timeout: Duration) -> JsonlWriterStats {
+        self.writer.flush(timeout).await
     }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut file, value)?;
-    file.write_all(b"\n")?;
-    Ok(())
+
+    pub fn stats(&self) -> JsonlWriterStats {
+        self.writer.stats()
+    }
 }
 
 fn unix_timestamp_ms() -> u128 {
@@ -107,10 +105,11 @@ mod tests {
             "autohand-router-trace-{}.jsonl",
             uuid::Uuid::new_v4()
         ));
-        let logger = DecisionLogger {
-            path: Some(path.clone()),
+        let logger = DecisionLogger::new(&TelemetryConfig {
+            decision_log_path: Some(path.to_string_lossy().to_string()),
             include_inputs: false,
-        };
+            ..Default::default()
+        });
         logger
             .record_route(
                 "test",
@@ -144,6 +143,8 @@ mod tests {
                 },
             )
             .await;
+        let stats = logger.flush(Duration::from_secs(2)).await;
+        assert_eq!(stats.written, 1);
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("\"selected_model\":\"m\""));
         assert!(!raw.contains("secret prompt"));

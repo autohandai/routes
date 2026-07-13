@@ -132,13 +132,19 @@ pub enum BudgetAccountingBackend {
     File,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TelemetryConfig {
     #[serde(default)]
     pub decision_log_path: Option<String>,
     #[serde(default)]
     pub include_inputs: bool,
+    #[serde(default = "default_writer_queue_capacity")]
+    pub queue_capacity: usize,
+    #[serde(default = "default_writer_max_file_bytes")]
+    pub max_file_bytes: u64,
+    #[serde(default = "default_writer_retained_files")]
+    pub retained_files: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -161,6 +167,16 @@ pub struct ShadowEvalConfig {
     pub include_bodies: bool,
     #[serde(default = "default_shadow_eval_max_body_chars")]
     pub max_body_chars: usize,
+    #[serde(default = "default_writer_queue_capacity")]
+    pub writer_queue_capacity: usize,
+    #[serde(default = "default_writer_max_file_bytes")]
+    pub max_file_bytes: u64,
+    #[serde(default = "default_writer_retained_files")]
+    pub retained_files: usize,
+    #[serde(default = "default_shadow_max_pending_tasks")]
+    pub max_pending_tasks: usize,
+    #[serde(default = "default_shadow_max_concurrent_tasks")]
+    pub max_concurrent_tasks: usize,
     #[serde(default)]
     pub judge: ShadowEvalJudgeConfig,
 }
@@ -682,7 +698,24 @@ impl Default for ShadowEvalConfig {
             output_path: None,
             include_bodies: false,
             max_body_chars: default_shadow_eval_max_body_chars(),
+            writer_queue_capacity: default_writer_queue_capacity(),
+            max_file_bytes: default_writer_max_file_bytes(),
+            retained_files: default_writer_retained_files(),
+            max_pending_tasks: default_shadow_max_pending_tasks(),
+            max_concurrent_tasks: default_shadow_max_concurrent_tasks(),
             judge: ShadowEvalJudgeConfig::default(),
+        }
+    }
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            decision_log_path: None,
+            include_inputs: false,
+            queue_capacity: default_writer_queue_capacity(),
+            max_file_bytes: default_writer_max_file_bytes(),
+            retained_files: default_writer_retained_files(),
         }
     }
 }
@@ -838,6 +871,26 @@ fn default_shadow_eval_sample_rate() -> f32 {
 
 fn default_shadow_eval_max_body_chars() -> usize {
     4_096
+}
+
+fn default_writer_queue_capacity() -> usize {
+    1_024
+}
+
+fn default_writer_max_file_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+
+fn default_writer_retained_files() -> usize {
+    5
+}
+
+fn default_shadow_max_pending_tasks() -> usize {
+    64
+}
+
+fn default_shadow_max_concurrent_tasks() -> usize {
+    4
 }
 
 fn default_shadow_eval_judge_enabled() -> bool {
@@ -1412,6 +1465,18 @@ impl TelemetryConfig {
                 "telemetry.decision_log_path cannot be empty"
             );
         }
+        anyhow::ensure!(
+            self.queue_capacity > 0,
+            "telemetry.queue_capacity must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.max_file_bytes > 0,
+            "telemetry.max_file_bytes must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.retained_files > 0,
+            "telemetry.retained_files must be greater than zero"
+        );
         Ok(())
     }
 }
@@ -1604,6 +1669,30 @@ impl ShadowEvalConfig {
         anyhow::ensure!(
             self.max_body_chars > 0,
             "shadow_eval.max_body_chars must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.writer_queue_capacity > 0,
+            "shadow_eval.writer_queue_capacity must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.max_file_bytes > 0,
+            "shadow_eval.max_file_bytes must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.retained_files > 0,
+            "shadow_eval.retained_files must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.max_pending_tasks > 0,
+            "shadow_eval.max_pending_tasks must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.max_concurrent_tasks > 0,
+            "shadow_eval.max_concurrent_tasks must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.max_concurrent_tasks <= self.max_pending_tasks,
+            "shadow_eval.max_concurrent_tasks must not exceed max_pending_tasks"
         );
         self.judge.validate(config)?;
         Ok(())
@@ -2529,6 +2618,7 @@ mod tests {
             include_bodies: false,
             max_body_chars: 128,
             judge: Default::default(),
+            ..Default::default()
         };
 
         let error = config
@@ -2555,6 +2645,7 @@ mod tests {
                         .to_string(),
                 ),
             },
+            ..Default::default()
         };
 
         config.validate().expect("judge alias is accepted");
@@ -2580,6 +2671,29 @@ mod tests {
             .validate()
             .expect_err("zero shadow eval judge timeout rejected");
         assert!(error.to_string().contains("shadow_eval.judge.timeout_ms"));
+    }
+
+    #[test]
+    fn rejects_unbounded_or_invalid_background_lifecycle_settings() {
+        let mut config = valid_config();
+        config.telemetry.queue_capacity = 0;
+        let error = config.validate().expect_err("zero trace queue rejected");
+        assert!(error.to_string().contains("telemetry.queue_capacity"));
+
+        let mut config = valid_config();
+        config.shadow_eval.max_pending_tasks = 2;
+        config.shadow_eval.max_concurrent_tasks = 3;
+        let error = config
+            .validate()
+            .expect_err("shadow concurrency cannot exceed pending capacity");
+        assert!(error.to_string().contains("max_concurrent_tasks"));
+
+        let mut config = valid_config();
+        config.shadow_eval.writer_queue_capacity = 0;
+        let error = config
+            .validate()
+            .expect_err("zero shadow writer queue rejected");
+        assert!(error.to_string().contains("writer_queue_capacity"));
     }
 
     #[test]

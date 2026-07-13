@@ -1,16 +1,16 @@
-use crate::config::ShadowEvalConfig;
+use crate::{
+    config::ShadowEvalConfig,
+    jsonl_writer::{AsyncJsonlWriter, JsonlWriterStats},
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::hash_map::DefaultHasher,
-    fs::OpenOptions,
     hash::{Hash, Hasher},
-    io::Write,
-    path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    path::PathBuf,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::warn;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +22,7 @@ pub enum ShadowEvalEndpoint {
 #[derive(Debug, Clone)]
 pub struct ShadowEvalLogger {
     config: ShadowEvalConfig,
+    writer: AsyncJsonlWriter,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -86,12 +87,19 @@ impl ShadowEvalLogger {
     pub fn new(config: &ShadowEvalConfig) -> Self {
         Self {
             config: config.clone(),
+            writer: AsyncJsonlWriter::new(
+                config.output_path.as_ref().map(PathBuf::from),
+                config.writer_queue_capacity,
+                config.max_file_bytes,
+                config.retained_files,
+            ),
         }
     }
 
     pub fn disabled() -> Self {
         Self {
             config: ShadowEvalConfig::default(),
+            writer: AsyncJsonlWriter::new(None, 1, 1, 1),
         }
     }
 
@@ -110,9 +118,9 @@ impl ShadowEvalLogger {
     }
 
     pub async fn record(&self, input: ShadowEvalRecordInput<'_>) {
-        let Some(path) = self.config.output_path.as_ref().map(PathBuf::from) else {
+        if !self.enabled() {
             return;
-        };
+        }
         let selected_body_text = self.body_for_log(input.selected_body);
         let shadow_body_text = input.shadow_body.and_then(|body| self.body_for_log(body));
         let judgement = input
@@ -143,9 +151,17 @@ impl ShadowEvalLogger {
             shadow_score: judgement.as_ref().map(|judgement| judgement.shadow_score),
         };
         let value = serde_json::to_value(record).expect("shadow eval record serializes");
-        if let Err(error) = append_jsonl(path, value).await {
-            warn!(?error, "failed to write shadow eval record");
+        if !self.writer.try_write(value) {
+            tracing::warn!("shadow eval writer queue is full; dropping record");
         }
+    }
+
+    pub async fn flush(&self, timeout: Duration) -> JsonlWriterStats {
+        self.writer.flush(timeout).await
+    }
+
+    pub fn stats(&self) -> JsonlWriterStats {
+        self.writer.stats()
     }
 
     fn body_for_log(&self, body: &[u8]) -> Option<String> {
@@ -314,22 +330,6 @@ fn normalized_hash(source: &str, input: &str) -> f32 {
     (value as f64 / u64::MAX as f64) as f32
 }
 
-async fn append_jsonl(path: PathBuf, value: Value) -> std::io::Result<()> {
-    tokio::task::spawn_blocking(move || append_jsonl_blocking(&path, &value))
-        .await
-        .unwrap_or_else(|error| Err(std::io::Error::other(error)))
-}
-
-fn append_jsonl_blocking(path: &Path, value: &Value) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut file, value)?;
-    file.write_all(b"\n")?;
-    Ok(())
-}
-
 fn unix_timestamp_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -354,6 +354,7 @@ mod tests {
             include_bodies: false,
             max_body_chars: 128,
             judge: Default::default(),
+            ..Default::default()
         });
 
         logger
@@ -375,6 +376,7 @@ mod tests {
                 judgement: None,
             })
             .await;
+        logger.flush(Duration::from_secs(2)).await;
 
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("\"selected_model\":\"selected\""));
@@ -399,6 +401,7 @@ mod tests {
             include_bodies: true,
             max_body_chars: 512,
             judge: Default::default(),
+            ..Default::default()
         });
 
         logger
@@ -422,6 +425,7 @@ mod tests {
                 judgement: None,
             })
             .await;
+        logger.flush(Duration::from_secs(2)).await;
 
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("\"winner\":\"shadow\""));

@@ -368,7 +368,9 @@ cargo run -- --config examples/router.yaml provider-conformance-matrix \
   --output router.provider-matrix.json
 ```
 
-The matrix exercises only the intersection of explicit provider paths and each model's declared endpoints. A provider path alone never causes an endpoint probe or makes a model eligible. Paths or model endpoints that are absent are recorded as skipped.
+The matrix exercises only the intersection of explicit provider paths and each model's declared endpoints. A provider path alone never causes an endpoint probe or makes a model eligible. Every skipped chat, endpoint, and feature probe includes a reason.
+
+Schema-v2 artifacts require strict content types and OpenAI response shapes. Each declared endpoint records a successful live positive-schema check and proof that its validator rejects a built-in malformed fixture. Chat additionally requires valid usage accounting and probes streaming, tools, JSON mode, and vision when the model and adapter declare them. Speech and multipart transcription/translation use bounded audio fixtures with audio/JSON response validation. Each report records the router version, provider/model version headers when reported, an explicit `not_reported` source otherwise, a generation timestamp, and a secret-redacted config fingerprint.
 
 To require live conformance evidence at startup, point runtime config at a previously generated matrix. Relative paths resolve from the router config directory:
 
@@ -377,7 +379,7 @@ runtime:
   provider_conformance_artifact: router.provider-matrix.json
 ```
 
-Every declared endpoint for every configured provider/model pair must have a passing matrix entry. Missing, failed, duplicate, unknown-version, or mismatched reports fail config loading before the server starts.
+Every declared endpoint for every configured provider/model pair must have a passing matrix entry. Missing, failed, duplicate, unsupported-schema-version, or mismatched reports fail config loading before the server starts.
 
 ## Evaluation and Calibration
 

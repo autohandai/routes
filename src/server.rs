@@ -4,7 +4,8 @@ use crate::{
     config::{BudgetConfig, RouterConfig, SafetyRoutingAction, bind_is_loopback},
     openapi,
     provider::{
-        ProviderClient, ProviderHealth, ProviderHealthStatus, ProviderResponse, is_transient_status,
+        ProviderClient, ProviderHealth, ProviderHealthStatus, ProviderResponse,
+        chat_adapter_exclusions, is_transient_status,
     },
     router::RoutingEngine,
     semantic_cache::{
@@ -1665,8 +1666,20 @@ async fn chat_completions(
         let required_capabilities = request.required_capabilities();
         let estimated_context_tokens = estimate_tokens(&request.context_text());
         let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Chat);
-        let allowed_models = supported_model_ids(&config, RoutingEndpoint::Chat);
+        let endpoint_models = supported_model_ids(&config, RoutingEndpoint::Chat);
+        let allowed_models = endpoint_models
+            .iter()
+            .filter(|model_id| {
+                config.find_model(model_id).is_some_and(|model| {
+                    model_chat_adapter_exclusions(&config, model, &request).is_empty()
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         if allowed_providers.is_empty() || allowed_models.is_empty() {
+            if !endpoint_models.is_empty() && allowed_models.is_empty() {
+                return unsupported_chat_adapter_response(&config, &request);
+            }
             return unsupported_endpoint_response(&config, RoutingEndpoint::Chat);
         }
         let mut route = state
@@ -1724,6 +1737,10 @@ async fn chat_completions(
             )
                 .into_response();
         };
+        models.retain(|model| model_chat_adapter_exclusions(&config, model, &request).is_empty());
+        if models.is_empty() {
+            return unsupported_chat_adapter_response(&config, &request);
+        }
         apply_sticky_routing(&state, &config, sticky_key.as_deref(), &mut models).await;
         let shadow_eval_dispatch = shadow_eval_request_for_chat(
             &state,
@@ -1752,6 +1769,12 @@ async fn chat_completions(
     } else {
         let estimated_input_tokens = estimate_tokens(&request.context_text());
         let requested_output_tokens = request.max_output_tokens().unwrap_or(1024);
+        if let Some(model) = config.find_model(&requested_model) {
+            let exclusions = model_chat_adapter_exclusions(&config, model, &request);
+            if !exclusions.is_empty() {
+                return chat_adapter_exclusion_response(model, &exclusions);
+            }
+        }
         let model = match configured_model_for_request(
             &config,
             &requested_model,
@@ -2787,6 +2810,55 @@ fn model_supports_endpoint(
             .is_some_and(|provider| provider_supports_endpoint(provider, endpoint))
 }
 
+fn model_chat_adapter_exclusions(
+    config: &RouterConfig,
+    model: &ModelConfig,
+    request: &OpenAiChatRequest,
+) -> Vec<String> {
+    config
+        .providers
+        .iter()
+        .find(|provider| provider.name == model.provider)
+        .map_or_else(
+            || vec![format!("provider {} is not configured", model.provider)],
+            |provider| chat_adapter_exclusions(provider, request),
+        )
+}
+
+fn chat_adapter_exclusion_response(model: &ModelConfig, exclusions: &[String]) -> Response {
+    invalid_request_response(
+        &format!(
+            "model {} provider adapter rejected the request contract: {}",
+            model.id,
+            exclusions.join("; ")
+        ),
+        None,
+        "unsupported_adapter_feature",
+    )
+}
+
+fn unsupported_chat_adapter_response(
+    config: &RouterConfig,
+    request: &OpenAiChatRequest,
+) -> Response {
+    let exclusions = config
+        .models
+        .iter()
+        .filter_map(|model| {
+            let reasons = model_chat_adapter_exclusions(config, model, request);
+            (!reasons.is_empty()).then(|| format!("{}: {}", model.id, reasons.join(", ")))
+        })
+        .collect::<Vec<_>>();
+    invalid_request_response(
+        &format!(
+            "no configured chat adapter can preserve the requested contract: {}",
+            exclusions.join("; ")
+        ),
+        None,
+        "unsupported_adapter_feature",
+    )
+}
+
 fn configured_model_for_request(
     config: &RouterConfig,
     requested_model: &str,
@@ -2859,6 +2931,20 @@ fn model_ineligibility_reason(
             provider.name,
             provider.kind,
             endpoint.label()
+        ));
+    }
+    let provider = config
+        .providers
+        .iter()
+        .find(|provider| provider.name == model.provider)?;
+    if let Some(capability) = required_capabilities
+        .iter()
+        .find(|capability| !provider.kind.adapter_supports_capability(capability))
+    {
+        return Some(format!(
+            "provider adapter {} cannot preserve {} requests",
+            provider.kind.chat_adapter_contract().name,
+            capability.as_str()
         ));
     }
     let missing = required_capabilities
@@ -5496,6 +5582,69 @@ mod tests {
                 .contains("exceeds window 32")
         );
         assert_eq!(calls.load(AtomicOrdering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn native_adapters_reject_unpreserved_features_before_upstream_dispatch() {
+        for kind in [ProviderKind::OllamaNative, ProviderKind::LlamaCppNative] {
+            let (upstream_url, calls) = spawn_counting_chat_upstream("strong-fail").await;
+            let config = native_adapter_rejection_config(upstream_url, kind.clone());
+            let model_id = config.models[0].id.clone();
+            let adapter = kind.chat_adapter_contract().name;
+            let router_url = spawn_router(config).await;
+            let client = reqwest::Client::new();
+            let cases = [
+                serde_json::json!({
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "stream": true
+                }),
+                serde_json::json!({
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "metadata": {"tenant": "a"}
+                }),
+                serde_json::json!({
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": "use lookup"}],
+                    "tools": [{"type": "function", "function": {"name": "lookup"}}]
+                }),
+                serde_json::json!({
+                    "model": model_id,
+                    "messages": [{
+                        "role": "user",
+                        "content": [{"type": "text", "text": "hello"}]
+                    }]
+                }),
+                serde_json::json!({
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "service_tier": "priority"
+                }),
+            ];
+
+            for request in cases {
+                let response = client
+                    .post(format!("{router_url}/v1/chat/completions"))
+                    .json(&request)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{request}");
+                let error = response.json::<Value>().await.unwrap();
+                assert_eq!(
+                    error["error"]["code"], "unsupported_adapter_feature",
+                    "adapter={adapter} request={request} error={error}"
+                );
+                assert!(
+                    error["error"]["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains(adapter)),
+                    "adapter={adapter} request={request} error={error}"
+                );
+            }
+            assert_eq!(calls.load(AtomicOrdering::Relaxed), 0, "adapter={adapter}");
+        }
     }
 
     #[tokio::test]
@@ -8556,6 +8705,21 @@ mod tests {
             safety: Default::default(),
             sticky_routing: Default::default(),
         }
+    }
+
+    fn native_adapter_rejection_config(base_url: String, kind: ProviderKind) -> RouterConfig {
+        let mut config = failover_config(base_url.clone(), base_url);
+        config.providers.truncate(1);
+        config.providers[0].kind = kind;
+        config.providers[0].responses_path = None;
+        config.providers[0].embeddings_path = None;
+        config.providers[0].images_path = None;
+        config.providers[0].speech_path = None;
+        config.providers[0].audio_transcriptions_path = None;
+        config.providers[0].audio_translations_path = None;
+        config.models.truncate(1);
+        config.models[0].capabilities.supported_endpoints = Some(vec![ModelEndpoint::Chat]);
+        config
     }
 
     fn speech_config(base_url: String) -> RouterConfig {

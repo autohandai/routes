@@ -91,7 +91,7 @@ where
                     token_budget
                         .estimated_input_tokens
                         .saturating_add(token_budget.requested_output_tokens),
-                ) && capability_eligible(model, &request.required_capabilities)
+                ) && capability_eligible(model, &request.required_capabilities, &self.config)
             });
             return match eligible_default {
                 Some(model) => self.response_for_model(
@@ -166,7 +166,7 @@ where
                     model,
                     token_budget.estimated_input_tokens
                         .saturating_add(token_budget.requested_output_tokens),
-                ) && capability_eligible(model, &request.required_capabilities)
+                ) && capability_eligible(model, &request.required_capabilities, &self.config)
             }) {
                 Some(model) => self.response_for_model(
                     &model.id,
@@ -486,7 +486,7 @@ fn scored_candidates(
                 .iter()
                 .find(|provider| provider.name == model.provider);
             let context_eligible = context_eligible(model, context_required);
-            let missing_capabilities = missing_capabilities(model, required_capabilities);
+            let missing_capabilities = missing_capabilities(model, required_capabilities, config);
             let capability_eligible = missing_capabilities.is_empty();
             let weights = config.scoring.weights_for(policy);
             let mut score_components =
@@ -629,21 +629,39 @@ fn context_eligible(model: &ModelConfig, context_required: u32) -> bool {
         .is_none_or(|window| window >= context_required)
 }
 
-fn capability_eligible(model: &ModelConfig, required_capabilities: &[ModelCapability]) -> bool {
+fn capability_eligible(
+    model: &ModelConfig,
+    required_capabilities: &[ModelCapability],
+    config: &RouterConfig,
+) -> bool {
     required_capabilities
         .iter()
-        .all(|capability| model.capabilities.supports(capability))
+        .all(|capability| effective_capability_support(model, capability, config))
 }
 
 fn missing_capabilities(
     model: &ModelConfig,
     required_capabilities: &[ModelCapability],
+    config: &RouterConfig,
 ) -> Vec<ModelCapability> {
     required_capabilities
         .iter()
-        .filter(|capability| !model.capabilities.supports(capability))
+        .filter(|capability| !effective_capability_support(model, capability, config))
         .cloned()
         .collect()
+}
+
+fn effective_capability_support(
+    model: &ModelConfig,
+    capability: &ModelCapability,
+    config: &RouterConfig,
+) -> bool {
+    model.capabilities.supports(capability)
+        && config
+            .providers
+            .iter()
+            .find(|provider| provider.name == model.provider)
+            .is_some_and(|provider| provider.kind.adapter_supports_capability(capability))
 }
 
 pub fn score_model(
@@ -1822,6 +1840,35 @@ mod tests {
                 && candidate
                     .missing_capabilities
                     .contains(&ModelCapability::Vision)
+        }));
+    }
+
+    #[tokio::test]
+    async fn adapter_capability_contract_overrides_incompatible_model_metadata() {
+        let base = capability_engine();
+        let mut config = (*base.config()).clone();
+        config.providers[0].kind = ProviderKind::OllamaNative;
+        let route = RoutingEngine::new(config, HeuristicClassifier::default())
+            .route(MultimodelRequest {
+                input: "Use the lookup tool".to_string(),
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities: vec![ModelCapability::Tools],
+                policy: RouterPolicy::Balanced,
+                default_model: None,
+                max_output_tokens: None,
+            })
+            .await;
+
+        assert_eq!(route.model, "");
+        assert!(route.fallback);
+        let trace = route.decision_trace.expect("decision trace");
+        assert!(trace.rejected_candidates.iter().any(|rejection| {
+            rejection.model == "vision-tools"
+                && rejection
+                    .reasons
+                    .iter()
+                    .any(|reason| reason.contains("Tools"))
         }));
     }
 

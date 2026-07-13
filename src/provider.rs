@@ -146,6 +146,12 @@ impl ProviderClient {
             .iter()
             .find(|provider| provider.name == model.provider)
             .with_context(|| format!("provider {} is not configured", model.provider))?;
+        let exclusions = chat_adapter_exclusions(provider, &request);
+        anyhow::ensure!(
+            exclusions.is_empty(),
+            "chat adapter request excluded: {}",
+            exclusions.join("; ")
+        );
         let permit = self.acquire_permit(provider).await?;
         self.adapter_for(provider)?
             .send_chat(&self.http, provider, model, request)
@@ -382,6 +388,86 @@ fn provider_adapters() -> HashMap<ProviderKind, Arc<dyn ProviderAdapter>> {
     .collect()
 }
 
+pub fn chat_adapter_exclusions(
+    provider: &ProviderConfig,
+    request: &OpenAiChatRequest,
+) -> Vec<String> {
+    let contract = provider.kind.chat_adapter_contract();
+    if !contract.strict_fields {
+        return Vec::new();
+    }
+    let mut exclusions = Vec::new();
+    if request.stream() && !contract.supports_streaming {
+        exclusions.push(format!(
+            "adapter {} does not support streaming",
+            contract.name
+        ));
+    }
+    if request.extra.contains_key("max_tokens")
+        && request.extra.contains_key("max_completion_tokens")
+    {
+        exclusions.push(format!(
+            "adapter {} cannot disambiguate max_tokens and max_completion_tokens together",
+            contract.name
+        ));
+    }
+    if let Some(stream) = request.extra.get("stream")
+        && !stream.is_boolean()
+    {
+        exclusions.push(format!(
+            "adapter {} requires stream to be a boolean",
+            contract.name
+        ));
+    }
+    for (index, message) in request.messages.iter().enumerate() {
+        if !message.content.is_string() {
+            exclusions.push(format!(
+                "adapter {} only supports string messages; messages[{index}].content is {}",
+                contract.name,
+                json_type_name(&message.content)
+            ));
+        }
+        for key in message.extra.keys() {
+            exclusions.push(format!(
+                "adapter {} does not support messages[{index}].{key}",
+                contract.name
+            ));
+        }
+    }
+    for key in request.extra.keys() {
+        if !contract.supported_request_fields.contains(&key.as_str()) {
+            exclusions.push(format!(
+                "adapter {} does not support chat field {key}",
+                contract.name
+            ));
+        }
+    }
+    if provider.kind == ProviderKind::OllamaNative {
+        if let Some(options) = request.extra.get("options")
+            && !options.is_object()
+        {
+            exclusions.push("adapter ollama_native requires options to be an object".to_string());
+        }
+        if let Some(response_format) = request.extra.get("response_format")
+            && let Err(error) = ollama_format(response_format)
+        {
+            exclusions.push(format!("adapter ollama_native {error}"));
+        }
+    }
+    exclusions
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 #[derive(Debug)]
 pub struct OllamaNativeAdapter;
 
@@ -399,7 +485,13 @@ impl ProviderAdapter for OllamaNativeAdapter {
         request: OpenAiChatRequest,
     ) -> Result<ProviderResponse> {
         let url = join_url(&provider.base_url, &provider.chat_path);
-        let body = ollama_chat_body(model, request);
+        let exclusions = chat_adapter_exclusions(provider, &request);
+        anyhow::ensure!(
+            exclusions.is_empty(),
+            "native chat adapter request excluded: {}",
+            exclusions.join("; ")
+        );
+        let body = ollama_chat_body(model, request)?;
         let attempts = provider.retries.saturating_add(1);
 
         for attempt in 0..attempts {
@@ -518,26 +610,83 @@ impl ProviderAdapter for OllamaNativeAdapter {
     }
 }
 
-fn ollama_chat_body(model: &ModelConfig, request: OpenAiChatRequest) -> Value {
+fn ollama_chat_body(model: &ModelConfig, request: OpenAiChatRequest) -> Result<Value> {
+    let mut options = request
+        .extra
+        .get("options")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for (source, target) in [
+        ("temperature", "temperature"),
+        ("top_p", "top_p"),
+        ("seed", "seed"),
+        ("stop", "stop"),
+    ] {
+        if let Some(value) = request.extra.get(source).cloned() {
+            options.insert(target.to_string(), value);
+        }
+    }
+    if let Some(tokens) = request
+        .extra
+        .get("max_tokens")
+        .or_else(|| request.extra.get("max_completion_tokens"))
+        .cloned()
+    {
+        options.insert("num_predict".to_string(), tokens);
+    }
     let messages = request
         .messages
         .into_iter()
         .map(|message| {
             serde_json::json!({
                 "role": message.role,
-                "content": provider_content_to_text(&message.content)
+                "content": message.content.as_str().unwrap_or_default()
             })
         })
         .collect::<Vec<_>>();
     let mut body = serde_json::Map::from_iter([
         ("model".to_string(), Value::String(model.id.clone())),
         ("messages".to_string(), Value::Array(messages)),
-        ("stream".to_string(), Value::Bool(false)),
+        (
+            "stream".to_string(),
+            request
+                .extra
+                .get("stream")
+                .cloned()
+                .unwrap_or(Value::Bool(false)),
+        ),
     ]);
-    if let Some(options) = request.extra.get("options").cloned() {
-        body.insert("options".to_string(), options);
+    if !options.is_empty() {
+        body.insert("options".to_string(), Value::Object(options));
     }
-    Value::Object(body)
+    if let Some(response_format) = request.extra.get("response_format") {
+        body.insert("format".to_string(), ollama_format(response_format)?);
+    }
+    Ok(Value::Object(body))
+}
+
+fn ollama_format(response_format: &Value) -> Result<Value> {
+    let format_type = response_format
+        .get("type")
+        .and_then(Value::as_str)
+        .context("response_format.type must be a string")?;
+    match format_type {
+        "json_object" => Ok(Value::String("json".to_string())),
+        "json_schema" => {
+            let schema = response_format
+                .pointer("/json_schema/schema")
+                .or_else(|| response_format.get("schema"))
+                .cloned()
+                .context("json_schema response_format must include a schema object")?;
+            anyhow::ensure!(
+                schema.is_object(),
+                "json_schema response_format schema must be an object"
+            );
+            Ok(schema)
+        }
+        other => anyhow::bail!("does not support response_format.type {other}"),
+    }
 }
 
 async fn ollama_chat_response(model: &ModelConfig, response: Response) -> Result<ProviderResponse> {
@@ -602,25 +751,6 @@ async fn ollama_chat_response(model: &ModelConfig, response: Response) -> Result
     })
 }
 
-fn provider_content_to_text(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Array(parts) => parts
-            .iter()
-            .map(provider_content_to_text)
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Value::Object(object) => object
-            .get("text")
-            .or_else(|| object.get("content"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        _ => String::new(),
-    }
-}
-
 #[derive(Debug)]
 pub struct LlamaCppNativeAdapter;
 
@@ -638,7 +768,13 @@ impl ProviderAdapter for LlamaCppNativeAdapter {
         request: OpenAiChatRequest,
     ) -> Result<ProviderResponse> {
         let url = join_url(&provider.base_url, &provider.chat_path);
-        let body = llama_cpp_completion_body(request);
+        let exclusions = chat_adapter_exclusions(provider, &request);
+        anyhow::ensure!(
+            exclusions.is_empty(),
+            "native chat adapter request excluded: {}",
+            exclusions.join("; ")
+        );
+        let body = llama_cpp_completion_body(request)?;
         let attempts = provider.retries.saturating_add(1);
 
         for attempt in 0..attempts {
@@ -759,7 +895,7 @@ impl ProviderAdapter for LlamaCppNativeAdapter {
     }
 }
 
-fn llama_cpp_completion_body(request: OpenAiChatRequest) -> Value {
+fn llama_cpp_completion_body(request: OpenAiChatRequest) -> Result<Value> {
     let prompt = request
         .messages
         .into_iter()
@@ -767,7 +903,7 @@ fn llama_cpp_completion_body(request: OpenAiChatRequest) -> Value {
             format!(
                 "{}: {}",
                 message.role,
-                provider_content_to_text(&message.content)
+                message.content.as_str().unwrap_or_default()
             )
         })
         .collect::<Vec<_>>()
@@ -777,7 +913,14 @@ fn llama_cpp_completion_body(request: OpenAiChatRequest) -> Value {
             "prompt".to_string(),
             Value::String(format!("{prompt}\nassistant:")),
         ),
-        ("stream".to_string(), Value::Bool(false)),
+        (
+            "stream".to_string(),
+            request
+                .extra
+                .get("stream")
+                .cloned()
+                .unwrap_or(Value::Bool(false)),
+        ),
     ]);
     if let Some(tokens) = request
         .extra
@@ -790,7 +933,12 @@ fn llama_cpp_completion_body(request: OpenAiChatRequest) -> Value {
     if let Some(temperature) = request.extra.get("temperature").cloned() {
         body.insert("temperature".to_string(), temperature);
     }
-    Value::Object(body)
+    for key in ["top_p", "seed", "stop"] {
+        if let Some(value) = request.extra.get(key).cloned() {
+            body.insert(key.to_string(), value);
+        }
+    }
+    Ok(Value::Object(body))
 }
 
 async fn llama_cpp_completion_response(
@@ -1429,7 +1577,8 @@ mod tests {
             RouterPolicy,
         },
     };
-    use axum::{Json, Router, http::HeaderMap, routing::post};
+    use axum::{Json, Router, extract::State, http::HeaderMap, routing::post};
+    use std::sync::Mutex;
     use tokio::net::TcpListener;
 
     #[test]
@@ -1644,7 +1793,7 @@ mod tests {
 
     #[tokio::test]
     async fn ollama_native_adapter_transforms_chat_request_and_response() {
-        let base_url = spawn_ollama_native_server().await;
+        let (base_url, captured) = spawn_ollama_native_server().await;
         let config = ollama_native_test_config(base_url);
         let client = ProviderClient::new(&config).unwrap();
         let model = config.find_model("llama3.1:8b").unwrap();
@@ -1659,7 +1808,31 @@ mod tests {
                         content: Value::String("hello native ollama".to_string()),
                         extra: Default::default(),
                     }],
-                    extra: Default::default(),
+                    extra: serde_json::Map::from_iter([
+                        (
+                            "options".to_string(),
+                            serde_json::json!({
+                                "num_ctx": 4096,
+                                "temperature": 0.9
+                            }),
+                        ),
+                        ("max_tokens".to_string(), Value::from(12)),
+                        ("temperature".to_string(), Value::from(0.2)),
+                        ("top_p".to_string(), Value::from(0.8)),
+                        ("seed".to_string(), Value::from(42)),
+                        ("stop".to_string(), serde_json::json!(["END"])),
+                        (
+                            "response_format".to_string(),
+                            serde_json::json!({
+                                "type": "json_schema",
+                                "json_schema": {
+                                    "name": "answer",
+                                    "schema": {"type": "object"}
+                                }
+                            }),
+                        ),
+                        ("stream".to_string(), Value::Bool(false)),
+                    ]),
                 },
             )
             .await
@@ -1676,11 +1849,23 @@ mod tests {
         assert_eq!(value["usage"]["prompt_tokens"], 7);
         assert_eq!(value["usage"]["completion_tokens"], 3);
         assert_eq!(value["usage"]["total_tokens"], 10);
+        let captured = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(captured["model"], "llama3.1:8b");
+        assert_eq!(captured["messages"][0]["role"], "user");
+        assert_eq!(captured["messages"][0]["content"], "hello native ollama");
+        assert_eq!(captured["stream"], false);
+        assert_eq!(captured["options"]["num_ctx"], 4096);
+        assert_eq!(captured["options"]["num_predict"], 12);
+        assert_eq!(captured["options"]["temperature"], 0.2);
+        assert_eq!(captured["options"]["top_p"], 0.8);
+        assert_eq!(captured["options"]["seed"], 42);
+        assert_eq!(captured["options"]["stop"], serde_json::json!(["END"]));
+        assert_eq!(captured["format"], serde_json::json!({"type": "object"}));
     }
 
     #[tokio::test]
     async fn llama_cpp_native_adapter_transforms_completion_request_and_response() {
-        let base_url = spawn_llama_cpp_native_server().await;
+        let (base_url, captured) = spawn_llama_cpp_native_server().await;
         let config = llama_cpp_native_test_config(base_url);
         let client = ProviderClient::new(&config).unwrap();
         let model = config.find_model("llama-cpp-q4").unwrap();
@@ -1698,6 +1883,10 @@ mod tests {
                     extra: serde_json::Map::from_iter([
                         ("max_tokens".to_string(), Value::from(12)),
                         ("temperature".to_string(), Value::from(0.2)),
+                        ("top_p".to_string(), Value::from(0.8)),
+                        ("seed".to_string(), Value::from(42)),
+                        ("stop".to_string(), serde_json::json!(["END"])),
+                        ("stream".to_string(), Value::Bool(false)),
                     ]),
                 },
             )
@@ -1715,6 +1904,166 @@ mod tests {
         assert_eq!(value["usage"]["prompt_tokens"], 11);
         assert_eq!(value["usage"]["completion_tokens"], 4);
         assert_eq!(value["usage"]["total_tokens"], 15);
+        let captured = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(captured["prompt"], "user: hello native llama\nassistant:");
+        assert_eq!(captured["n_predict"], 12);
+        assert_eq!(captured["temperature"], 0.2);
+        assert_eq!(captured["top_p"], 0.8);
+        assert_eq!(captured["seed"], 42);
+        assert_eq!(captured["stop"], serde_json::json!(["END"]));
+        assert_eq!(captured["stream"], false);
+    }
+
+    #[test]
+    fn native_chat_adapter_contract_rejects_every_unmapped_openai_field() {
+        let unsupported_fields = [
+            "frequency_penalty",
+            "presence_penalty",
+            "function_call",
+            "functions",
+            "logit_bias",
+            "logprobs",
+            "top_logprobs",
+            "n",
+            "user",
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "modalities",
+            "audio",
+            "prediction",
+            "prompt_cache_key",
+            "reasoning_effort",
+            "safety_identifier",
+            "store",
+            "metadata",
+            "service_tier",
+            "stream_options",
+            "verbosity",
+            "web_search_options",
+        ];
+        for (provider, adapter) in [
+            (
+                ollama_native_test_config("http://unused".to_string()),
+                "ollama_native",
+            ),
+            (
+                llama_cpp_native_test_config("http://unused".to_string()),
+                "llama_cpp_native",
+            ),
+        ] {
+            for field in unsupported_fields {
+                let mut request = native_chat_request();
+                request.extra.insert(field.to_string(), Value::Bool(true));
+                let exclusions = chat_adapter_exclusions(&provider.providers[0], &request);
+                assert!(
+                    exclusions
+                        .iter()
+                        .any(|reason| { reason.contains(adapter) && reason.contains(field) }),
+                    "adapter={adapter} field={field} exclusions={exclusions:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_chat_adapter_contract_accepts_only_round_tripped_controls() {
+        let ollama = ollama_native_test_config("http://unused".to_string());
+        let mut request = native_chat_request();
+        request.extra = serde_json::Map::from_iter([
+            ("max_tokens".to_string(), Value::from(32)),
+            ("temperature".to_string(), Value::from(0.4)),
+            ("top_p".to_string(), Value::from(0.9)),
+            ("seed".to_string(), Value::from(7)),
+            ("stop".to_string(), serde_json::json!(["done"])),
+            (
+                "response_format".to_string(),
+                serde_json::json!({"type": "json_object"}),
+            ),
+            ("options".to_string(), serde_json::json!({"num_ctx": 2048})),
+            ("stream".to_string(), Value::Bool(false)),
+        ]);
+        assert!(chat_adapter_exclusions(&ollama.providers[0], &request).is_empty());
+
+        let llama = llama_cpp_native_test_config("http://unused".to_string());
+        request.extra.remove("response_format");
+        request.extra.remove("options");
+        assert!(chat_adapter_exclusions(&llama.providers[0], &request).is_empty());
+
+        request.extra.remove("max_tokens");
+        request
+            .extra
+            .insert("max_completion_tokens".to_string(), Value::from(48));
+        assert!(chat_adapter_exclusions(&ollama.providers[0], &request).is_empty());
+        assert!(chat_adapter_exclusions(&llama.providers[0], &request).is_empty());
+        let ollama_body = ollama_chat_body(&ollama.models[0], request.clone()).unwrap();
+        let llama_body = llama_cpp_completion_body(request.clone()).unwrap();
+        assert_eq!(ollama_body["options"]["num_predict"], 48);
+        assert_eq!(llama_body["n_predict"], 48);
+
+        for field in ["response_format", "options"] {
+            let mut unsupported = native_chat_request();
+            unsupported
+                .extra
+                .insert(field.to_string(), serde_json::json!({}));
+            assert!(
+                chat_adapter_exclusions(&llama.providers[0], &unsupported)
+                    .iter()
+                    .any(|reason| reason.contains("llama_cpp_native") && reason.contains(field))
+            );
+        }
+    }
+
+    #[test]
+    fn native_chat_adapter_contract_rejects_streaming_and_extended_messages() {
+        for config in [
+            ollama_native_test_config("http://unused".to_string()),
+            llama_cpp_native_test_config("http://unused".to_string()),
+        ] {
+            let adapter = config.providers[0].kind.chat_adapter_contract().name;
+            let mut streaming = native_chat_request();
+            streaming
+                .extra
+                .insert("stream".to_string(), Value::Bool(true));
+            assert!(
+                chat_adapter_exclusions(&config.providers[0], &streaming)
+                    .iter()
+                    .any(|reason| reason.contains(adapter) && reason.contains("streaming"))
+            );
+
+            let mut ambiguous_tokens = native_chat_request();
+            ambiguous_tokens
+                .extra
+                .insert("max_tokens".to_string(), Value::from(10));
+            ambiguous_tokens
+                .extra
+                .insert("max_completion_tokens".to_string(), Value::from(20));
+            assert!(
+                chat_adapter_exclusions(&config.providers[0], &ambiguous_tokens)
+                    .iter()
+                    .any(|reason| reason.contains(adapter) && reason.contains("together"))
+            );
+
+            let mut extended = native_chat_request();
+            extended.messages[0].content = serde_json::json!([
+                {"type": "text", "text": "hello"},
+                {"type": "image_url", "image_url": {"url": "https://example.invalid/x.png"}}
+            ]);
+            extended.messages[0]
+                .extra
+                .insert("name".to_string(), Value::String("caller".to_string()));
+            let exclusions = chat_adapter_exclusions(&config.providers[0], &extended);
+            assert!(
+                exclusions
+                    .iter()
+                    .any(|reason| reason.contains("content is array"))
+            );
+            assert!(
+                exclusions
+                    .iter()
+                    .any(|reason| reason.contains("messages[0].name"))
+            );
+        }
     }
 
     #[tokio::test]
@@ -1811,8 +2160,12 @@ mod tests {
         format!("http://{addr}")
     }
 
-    async fn spawn_ollama_native_server() -> String {
-        async fn chat(Json(request): Json<Value>) -> Json<Value> {
+    async fn spawn_ollama_native_server() -> (String, Arc<Mutex<Option<Value>>>) {
+        async fn chat(
+            State(captured): State<Arc<Mutex<Option<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> Json<Value> {
+            *captured.lock().unwrap() = Some(request.clone());
             Json(serde_json::json!({
                 "model": request["model"],
                 "message": {
@@ -1832,15 +2185,22 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = Router::new().route("/api/chat", post(chat));
+        let captured = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route("/api/chat", post(chat))
+            .with_state(captured.clone());
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), captured)
     }
 
-    async fn spawn_llama_cpp_native_server() -> String {
-        async fn completion(Json(request): Json<Value>) -> Json<Value> {
+    async fn spawn_llama_cpp_native_server() -> (String, Arc<Mutex<Option<Value>>>) {
+        async fn completion(
+            State(captured): State<Arc<Mutex<Option<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> Json<Value> {
+            *captured.lock().unwrap() = Some(request.clone());
             Json(serde_json::json!({
                 "content": format!(
                     "native:{}:{}:{}",
@@ -1859,13 +2219,27 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let captured = Arc::new(Mutex::new(None));
         let app = Router::new()
             .route("/completion", post(completion))
-            .route("/health", axum::routing::get(health));
+            .route("/health", axum::routing::get(health))
+            .with_state(captured.clone());
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), captured)
+    }
+
+    fn native_chat_request() -> OpenAiChatRequest {
+        OpenAiChatRequest {
+            model: "ignored".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: Value::String("hello".to_string()),
+                extra: Default::default(),
+            }],
+            extra: Default::default(),
+        }
     }
 
     async fn response_json(response: ProviderResponse) -> Value {

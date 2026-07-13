@@ -84,6 +84,30 @@ pub enum ModelCapability {
     LongContext,
 }
 
+impl ModelCapability {
+    pub const ALL: [Self; 7] = [
+        Self::Vision,
+        Self::Audio,
+        Self::Tools,
+        Self::Json,
+        Self::Code,
+        Self::WebApps,
+        Self::LongContext,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Vision => "vision",
+            Self::Audio => "audio",
+            Self::Tools => "tools",
+            Self::Json => "json",
+            Self::Code => "code",
+            Self::WebApps => "web_apps",
+            Self::LongContext => "long_context",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RouterPolicy {
@@ -169,6 +193,90 @@ pub enum ProviderKind {
 impl Default for ProviderKind {
     fn default() -> Self {
         Self::OpenAiCompatible
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ChatAdapterContract {
+    pub name: &'static str,
+    pub strict_fields: bool,
+    pub supports_streaming: bool,
+    pub supports_vision: bool,
+    pub supports_tools: bool,
+    pub supports_json: bool,
+    pub supported_request_fields: &'static [&'static str],
+}
+
+impl ProviderKind {
+    pub fn chat_adapter_contract(&self) -> ChatAdapterContract {
+        const OLLAMA_NATIVE_FIELDS: &[&str] = &[
+            "max_tokens",
+            "max_completion_tokens",
+            "temperature",
+            "top_p",
+            "seed",
+            "stop",
+            "response_format",
+            "options",
+            "stream",
+        ];
+        const LLAMA_CPP_NATIVE_FIELDS: &[&str] = &[
+            "max_tokens",
+            "max_completion_tokens",
+            "temperature",
+            "top_p",
+            "seed",
+            "stop",
+            "stream",
+        ];
+        match self {
+            Self::OllamaNative => ChatAdapterContract {
+                name: "ollama_native",
+                strict_fields: true,
+                supports_streaming: false,
+                supports_vision: false,
+                supports_tools: false,
+                supports_json: true,
+                supported_request_fields: OLLAMA_NATIVE_FIELDS,
+            },
+            Self::LlamaCppNative => ChatAdapterContract {
+                name: "llama_cpp_native",
+                strict_fields: true,
+                supports_streaming: false,
+                supports_vision: false,
+                supports_tools: false,
+                supports_json: false,
+                supported_request_fields: LLAMA_CPP_NATIVE_FIELDS,
+            },
+            _ => ChatAdapterContract {
+                name: match self {
+                    Self::OpenAiCompatible => "open_ai_compatible",
+                    Self::Ollama => "ollama_openai",
+                    Self::LlamaCpp => "llama_cpp_openai",
+                    Self::Vllm => "vllm_openai",
+                    Self::OpenRouter => "openrouter",
+                    Self::CloudflareAiGateway => "cloudflare_ai_gateway_openai",
+                    Self::OllamaNative | Self::LlamaCppNative => unreachable!(),
+                },
+                strict_fields: false,
+                supports_streaming: true,
+                supports_vision: true,
+                supports_tools: true,
+                supports_json: true,
+                supported_request_fields: &[],
+            },
+        }
+    }
+
+    pub fn adapter_supports_capability(&self, capability: &ModelCapability) -> bool {
+        let contract = self.chat_adapter_contract();
+        match capability {
+            ModelCapability::Vision => contract.supports_vision,
+            ModelCapability::Audio => !contract.strict_fields,
+            ModelCapability::Tools => contract.supports_tools,
+            ModelCapability::Json => contract.supports_json,
+            ModelCapability::Code | ModelCapability::WebApps | ModelCapability::LongContext => true,
+        }
     }
 }
 

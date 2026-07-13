@@ -116,6 +116,17 @@ curl -s http://127.0.0.1:8080/v1/router/providers
 
 Provider config supports `kind`, `base_url`, `timeout_ms`, `retries`, `health_path`, endpoint paths, `max_concurrency`, and `queue_timeout_ms`. Supported provider kinds are `open_ai_compatible`, `ollama`, `ollama_native`, `llama_cpp`, `llama_cpp_native`, `vllm`, `openrouter`, and `cloudflare_ai_gateway`.
 
+### Native Chat Adapter Contracts
+
+Native adapters are intentionally narrower than OpenAI-compatible adapters. The router validates their request contract before provider admission, so unsupported fields never reach the upstream and are never silently discarded. Explicit requests receive `unsupported_adapter_feature`; automatic requests exclude incompatible native candidates and report the adapter exclusions when no eligible model remains.
+
+| Adapter | Preserved Chat controls | Structured output | Streaming and extended messages |
+| --- | --- | --- | --- |
+| `ollama_native` | `max_tokens` or `max_completion_tokens`, `temperature`, `top_p`, `seed`, `stop`, and native `options` | `json_object` maps to Ollama JSON mode; `json_schema` maps to the schema object | Rejected before dispatch; message content must be a string and message extensions, tools, vision, audio, and other unmapped OpenAI fields are rejected |
+| `llama_cpp_native` | `max_tokens` or `max_completion_tokens`, `temperature`, `top_p`, `seed`, and `stop` | Rejected before dispatch | Rejected before dispatch; message content must be a string and message extensions, tools, vision, audio, and other unmapped OpenAI fields are rejected |
+
+Use `kind: ollama` or `kind: llama_cpp` with the provider's OpenAI-compatible endpoints when the application needs a broader OpenAI request surface or streaming passthrough. Config validation also rejects model capability declarations that the selected native adapter cannot preserve.
+
 To let routing react to provider health over time:
 
 ```yaml

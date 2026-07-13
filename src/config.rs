@@ -1,4 +1,4 @@
-use crate::types::{ModelConfig, ModelEndpoint, ProviderConfig, RouterPolicy};
+use crate::types::{ModelCapability, ModelConfig, ModelEndpoint, ProviderConfig, RouterPolicy};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -875,6 +875,16 @@ impl RouterConfig {
                         provider.kind
                     );
                 }
+            }
+            for capability in ModelCapability::ALL {
+                anyhow::ensure!(
+                    !model.capabilities.supports(&capability)
+                        || provider.kind.adapter_supports_capability(&capability),
+                    "model {} declares capability {} but provider adapter {} cannot preserve that request contract",
+                    model.id,
+                    capability.as_str(),
+                    provider.kind.chat_adapter_contract().name
+                );
             }
         }
         for provider in &self.providers {
@@ -2465,6 +2475,58 @@ mod tests {
                     .contains("cannot configure unsupported endpoint responses")
             );
         }
+    }
+
+    #[test]
+    fn native_provider_rejects_model_capabilities_its_adapter_cannot_preserve() {
+        let cases = [
+            (ProviderKind::OllamaNative, "vision"),
+            (ProviderKind::OllamaNative, "tools"),
+            (ProviderKind::OllamaNative, "audio"),
+            (ProviderKind::LlamaCppNative, "vision"),
+            (ProviderKind::LlamaCppNative, "tools"),
+            (ProviderKind::LlamaCppNative, "audio"),
+            (ProviderKind::LlamaCppNative, "json"),
+        ];
+        for (kind, capability) in cases {
+            let mut config = valid_config();
+            config.providers[0].kind = kind;
+            match capability {
+                "vision" => config.models[0].capabilities.supports_vision = true,
+                "tools" => config.models[0].capabilities.supports_tools = true,
+                "audio" => config.models[0].capabilities.supports_audio = true,
+                "json" => config.models[0].capabilities.supports_json = true,
+                _ => unreachable!(),
+            }
+
+            let error = config
+                .validate()
+                .expect_err("unsupported native adapter capability rejected");
+            let message = error.to_string();
+            assert!(message.contains("provider adapter"), "{message}");
+            assert!(message.contains(capability), "{message}");
+            assert!(
+                message.contains(config.providers[0].kind.chat_adapter_contract().name),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn ollama_native_provider_accepts_json_capability() {
+        let mut config = valid_config();
+        config.providers[0].kind = ProviderKind::OllamaNative;
+        config.providers[0].responses_path = None;
+        config.providers[0].embeddings_path = None;
+        config.providers[0].images_path = None;
+        config.providers[0].speech_path = None;
+        config.providers[0].audio_transcriptions_path = None;
+        config.providers[0].audio_translations_path = None;
+        config.models[0].capabilities.supports_json = true;
+
+        config
+            .validate()
+            .expect("Ollama native maps OpenAI JSON response formats");
     }
 
     #[test]

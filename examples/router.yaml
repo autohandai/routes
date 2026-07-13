@@ -258,6 +258,7 @@ providers:
   - name: ollama-native
     kind: ollama_native
     base_url: http://localhost:11434
+    # Strict non-streaming adapter. Unmapped OpenAI fields are rejected before dispatch.
     chat_path: /api/chat
     responses_path:
     embeddings_path:
@@ -290,7 +291,7 @@ providers:
   - name: llamacpp-native
     kind: llama_cpp_native
     base_url: http://localhost:8082
-    # Native llama.cpp server completion endpoint. Use kind: llama_cpp for its OpenAI-compatible server.
+    # Strict non-streaming completion adapter. Use kind: llama_cpp for the broader OpenAI surface.
     chat_path: /completion
     responses_path:
     embeddings_path:
@@ -420,7 +421,6 @@ models:
     context_window: 8192
     capabilities:
       supported_endpoints: [chat]
-      supports_json: true
       supports_code: true
     local: true
 

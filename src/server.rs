@@ -1,7 +1,10 @@
 use crate::{
-    accounting::{BudgetAccounting, BudgetReservation},
+    accounting::{BudgetAccounting, BudgetReservation, BudgetScopeUsageSnapshot},
     classifier::{JudgeMetricsSnapshot, SmartClassifier, classify_safety_deterministically},
-    config::{BudgetConfig, IngressConfig, RouterConfig, SafetyRoutingAction, bind_is_loopback},
+    config::{
+        BudgetAccountingScope, BudgetConfig, IngressConfig, RouterConfig, SafetyRoutingAction,
+        bind_is_loopback,
+    },
     openapi,
     provider::{
         ProviderClient, ProviderHealth, ProviderHealthStatus, ProviderResponse,
@@ -58,6 +61,10 @@ use tokio::{
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{info, warn};
+
+tokio::task_local! {
+    static REQUEST_BUDGET_SCOPE: String;
+}
 
 #[derive(Clone)]
 enum ShadowEvalDispatch {
@@ -580,6 +587,8 @@ struct UpstreamOutcomeSnapshot {
 #[derive(Debug, Serialize)]
 struct BudgetSnapshot {
     accounting_backend: String,
+    accounting_semantics: String,
+    accounting_scope: String,
     max_chat_requests: Option<u64>,
     max_total_tokens: Option<u64>,
     max_estimated_cost_micros: Option<u64>,
@@ -589,6 +598,7 @@ struct BudgetSnapshot {
     chat_requests_remaining: Option<u64>,
     total_tokens_remaining: Option<u64>,
     estimated_cost_micros_remaining: Option<u64>,
+    by_scope: HashMap<String, BudgetScopeUsageSnapshot>,
 }
 
 impl RouterMetrics {
@@ -708,6 +718,8 @@ impl BudgetSnapshot {
         let Some(budget) = budget else {
             return Self {
                 accounting_backend: "disabled".to_string(),
+                accounting_semantics: "logical_request".to_string(),
+                accounting_scope: "global".to_string(),
                 max_chat_requests: None,
                 max_total_tokens: None,
                 max_estimated_cost_micros: None,
@@ -717,6 +729,7 @@ impl BudgetSnapshot {
                 chat_requests_remaining: None,
                 total_tokens_remaining: None,
                 estimated_cost_micros_remaining: None,
+                by_scope: HashMap::new(),
             };
         };
         let (accounting_backend, used) = match accounting {
@@ -731,6 +744,12 @@ impl BudgetSnapshot {
         };
         Self {
             accounting_backend,
+            accounting_semantics: "logical_request".to_string(),
+            accounting_scope: match budget.accounting.scope {
+                BudgetAccountingScope::Global => "global",
+                BudgetAccountingScope::Credential => "credential",
+            }
+            .to_string(),
             max_chat_requests: budget.max_chat_requests,
             max_total_tokens: budget.max_total_tokens,
             max_estimated_cost_micros: budget.max_estimated_cost_micros,
@@ -743,6 +762,7 @@ impl BudgetSnapshot {
                 budget.max_estimated_cost_micros,
                 used.estimated_cost_micros,
             ),
+            by_scope: used.by_scope,
         }
     }
 }
@@ -1324,7 +1344,13 @@ async fn request_context(
         Duration::from_millis(state.ingress.config.body_idle_timeout_ms),
     );
 
-    let mut response = next.run(request).await;
+    let budget_scope = match state.engine.config().budget.accounting.scope {
+        BudgetAccountingScope::Global => "global".to_string(),
+        BudgetAccountingScope::Credential => credential.unwrap_or_else(|| "anonymous".to_string()),
+    };
+    let mut response = REQUEST_BUDGET_SCOPE
+        .scope(budget_scope, next.run(request))
+        .await;
     insert_request_id(response.headers_mut(), &request_id);
     observe_request_headers(endpoint, response.status(), started);
     response
@@ -5341,9 +5367,12 @@ async fn reserve_budget(
 ) -> Option<String> {
     let reservation =
         BudgetReservation::new(model, estimated_input_tokens, requested_output_tokens);
+    let scope = REQUEST_BUDGET_SCOPE
+        .try_with(Clone::clone)
+        .unwrap_or_else(|_| "global".to_string());
     state
         .accounting
-        .reserve(budget, reservation)
+        .reserve_scoped(budget, &scope, reservation)
         .await
         .err()
         .map(|error| error.to_string())
@@ -6013,10 +6042,11 @@ mod tests {
     use crate::{
         classifier::SmartClassifier,
         config::{
-            AuthConfig, BudgetAccountingBackend, BudgetAccountingConfig, BudgetConfig,
-            ClassifierBackend, ClassifierConfig, RouterConfig, RuntimeConfig, SafetyRoutingAction,
-            SafetyRoutingConfig, ScoringConfig, SemanticCacheBackend, SemanticCacheConfig,
-            ShadowEvalConfig, StickyRoutingBackend, StickyRoutingConfig, TelemetryConfig,
+            AuthConfig, BudgetAccountingBackend, BudgetAccountingConfig, BudgetAccountingScope,
+            BudgetConfig, ClassifierBackend, ClassifierConfig, RouterConfig, RuntimeConfig,
+            SafetyRoutingAction, SafetyRoutingConfig, ScoringConfig, SemanticCacheBackend,
+            SemanticCacheConfig, ShadowEvalConfig, StickyRoutingBackend, StickyRoutingConfig,
+            TelemetryConfig,
         },
         provider::ProviderClient,
         router::RoutingEngine,
@@ -7132,7 +7162,8 @@ mod tests {
         let failing_base_url =
             spawn_chat_upstream("strong-fail", StatusCode::SERVICE_UNAVAILABLE).await;
         let healthy_base_url = spawn_chat_upstream("strong-ok", StatusCode::OK).await;
-        let config = failover_config(failing_base_url, healthy_base_url);
+        let mut config = failover_config(failing_base_url, healthy_base_url);
+        config.budget.max_chat_requests = Some(10);
         let router_url = spawn_router(config).await;
         let client = reqwest::Client::new();
         let response = client
@@ -7190,6 +7221,7 @@ mod tests {
         assert_eq!(metrics["failover_attempts"], 1);
         assert_eq!(metrics["failover_successes"], 1);
         assert_eq!(metrics["selected_models"], 1);
+        assert_eq!(metrics["budget"]["used_chat_requests"], 1);
         assert_eq!(metrics["per_model"][0]["id"], "strong-ok");
 
         let prometheus = client
@@ -7604,7 +7636,8 @@ mod tests {
     #[tokio::test]
     async fn automatic_chat_uses_semantic_cache_for_similar_prompt() {
         let (upstream_url, calls) = spawn_counting_chat_upstream("cache-model").await;
-        let config = semantic_cache_config(upstream_url);
+        let mut config = semantic_cache_config(upstream_url);
+        config.budget.max_chat_requests = Some(2);
         let router_url = spawn_router(config).await;
         let client = reqwest::Client::new();
 
@@ -7676,6 +7709,7 @@ mod tests {
         assert_eq!(metrics["semantic_cache_misses"], 1);
         assert_eq!(metrics["semantic_cache_hits"], 1);
         assert_eq!(metrics["chat_requests"], 2);
+        assert_eq!(metrics["budget"]["used_chat_requests"], 2);
     }
 
     #[tokio::test]
@@ -7948,7 +7982,8 @@ mod tests {
             "autohand-router-shadow-eval-{}.jsonl",
             uuid::Uuid::new_v4()
         ));
-        let config = shadow_eval_config(upstream_url, shadow_path.clone());
+        let mut config = shadow_eval_config(upstream_url, shadow_path.clone());
+        config.budget.max_chat_requests = Some(1);
         let router_url = spawn_router(config).await;
         let client = reqwest::Client::new();
 
@@ -7997,6 +8032,7 @@ mod tests {
         assert_eq!(metrics["shadow_eval_samples"], 1);
         assert_eq!(metrics["shadow_eval_successes"], 1);
         assert_eq!(metrics["shadow_eval_errors"], 0);
+        assert_eq!(metrics["budget"]["used_chat_requests"], 1);
         let _ = std::fs::remove_file(shadow_path);
     }
 
@@ -8022,6 +8058,7 @@ mod tests {
         });
         config.shadow_eval.judge.model = Some("shadow-judge".to_string());
         config.shadow_eval.judge.timeout_ms = 500;
+        config.budget.max_chat_requests = Some(1);
         let router_url = spawn_router(config).await;
         let client = reqwest::Client::new();
 
@@ -8061,6 +8098,15 @@ mod tests {
             (record["shadow_score"].as_f64().unwrap() - 0.9).abs() < 0.001,
             "{record}"
         );
+        let metrics = client
+            .get(format!("{router_url}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(metrics["budget"]["used_chat_requests"], 1);
         let _ = std::fs::remove_file(shadow_path);
     }
 
@@ -8445,7 +8491,7 @@ mod tests {
             serde_json::json!(["api_key"])
         );
 
-        let trace = std::fs::read_to_string(&trace_path).unwrap();
+        let trace = wait_for_complete_jsonl_record(&trace_path).await;
         assert!(trace.contains("[redacted]"));
         for secret in ["sk-tool-secret", "owner@example.com", "metadata-secret"] {
             assert!(
@@ -8899,6 +8945,96 @@ mod tests {
 
         let _ = std::fs::remove_file(ledger_path.with_extension("json.lock"));
         let _ = std::fs::remove_file(ledger_path);
+    }
+
+    #[tokio::test]
+    async fn credential_budget_scope_prevents_one_token_from_exhausting_another() {
+        let (upstream_url, calls) = spawn_counting_chat_upstream("cache-model").await;
+        let mut config = semantic_cache_config(upstream_url);
+        config.auth.bearer_tokens = vec!["token-a".to_string(), "token-b".to_string()];
+        config.budget.max_chat_requests = Some(1);
+        config.budget.accounting.scope = BudgetAccountingScope::Credential;
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({
+            "model": "cache-model",
+            "messages": [{"role": "user", "content": "budgeted"}]
+        });
+
+        let first_a = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .bearer_auth("token-a")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert!(first_a.status().is_success());
+        let second_a = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .bearer_auth("token-a")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(second_a.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let first_b = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .bearer_auth("token-b")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert!(first_b.status().is_success());
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 2);
+
+        let metrics = client
+            .get(format!("{router_url}/metrics"))
+            .bearer_auth("token-b")
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(metrics["budget"]["accounting_semantics"], "logical_request");
+        assert_eq!(metrics["budget"]["accounting_scope"], "credential");
+        assert_eq!(
+            metrics["budget"]["by_scope"]["credential-0"]["request_count"],
+            1
+        );
+        assert_eq!(
+            metrics["budget"]["by_scope"]["credential-1"]["request_count"],
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn logical_request_budget_keeps_a_single_charge_after_upstream_failure() {
+        let upstream_url = spawn_chat_upstream("cache-model", StatusCode::BAD_GATEWAY).await;
+        let mut config = semantic_cache_config(upstream_url);
+        config.budget.max_chat_requests = Some(1);
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({
+            "model": "cache-model",
+            "messages": [{"role": "user", "content": "fail once"}]
+        });
+
+        let failed = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
+        let rejected = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[test]
@@ -10221,6 +10357,7 @@ mod tests {
                     backend: BudgetAccountingBackend::File,
                     file_path: Some(ledger_path.to_string_lossy().to_string()),
                     lock_timeout_ms: 1_000,
+                    ..Default::default()
                 },
             },
             telemetry: TelemetryConfig::default(),

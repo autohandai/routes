@@ -123,6 +123,10 @@ pub struct BudgetAccountingConfig {
     pub file_path: Option<String>,
     #[serde(default = "default_budget_lock_timeout_ms")]
     pub lock_timeout_ms: u64,
+    #[serde(default)]
+    pub semantics: BudgetAccountingSemantics,
+    #[serde(default)]
+    pub scope: BudgetAccountingScope,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -130,6 +134,21 @@ pub struct BudgetAccountingConfig {
 pub enum BudgetAccountingBackend {
     Process,
     File,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetAccountingSemantics {
+    #[default]
+    LogicalRequest,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetAccountingScope {
+    #[default]
+    Global,
+    Credential,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -927,6 +946,8 @@ impl Default for BudgetAccountingConfig {
             backend: BudgetAccountingBackend::Process,
             file_path: None,
             lock_timeout_ms: default_budget_lock_timeout_ms(),
+            semantics: BudgetAccountingSemantics::LogicalRequest,
+            scope: BudgetAccountingScope::Global,
         }
     }
 }

@@ -1121,6 +1121,8 @@ fn schemas() -> Value {
             "type": "object",
             "properties": {
                 "accounting_backend": { "type": "string", "enum": ["disabled", "process", "file"] },
+                "accounting_semantics": { "type": "string", "enum": ["logical_request"] },
+                "accounting_scope": { "type": "string", "enum": ["global", "credential"] },
                 "max_chat_requests": { "type": ["integer", "null"] },
                 "max_total_tokens": { "type": ["integer", "null"] },
                 "max_estimated_cost_micros": { "type": ["integer", "null"] },
@@ -1129,7 +1131,8 @@ fn schemas() -> Value {
                 "used_estimated_cost_micros": { "type": "integer" },
                 "chat_requests_remaining": { "type": ["integer", "null"] },
                 "total_tokens_remaining": { "type": ["integer", "null"] },
-                "estimated_cost_micros_remaining": { "type": ["integer", "null"] }
+                "estimated_cost_micros_remaining": { "type": ["integer", "null"] },
+                "by_scope": { "type": "object", "additionalProperties": { "type": "object" } }
             }
         }
     })

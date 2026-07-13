@@ -257,9 +257,13 @@ budget:
     backend: process
     file_path:
     lock_timeout_ms: 1000
+    semantics: logical_request
+    scope: credential
 ```
 
-`max_estimated_cost_micros` is measured in micro-dollars using each model's configured per-million token prices. The `file` backend uses a lock-protected JSON ledger so multiple local router processes can share reservations.
+`max_estimated_cost_micros` is measured in micro-dollars using each model's configured per-million token prices. The `file` backend uses a lock-protected JSON ledger so multiple local router processes can share reservations. `scope: credential` maintains an independent allowance for each configured bearer token without storing token values; unauthenticated localhost traffic uses the `anonymous` scope. `scope: global` preserves one process/file-wide allowance.
+
+Budget accounting deliberately uses `semantics: logical_request`, not authoritative provider spend. One foreground proxy request reserves a conservative input-plus-requested-output estimate exactly once before any upstream dispatch. Cache hits retain that one logical charge. Retries, transient failover to another model, and failures after reservation do not add or refund charges; shadow evaluation and classifier/judge control-plane calls are explicitly uncharged. This avoids ambiguous double charges and makes the guard deterministic across streaming, missing usage data, and restarts. Provider-reported actual usage remains available in usage metrics, but operators needing invoice-grade spend enforcement must reconcile those metrics with provider billing rather than treating this logical guard as a spend ledger.
 
 ## Decision Traces
 

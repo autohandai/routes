@@ -77,6 +77,8 @@ fn defs() -> Value {
         "ClassifierBackend": string_enum(&["heuristic", "llm_judge", "route_llm"]),
         "StorageBackend": string_enum(&["memory", "file"]),
         "BudgetAccountingBackend": string_enum(&["process", "file"]),
+        "BudgetAccountingSemantics": string_enum(&["logical_request"]),
+        "BudgetAccountingScope": string_enum(&["global", "credential"]),
         "SafetyRoutingAction": string_enum(&["allow", "reject", "redact", "force_route"]),
         "ModelEndpoint": string_enum(&[
             "chat",
@@ -210,7 +212,9 @@ fn defs() -> Value {
             "properties": {
                 "backend": ref_schema("BudgetAccountingBackend"),
                 "file_path": nullable_string(),
-                "lock_timeout_ms": integer_min_default(1, 1000)
+                "lock_timeout_ms": integer_min_default(1, 1000),
+                "semantics": ref_schema("BudgetAccountingSemantics"),
+                "scope": ref_schema("BudgetAccountingScope")
             }
         },
         "TelemetryConfig": {

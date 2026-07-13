@@ -17,6 +17,8 @@ budget:
     backend: process
     file_path:
     lock_timeout_ms: 1000
+    semantics: logical_request
+    scope: credential
 
 telemetry:
   # Disabled when null. Writes route/chat.auto decision traces as JSONL.

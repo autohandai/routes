@@ -6,6 +6,7 @@ use crate::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -24,13 +25,29 @@ pub struct BudgetUsageSnapshot {
     pub request_count: u64,
     pub total_tokens: u64,
     pub estimated_cost_micros: u64,
+    #[serde(default)]
+    pub by_scope: HashMap<String, BudgetScopeUsageSnapshot>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BudgetScopeUsageSnapshot {
+    pub request_count: u64,
+    pub total_tokens: u64,
+    pub estimated_cost_micros: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct BudgetReservation {
+    pub id: uuid::Uuid,
+    pub class: BudgetChargeClass,
     pub request_count: u64,
     pub total_tokens: u64,
     pub estimated_cost_micros: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetChargeClass {
+    ForegroundLogicalRequest,
 }
 
 impl BudgetAccounting {
@@ -58,10 +75,35 @@ impl BudgetAccounting {
         budget: &BudgetConfig,
         reservation: BudgetReservation,
     ) -> Result<()> {
-        match self {
-            Self::Process(ledger) => ledger.reserve(budget, reservation),
-            Self::File(ledger) => ledger.reserve(budget.clone(), reservation).await,
+        self.reserve_scoped(budget, "global", reservation).await
+    }
+
+    pub async fn reserve_scoped(
+        &self,
+        budget: &BudgetConfig,
+        scope: &str,
+        reservation: BudgetReservation,
+    ) -> Result<()> {
+        anyhow::ensure!(!scope.trim().is_empty(), "budget scope cannot be empty");
+        let result = match self {
+            Self::Process(ledger) => ledger.reserve(budget, scope, reservation),
+            Self::File(ledger) => {
+                ledger
+                    .reserve(budget.clone(), scope.to_string(), reservation)
+                    .await
+            }
+        };
+        if result.is_ok() {
+            tracing::debug!(
+                reservation_id = %reservation.id,
+                scope,
+                class = ?reservation.class,
+                tokens = reservation.total_tokens,
+                cost_micros = reservation.estimated_cost_micros,
+                "logical request budget reserved"
+            );
         }
+        result
     }
 
     pub async fn snapshot(&self) -> Option<BudgetUsageSnapshot> {
@@ -78,12 +120,19 @@ pub struct ProcessBudgetLedger {
 }
 
 impl ProcessBudgetLedger {
-    fn reserve(&self, budget: &BudgetConfig, reservation: BudgetReservation) -> Result<()> {
+    fn reserve(
+        &self,
+        budget: &BudgetConfig,
+        scope: &str,
+        reservation: BudgetReservation,
+    ) -> Result<()> {
         let mut usage = self
             .usage
             .lock()
             .map_err(|_| anyhow::anyhow!("process budget ledger lock poisoned"))?;
-        ensure_within_budget(budget, &usage, reservation)?;
+        let scoped = usage.by_scope.entry(scope.to_string()).or_default();
+        ensure_within_budget(budget, scoped, reservation)?;
+        add_scope_reservation(scoped, reservation);
         add_reservation(&mut usage, reservation);
         Ok(())
     }
@@ -112,6 +161,8 @@ impl BudgetReservation {
             / 1_000_000.0;
         let estimated_cost_micros = ((input_cost + output_cost) * 1_000_000.0).round() as u64;
         Self {
+            id: uuid::Uuid::new_v4(),
+            class: BudgetChargeClass::ForegroundLogicalRequest,
             request_count: 1,
             total_tokens,
             estimated_cost_micros,
@@ -148,11 +199,12 @@ impl FileBudgetLedger {
     async fn reserve(
         self: &Arc<Self>,
         budget: BudgetConfig,
+        scope: String,
         reservation: BudgetReservation,
     ) -> Result<()> {
         let store = Arc::clone(self);
         self.blocking
-            .run(move || store.reserve_blocking(&budget, reservation))
+            .run(move || store.reserve_blocking(&budget, &scope, reservation))
             .await
     }
 
@@ -164,11 +216,14 @@ impl FileBudgetLedger {
     fn reserve_blocking(
         &self,
         budget: &BudgetConfig,
+        scope: &str,
         reservation: BudgetReservation,
     ) -> Result<()> {
         let _lock = FileLeaseLock::acquire(&self.lock_path, self.lock_timeout, "budget ledger")?;
         let mut usage = self.read_usage()?;
-        ensure_within_budget(budget, &usage, reservation)?;
+        let scoped = usage.by_scope.entry(scope.to_string()).or_default();
+        ensure_within_budget(budget, scoped, reservation)?;
+        add_scope_reservation(scoped, reservation);
         add_reservation(&mut usage, reservation);
         self.write_usage(&usage)
     }
@@ -180,8 +235,27 @@ impl FileBudgetLedger {
 
     fn read_usage(&self) -> Result<BudgetUsageSnapshot> {
         match fs::read_to_string(&self.path) {
-            Ok(raw) => serde_json::from_str(&raw)
-                .with_context(|| format!("failed to parse budget ledger {}", self.path.display())),
+            Ok(raw) => {
+                let mut usage =
+                    serde_json::from_str::<BudgetUsageSnapshot>(&raw).with_context(|| {
+                        format!("failed to parse budget ledger {}", self.path.display())
+                    })?;
+                if usage.by_scope.is_empty()
+                    && (usage.request_count > 0
+                        || usage.total_tokens > 0
+                        || usage.estimated_cost_micros > 0)
+                {
+                    usage.by_scope.insert(
+                        "global".to_string(),
+                        BudgetScopeUsageSnapshot {
+                            request_count: usage.request_count,
+                            total_tokens: usage.total_tokens,
+                            estimated_cost_micros: usage.estimated_cost_micros,
+                        },
+                    );
+                }
+                Ok(usage)
+            }
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(BudgetUsageSnapshot::default()),
             Err(error) => Err(error)
                 .with_context(|| format!("failed to read budget ledger {}", self.path.display())),
@@ -204,9 +278,19 @@ fn add_reservation(usage: &mut BudgetUsageSnapshot, reservation: BudgetReservati
         .saturating_add(reservation.estimated_cost_micros);
 }
 
+fn add_scope_reservation(usage: &mut BudgetScopeUsageSnapshot, reservation: BudgetReservation) {
+    usage.request_count = usage
+        .request_count
+        .saturating_add(reservation.request_count);
+    usage.total_tokens = usage.total_tokens.saturating_add(reservation.total_tokens);
+    usage.estimated_cost_micros = usage
+        .estimated_cost_micros
+        .saturating_add(reservation.estimated_cost_micros);
+}
+
 fn ensure_within_budget(
     budget: &BudgetConfig,
-    usage: &BudgetUsageSnapshot,
+    usage: &BudgetScopeUsageSnapshot,
     reservation: BudgetReservation,
 ) -> Result<()> {
     if let Some(limit) = budget.max_chat_requests {
@@ -246,7 +330,9 @@ fn ensure_within_budget(
 mod tests {
     use super::{BudgetAccounting, BudgetReservation};
     use crate::{
-        config::{BudgetAccountingBackend, BudgetAccountingConfig, BudgetConfig},
+        config::{
+            BudgetAccountingBackend, BudgetAccountingConfig, BudgetAccountingScope, BudgetConfig,
+        },
         file_state::FileLeaseLock,
         types::ModelConfig,
     };
@@ -267,6 +353,7 @@ mod tests {
                 backend: BudgetAccountingBackend::File,
                 file_path: Some(path.to_string_lossy().to_string()),
                 lock_timeout_ms: 1_000,
+                ..Default::default()
             },
         };
         let first = BudgetAccounting::from_budget_config(&budget).unwrap();
@@ -280,6 +367,52 @@ mod tests {
         assert_eq!(first.snapshot().await.unwrap().request_count, 1);
         let _ = fs::remove_file(path.with_extension("json.lock"));
         let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn credential_scopes_are_independent_and_survive_file_ledger_restart() {
+        let path = temp_path("credential-scopes");
+        let budget = BudgetConfig {
+            max_chat_requests: Some(1),
+            max_total_tokens: Some(20),
+            max_estimated_cost_micros: None,
+            accounting: BudgetAccountingConfig {
+                backend: BudgetAccountingBackend::File,
+                file_path: Some(path.to_string_lossy().to_string()),
+                lock_timeout_ms: 1_000,
+                scope: BudgetAccountingScope::Credential,
+                ..Default::default()
+            },
+        };
+        let reservation = BudgetReservation::new(&test_model(), 10, 0);
+        let first = BudgetAccounting::from_budget_config(&budget).unwrap();
+        first
+            .reserve_scoped(&budget, "credential-0", reservation)
+            .await
+            .unwrap();
+        first
+            .reserve_scoped(&budget, "credential-1", reservation)
+            .await
+            .unwrap();
+        assert!(
+            first
+                .reserve_scoped(&budget, "credential-0", reservation)
+                .await
+                .is_err()
+        );
+
+        let restarted = BudgetAccounting::from_budget_config(&budget).unwrap();
+        let snapshot = restarted.snapshot().await.unwrap();
+        assert_eq!(snapshot.request_count, 2);
+        assert_eq!(snapshot.by_scope["credential-0"].request_count, 1);
+        assert_eq!(snapshot.by_scope["credential-1"].request_count, 1);
+        assert!(
+            restarted
+                .reserve_scoped(&budget, "credential-1", reservation)
+                .await
+                .is_err()
+        );
+        cleanup(&path);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -430,6 +563,7 @@ mod tests {
                 backend: BudgetAccountingBackend::File,
                 file_path: Some(path.to_string_lossy().to_string()),
                 lock_timeout_ms: 1_000,
+                ..Default::default()
             },
         }
     }

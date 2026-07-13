@@ -116,3 +116,44 @@ jobs:
       - name: Preserve classifier gate failure
         if: steps.classifier.outcome != 'success'
         run: exit 1
+
+  stream-promotion:
+    name: Live stream lifecycle promotion gate
+    runs-on:
+      - self-hosted
+      - router-staging
+    environment: router-staging
+    timeout-minutes: 45
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+    steps:
+      - name: Checkout candidate revision
+        uses: actions/checkout@v4
+
+      - name: Run credentialed stream lifecycle gate
+        id: streams
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts/live
+          cargo run --locked -- --config "${{ inputs.config_path }}" \
+            stream-live-gate \
+            --revision "${GITHUB_SHA}" \
+            --max-first-chunk-ms 5000 \
+            --max-completion-ms 30000 \
+            --cancellation-timeout-ms 5000 \
+            --shutdown-timeout-ms 5000 \
+            --output artifacts/live/stream-promotion.json
+
+      - name: Upload sanitized stream evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-stream-evidence-${{ github.sha }}
+          path: artifacts/live/stream-promotion.json
+          if-no-files-found: error
+
+      - name: Preserve stream gate failure
+        if: steps.streams.outcome != 'success'
+        run: exit 1

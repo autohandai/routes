@@ -20,6 +20,7 @@ use autohand_router::{
     router::RoutingEngine,
     runtime_gate::run_runtime_gate,
     server::{self, AppState},
+    stream_gate::{StreamLiveGateConfig, run_stream_live_gate},
     types::{ClassifyResponse, MultimodelRequest, RouterPolicy, SelectedClassifications},
 };
 use clap::{Parser, Subcommand};
@@ -239,6 +240,20 @@ enum Command {
         min_model_accuracy: f32,
         #[arg(long, default_value_t = 0.0)]
         min_provider_accuracy: f32,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    StreamLiveGate {
+        #[arg(long, env = "GITHUB_SHA", default_value = "working-tree")]
+        revision: String,
+        #[arg(long, default_value_t = 5_000)]
+        max_first_chunk_ms: u64,
+        #[arg(long, default_value_t = 30_000)]
+        max_completion_ms: u64,
+        #[arg(long, default_value_t = 5_000)]
+        cancellation_timeout_ms: u64,
+        #[arg(long, default_value_t = 5_000)]
+        shutdown_timeout_ms: u64,
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -766,6 +781,36 @@ async fn main() -> Result<()> {
                     "classifier live gate failed: {}",
                     report.failures.join("; ")
                 );
+            }
+            Ok(())
+        }
+        Command::StreamLiveGate {
+            revision,
+            max_first_chunk_ms,
+            max_completion_ms,
+            cancellation_timeout_ms,
+            shutdown_timeout_ms,
+            output,
+        } => {
+            let config = RouterConfig::from_path(&cli.config)?;
+            let report = run_stream_live_gate(
+                &config,
+                StreamLiveGateConfig {
+                    revision,
+                    max_first_chunk_ms,
+                    max_completion_ms,
+                    cancellation_timeout_ms,
+                    shutdown_timeout_ms,
+                },
+            )
+            .await?;
+            if let Some(path) = output {
+                fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+                println!("wrote stream live-gate report {}", path.display());
+            }
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.pass {
+                anyhow::bail!("stream live gate failed: {}", report.failures.join("; "));
             }
             Ok(())
         }

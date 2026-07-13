@@ -411,6 +411,21 @@ cargo run --locked -- --config router.with-judge.yaml \
 
 The artifact is aggregate-only and redacted. Timeout, invalid-JSON, and 429 injections run locally with credentials removed and must each fall back exactly once to deterministic routing.
 
+Gate streaming behavior for every configured provider/model profile that advertises it:
+
+```bash
+cargo run --locked -- --config router.production.yaml \
+  stream-live-gate \
+  --revision "$(git rev-parse HEAD)" \
+  --max-first-chunk-ms 5000 \
+  --max-completion-ms 30000 \
+  --cancellation-timeout-ms 5000 \
+  --shutdown-timeout-ms 5000 \
+  --output artifacts/live/stream-promotion.json
+```
+
+The command requires byte-for-byte SSE passthrough, terminal usage, bounded completion and cancellation, released provider capacity, and healthy readiness after cancellation. It also runs credential-free `Retry-After`, mid-body-close, and active-stream shutdown injections. Advertised profiles cannot skip; native adapters whose declared contract rejects streaming are recorded as justified skips. Run this only in a controlled environment because it contacts every advertised provider/model pair in the selected config.
+
 ## Evaluation and Calibration
 
 Evaluation datasets are JSONL files with prompt, expected tier, optional domain, optional exact model/provider expectations, policy, filters, and required capabilities:

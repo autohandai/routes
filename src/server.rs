@@ -492,6 +492,10 @@ pub struct RouterMetrics {
     upstream_http_errors: AtomicU64,
     upstream_transport_errors: AtomicU64,
     upstream_stream_errors: AtomicU64,
+    streams_active: AtomicU64,
+    streams_completed: AtomicU64,
+    streams_cancelled: AtomicU64,
+    stream_evidence: Mutex<HashMap<StreamEvidenceKey, StreamEvidenceAggregate>>,
     budget_rejections: AtomicU64,
     semantic_cache_hits: AtomicU64,
     semantic_cache_misses: AtomicU64,
@@ -533,6 +537,10 @@ struct MetricsSnapshot {
     upstream_http_errors: u64,
     upstream_transport_errors: u64,
     upstream_stream_errors: u64,
+    streams_active: u64,
+    streams_completed: u64,
+    streams_cancelled: u64,
+    stream_evidence: Vec<StreamEvidenceSnapshot>,
     budget_rejections: u64,
     semantic_cache_hits: u64,
     semantic_cache_misses: u64,
@@ -596,6 +604,38 @@ struct UpstreamOutcomeKey {
     outcome: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StreamEvidenceKey {
+    endpoint: &'static str,
+    provider: String,
+    model: String,
+}
+
+#[derive(Debug, Default, Clone)]
+struct StreamEvidenceAggregate {
+    completed: u64,
+    cancelled: u64,
+    body_errors: u64,
+    last_outcome: String,
+    last_bytes: u64,
+    last_fnv1a_64: String,
+    last_terminal_usage_present: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamEvidenceSnapshot {
+    endpoint: &'static str,
+    provider: String,
+    model: String,
+    completed: u64,
+    cancelled: u64,
+    body_errors: u64,
+    last_outcome: String,
+    last_bytes: u64,
+    last_fnv1a_64: String,
+    last_terminal_usage_present: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct UpstreamOutcomeSnapshot {
     scope: &'static str,
@@ -651,6 +691,10 @@ impl RouterMetrics {
             upstream_http_errors: self.upstream_http_errors.load(Ordering::Relaxed),
             upstream_transport_errors: self.upstream_transport_errors.load(Ordering::Relaxed),
             upstream_stream_errors: self.upstream_stream_errors.load(Ordering::Relaxed),
+            streams_active: self.streams_active.load(Ordering::Relaxed),
+            streams_completed: self.streams_completed.load(Ordering::Relaxed),
+            streams_cancelled: self.streams_cancelled.load(Ordering::Relaxed),
+            stream_evidence: snapshot_stream_evidence(&self.stream_evidence),
             budget_rejections: self.budget_rejections.load(Ordering::Relaxed),
             semantic_cache_hits: self.semantic_cache_hits.load(Ordering::Relaxed),
             semantic_cache_misses: self.semantic_cache_misses.load(Ordering::Relaxed),
@@ -701,6 +745,50 @@ impl RouterMetrics {
                     outcome,
                 })
                 .or_default() += 1;
+        }
+    }
+
+    fn stream_started(&self) {
+        self.streams_active.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_stream_terminal(
+        &self,
+        endpoint: &'static str,
+        model: &ModelConfig,
+        outcome: &'static str,
+        bytes: u64,
+        fnv1a_64: u64,
+        terminal_usage_present: bool,
+    ) {
+        match outcome {
+            "success" => {
+                self.streams_completed.fetch_add(1, Ordering::Relaxed);
+            }
+            "cancelled" => {
+                self.streams_cancelled.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+        if let Ok(mut evidence) = self.stream_evidence.lock() {
+            let entry = evidence
+                .entry(StreamEvidenceKey {
+                    endpoint,
+                    provider: model.provider.clone(),
+                    model: model.id.clone(),
+                })
+                .or_default();
+            match outcome {
+                "success" => entry.completed = entry.completed.saturating_add(1),
+                "cancelled" => entry.cancelled = entry.cancelled.saturating_add(1),
+                "body_error" => entry.body_errors = entry.body_errors.saturating_add(1),
+                _ => {}
+            }
+            entry.last_outcome = outcome.to_string();
+            entry.last_bytes = bytes;
+            entry.last_fnv1a_64 = format!("{fnv1a_64:016x}");
+            entry.last_terminal_usage_present = terminal_usage_present;
         }
     }
 
@@ -912,6 +1000,8 @@ struct StreamMetricsObserver {
     final_http_recorded: bool,
     started: Instant,
     first_chunk_recorded: bool,
+    forwarded_bytes: u64,
+    forwarded_fnv1a_64: u64,
 }
 
 impl StreamMetricsObserver {
@@ -929,6 +1019,11 @@ impl StreamMetricsObserver {
                 self.first_chunk_recorded = true;
             }
             self.parser.push(chunk);
+            self.forwarded_bytes = self.forwarded_bytes.saturating_add(chunk.len() as u64);
+            for byte in chunk {
+                self.forwarded_fnv1a_64 ^= u64::from(*byte);
+                self.forwarded_fnv1a_64 = self.forwarded_fnv1a_64.wrapping_mul(0x100000001b3);
+            }
         }
     }
 
@@ -936,7 +1031,7 @@ impl StreamMetricsObserver {
         if self.terminal {
             return;
         }
-        self.record_usage();
+        let terminal_usage_present = self.record_usage();
         record_provider_health_error(
             &self.state,
             &self.config,
@@ -967,6 +1062,14 @@ impl StreamMetricsObserver {
             );
         }
         self.record_duration("error");
+        self.state.metrics.record_stream_terminal(
+            self.endpoint,
+            &self.model,
+            "body_error",
+            self.forwarded_bytes,
+            self.forwarded_fnv1a_64,
+            terminal_usage_present,
+        );
         self.terminal = true;
     }
 
@@ -974,7 +1077,7 @@ impl StreamMetricsObserver {
         if self.terminal {
             return;
         }
-        self.record_usage();
+        let terminal_usage_present = self.record_usage();
         if !self.final_http_recorded {
             self.state.metrics.record_upstream_outcome(
                 "final",
@@ -984,13 +1087,24 @@ impl StreamMetricsObserver {
             );
         }
         self.record_duration("success");
+        self.state.metrics.record_stream_terminal(
+            self.endpoint,
+            &self.model,
+            "success",
+            self.forwarded_bytes,
+            self.forwarded_fnv1a_64,
+            terminal_usage_present,
+        );
         self.terminal = true;
     }
 
-    fn record_usage(&mut self) {
+    fn record_usage(&mut self) -> bool {
         let parser = std::mem::take(&mut self.parser);
         if let Some(usage) = parser.finish() {
             self.state.metrics.record_usage(&self.model, usage);
+            true
+        } else {
+            false
         }
     }
 
@@ -1010,7 +1124,19 @@ impl Drop for StreamMetricsObserver {
     fn drop(&mut self) {
         if !self.terminal {
             self.record_duration("cancelled");
+            self.state.metrics.record_stream_terminal(
+                self.endpoint,
+                &self.model,
+                "cancelled",
+                self.forwarded_bytes,
+                self.forwarded_fnv1a_64,
+                false,
+            );
         }
+        self.state
+            .metrics
+            .streams_active
+            .fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -1080,6 +1206,36 @@ fn snapshot_upstream_outcomes(
             .then_with(|| left.provider.cmp(&right.provider))
             .then_with(|| left.model.cmp(&right.model))
             .then_with(|| left.outcome.cmp(right.outcome))
+    });
+    snapshots
+}
+
+fn snapshot_stream_evidence(
+    map: &Mutex<HashMap<StreamEvidenceKey, StreamEvidenceAggregate>>,
+) -> Vec<StreamEvidenceSnapshot> {
+    let Ok(map) = map.lock() else {
+        return Vec::new();
+    };
+    let mut snapshots = map
+        .iter()
+        .map(|(key, value)| StreamEvidenceSnapshot {
+            endpoint: key.endpoint,
+            provider: key.provider.clone(),
+            model: key.model.clone(),
+            completed: value.completed,
+            cancelled: value.cancelled,
+            body_errors: value.body_errors,
+            last_outcome: value.last_outcome.clone(),
+            last_bytes: value.last_bytes,
+            last_fnv1a_64: value.last_fnv1a_64.clone(),
+            last_terminal_usage_present: value.last_terminal_usage_present,
+        })
+        .collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| {
+        left.endpoint
+            .cmp(right.endpoint)
+            .then_with(|| left.provider.cmp(&right.provider))
+            .then_with(|| left.model.cmp(&right.model))
     });
     snapshots
 }
@@ -1651,6 +1807,18 @@ fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     push_labeled_metric(
         &mut output,
         "autohand_router_events_total",
+        &[("event", "streams_completed")],
+        snapshot.streams_completed,
+    );
+    push_labeled_metric(
+        &mut output,
+        "autohand_router_events_total",
+        &[("event", "streams_cancelled")],
+        snapshot.streams_cancelled,
+    );
+    push_labeled_metric(
+        &mut output,
+        "autohand_router_events_total",
         &[("event", "budget_rejections")],
         snapshot.budget_rejections,
     );
@@ -1720,6 +1888,19 @@ fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         &[("event", "selected_models")],
         snapshot.selected_models,
     );
+
+    push_metric_family(
+        &mut output,
+        "autohand_router_streams_active",
+        "gauge",
+        "Currently active upstream response streams.",
+    );
+    push_metric(
+        &mut output,
+        "autohand_router_streams_active",
+        snapshot.streams_active,
+    );
+    push_stream_evidence_metrics(&mut output, &snapshot.stream_evidence);
 
     push_metric_family(
         &mut output,
@@ -1879,6 +2060,34 @@ fn push_upstream_outcome_metrics(output: &mut String, outcomes: &[UpstreamOutcom
             ],
             outcome.count,
         );
+    }
+}
+
+fn push_stream_evidence_metrics(output: &mut String, streams: &[StreamEvidenceSnapshot]) {
+    push_metric_family(
+        output,
+        "autohand_router_stream_lifecycle_total",
+        "counter",
+        "Completed, cancelled, and body-error streams by configured provider/model.",
+    );
+    for stream in streams {
+        for (outcome, value) in [
+            ("completed", stream.completed),
+            ("cancelled", stream.cancelled),
+            ("body_error", stream.body_errors),
+        ] {
+            push_labeled_metric(
+                output,
+                "autohand_router_stream_lifecycle_total",
+                &[
+                    ("endpoint", stream.endpoint),
+                    ("provider", &stream.provider),
+                    ("model", &stream.model),
+                    ("outcome", outcome),
+                ],
+                value,
+            );
+        }
     }
 }
 
@@ -5431,6 +5640,7 @@ async fn upstream_response(
                 if final_http_recorded {
                     record_final_http_outcome(&state, endpoint, model, status);
                 }
+                state.metrics.stream_started();
                 let observer = StreamMetricsObserver {
                     state: state.clone(),
                     config: state.engine.config(),
@@ -5442,6 +5652,8 @@ async fn upstream_response(
                     final_http_recorded,
                     started: Instant::now(),
                     first_chunk_recorded: false,
+                    forwarded_bytes: 0,
+                    forwarded_fnv1a_64: 0xcbf29ce484222325,
                 };
                 let stream_idle_timeout = state
                     .engine
@@ -6090,7 +6302,7 @@ mod tests {
         routing::post,
     };
     use bytes::Bytes;
-    use futures_util::{future::join_all, stream as futures_stream};
+    use futures_util::{StreamExt, future::join_all, stream as futures_stream};
     use serde_json::Value;
     use std::{
         io,
@@ -6128,6 +6340,15 @@ mod tests {
             super::request_endpoint_label("/v1/router/configured-provider"),
             "provider_router"
         );
+    }
+
+    fn test_fnv1a_64(bytes: &[u8]) -> u64 {
+        let mut hash = 0xcbf29ce484222325_u64;
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
     }
 
     #[tokio::test]
@@ -7433,6 +7654,17 @@ mod tests {
         assert_eq!(success_metrics["completion_tokens"], 3);
         assert_eq!(success_metrics["total_tokens"], 10);
         assert_eq!(success_metrics["upstream_stream_errors"], 0);
+        assert_eq!(success_metrics["streams_active"], 0);
+        assert_eq!(success_metrics["streams_completed"], 1);
+        assert_eq!(success_metrics["streams_cancelled"], 0);
+        let stream = &success_metrics["stream_evidence"][0];
+        assert_eq!(stream["last_outcome"], "success");
+        assert_eq!(stream["last_bytes"], body.len());
+        assert_eq!(
+            stream["last_fnv1a_64"],
+            format!("{:016x}", test_fnv1a_64(&body))
+        );
+        assert_eq!(stream["last_terminal_usage_present"], true);
         assert!(
             success_metrics["upstream_outcomes"]
                 .as_array()
@@ -7471,6 +7703,12 @@ mod tests {
         assert_eq!(failure_metrics["completion_tokens"], 3);
         assert_eq!(failure_metrics["upstream_errors"], 1);
         assert_eq!(failure_metrics["upstream_stream_errors"], 1);
+        assert_eq!(failure_metrics["streams_active"], 0);
+        assert_eq!(failure_metrics["stream_evidence"][0]["body_errors"], 1);
+        assert_eq!(
+            failure_metrics["stream_evidence"][0]["last_outcome"],
+            "body_error"
+        );
         assert!(
             failure_metrics["upstream_outcomes"]
                 .as_array()
@@ -7481,6 +7719,71 @@ mod tests {
                         && item["endpoint"] == "chat"
                         && item["outcome"] == "stream_error"
                 })
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_stream_records_cancellation_and_releases_provider_capacity() {
+        let upstream = spawn_slow_streaming_chat_upstream().await;
+        let mut config = semantic_cache_config(upstream);
+        config.providers[0].max_concurrency = Some(1);
+        config.providers[0].queue_timeout_ms = Some(500);
+        let router = spawn_router(config).await;
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{router}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "cache-model",
+                "messages": [{"role":"user","content":"cancel stream"}],
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        let mut stream = response.bytes_stream();
+        let first = stream.next().await.unwrap().unwrap();
+        drop(stream);
+
+        let mut metrics = Value::Null;
+        for _ in 0..30 {
+            metrics = client
+                .get(format!("{router}/metrics"))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap();
+            if metrics["streams_cancelled"] == 1 && metrics["streams_active"] == 0 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(metrics["streams_active"], 0);
+        assert_eq!(metrics["streams_cancelled"], 1);
+        assert_eq!(metrics["stream_evidence"][0]["last_outcome"], "cancelled");
+        assert_eq!(metrics["stream_evidence"][0]["last_bytes"], first.len());
+        assert_eq!(
+            metrics["stream_evidence"][0]["last_fnv1a_64"],
+            format!("{:016x}", test_fnv1a_64(&first))
+        );
+
+        let next = reqwest::Client::new()
+            .post(format!("{router}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "cache-model",
+                "messages": [{"role":"user","content":"capacity released"}],
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(next.status().is_success());
+        let next_body = next.bytes().await.unwrap();
+        assert!(
+            next_body
+                .windows(12)
+                .any(|window| window == b"data: [DONE]")
         );
     }
 

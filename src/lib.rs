@@ -23,6 +23,7 @@ pub mod semantic_cache;
 pub mod server;
 pub mod shadow_eval;
 pub mod sticky;
+pub mod stream_gate;
 pub mod telemetry;
 pub mod tokens;
 pub mod types;

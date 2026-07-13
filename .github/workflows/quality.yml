@@ -1,0 +1,77 @@
+name: Quality gates
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Release-blocking quality gates
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust quality components
+        run: rustup component add rustfmt clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run strict Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Validate example config
+        run: cargo run --locked -- --config examples/router.yaml validate
+
+      - name: Validate production config
+        run: cargo run --locked -- --config docs/examples/router.production.yaml validate
+
+      - name: Generate and assert public contracts
+        run: ./scripts/check-contracts.sh artifacts/contracts
+
+      - name: Run production heuristic eval gate
+        id: eval_gate
+        continue-on-error: true
+        run: |
+          cargo run --locked -- --config examples/router.yaml eval-gate examples/eval.production.jsonl \
+            --min-examples 50 \
+            --min-accuracy 0.90 \
+            --min-domain-accuracy 0.90 \
+            --min-model-accuracy 0.95 \
+            --min-provider-accuracy 0.95 \
+            --min-domain-examples 50 \
+            --min-model-examples 11 \
+            --min-provider-examples 22 \
+            --output artifacts/router.eval-gate.json
+
+      - name: Upload eval and contract artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-gate-artifacts-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+
+      - name: Enforce production eval result
+        if: steps.eval_gate.outcome != 'success'
+        run: exit 1
+
+      - name: Exercise the HTTP runtime gate
+        run: cargo run --locked -- runtime-gate --output artifacts/router.runtime-gate.json
+
+      - name: Test advisory exception policy
+        run: ./scripts/test-advisory-exceptions.sh
+
+      - name: Install pinned RustSec scanner
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Audit locked dependencies
+        run: ./scripts/audit-dependencies.sh

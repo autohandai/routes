@@ -1,0 +1,2 @@
+# RUSTSEC-ID|expires-YYYY-MM-DD|owner|reason
+# Keep this file empty unless a temporary, reviewed exception is unavoidable.

@@ -1,0 +1,1 @@
+CVE-2026-0001|2999-01-01|router-maintainers|policy parser malformed id fixture

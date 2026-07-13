@@ -23,7 +23,12 @@ cargo fmt
 cargo test
 cargo run -- --config examples/router.yaml validate
 cargo run -- --config examples/router.yaml openapi
+./scripts/check-contracts.sh
+./scripts/test-advisory-exceptions.sh
+./scripts/audit-dependencies.sh
 ```
+
+The reusable release-blocking quality workflow also runs strict Clippy, validates both example and production configs, enforces the 50-example production eval gate, and exercises the controlled HTTP runtime gate. Dependency exceptions follow the owner/reason/expiry contract in [docs/security.md](docs/security.md).
 
 ## Adding a provider
 

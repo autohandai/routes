@@ -23,8 +23,13 @@ permissions:
   contents: write
 
 jobs:
+  quality:
+    name: Release-blocking quality gates
+    uses: ./.github/workflows/quality.yml
+
   build:
     name: Build ${{ matrix.target }}
+    needs: quality
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -82,7 +87,9 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    needs: build
+    needs:
+      - quality
+      - build
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 

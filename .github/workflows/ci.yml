@@ -7,6 +7,10 @@ on:
       - main
 
 jobs:
+  quality:
+    name: Release-blocking quality gates
+    uses: ./.github/workflows/quality.yml
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

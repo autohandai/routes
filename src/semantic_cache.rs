@@ -34,12 +34,14 @@ impl SemanticCacheEndpoint {
 pub struct SemanticCacheRequest {
     pub endpoint: SemanticCacheEndpoint,
     pub prompt: String,
+    pub scope_key: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct SemanticCacheWrite {
     pub endpoint: SemanticCacheEndpoint,
     pub prompt: String,
+    pub scope_key: String,
     pub embedding: SemanticCacheEmbedding,
 }
 
@@ -62,6 +64,8 @@ pub struct SemanticCacheSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SemanticCacheEntry {
     endpoint: SemanticCacheEndpoint,
+    #[serde(default)]
+    scope_key: String,
     model: String,
     provider: String,
     embedding: SemanticCacheEmbedding,
@@ -164,6 +168,7 @@ impl SemanticCache {
         }
         let entry = SemanticCacheEntry {
             endpoint: write.endpoint,
+            scope_key: write.scope_key,
             model: model.to_string(),
             provider: provider.to_string(),
             embedding: write.embedding,
@@ -287,6 +292,7 @@ fn best_hit(
         .iter()
         .filter(|entry| {
             entry.endpoint == request.endpoint
+                && entry.scope_key == request.scope_key
                 && entry.embedding.model == query.model
                 && candidate_models.contains(&entry.model)
         })
@@ -553,6 +559,7 @@ mod tests {
             SemanticCacheWrite {
                 endpoint: SemanticCacheEndpoint::Chat,
                 prompt: "Explain Rust ownership with examples".to_string(),
+                scope_key: "scope-a".to_string(),
                 embedding: SemanticCacheEmbedding::local_hash(
                     "Explain Rust ownership with examples",
                 )
@@ -571,6 +578,7 @@ mod tests {
                 &SemanticCacheRequest {
                     endpoint: SemanticCacheEndpoint::Chat,
                     prompt: "Explain Rust ownership examples".to_string(),
+                    scope_key: "scope-a".to_string(),
                 },
                 &["model-a".to_string()],
                 &SemanticCacheEmbedding::local_hash("Explain Rust ownership examples").unwrap(),
@@ -599,6 +607,7 @@ mod tests {
             SemanticCacheWrite {
                 endpoint: SemanticCacheEndpoint::Responses,
                 prompt: "Summarize routing docs".to_string(),
+                scope_key: "scope-a".to_string(),
                 embedding: SemanticCacheEmbedding::local_hash("Summarize routing docs").unwrap(),
             },
             "model-a",
@@ -615,6 +624,7 @@ mod tests {
                     &SemanticCacheRequest {
                         endpoint: SemanticCacheEndpoint::Responses,
                         prompt: "Summarize routing docs".to_string(),
+                        scope_key: "scope-a".to_string(),
                     },
                     &["model-a".to_string()],
                     &SemanticCacheEmbedding::local_hash("Summarize routing docs").unwrap(),
@@ -641,6 +651,7 @@ mod tests {
             SemanticCacheWrite {
                 endpoint: SemanticCacheEndpoint::Chat,
                 prompt: "Prompt A".to_string(),
+                scope_key: "scope-a".to_string(),
                 embedding: SemanticCacheEmbedding::dense("embed-model", vec![0.1, 0.2, 0.3])
                     .unwrap(),
             },
@@ -657,6 +668,7 @@ mod tests {
                 &SemanticCacheRequest {
                     endpoint: SemanticCacheEndpoint::Chat,
                     prompt: "Prompt B".to_string(),
+                    scope_key: "scope-a".to_string(),
                 },
                 &["model-a".to_string()],
                 &SemanticCacheEmbedding::dense("embed-model", vec![0.1, 0.2, 0.3]).unwrap(),
@@ -692,6 +704,7 @@ mod tests {
             SemanticCacheWrite {
                 endpoint: SemanticCacheEndpoint::Chat,
                 prompt: "Explain Rust ownership with examples".to_string(),
+                scope_key: "scope-a".to_string(),
                 embedding: SemanticCacheEmbedding::local_hash(
                     "Explain Rust ownership with examples",
                 )
@@ -709,6 +722,7 @@ mod tests {
                 &SemanticCacheRequest {
                     endpoint: SemanticCacheEndpoint::Chat,
                     prompt: "Explain Rust ownership examples".to_string(),
+                    scope_key: "scope-a".to_string(),
                 },
                 &["model-a".to_string()],
                 &SemanticCacheEmbedding::local_hash("Explain Rust ownership examples").unwrap(),
@@ -719,5 +733,47 @@ mod tests {
         assert_eq!(hit.body, Bytes::from_static(b"{\"cached\":true}"));
         assert_eq!(second.snapshot().entries, 1);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn semantic_cache_requires_an_exact_scope_match() {
+        let cache = SemanticCache::default();
+        let config = SemanticCacheConfig {
+            enabled: true,
+            embedding_model: "local-hash".to_string(),
+            similarity_threshold: 0.0,
+            ttl_seconds: 60,
+            max_entries: 16,
+            backend: SemanticCacheBackend::Memory,
+            file_path: None,
+            lock_timeout_ms: 1_000,
+        };
+        cache.record(
+            &config,
+            SemanticCacheWrite {
+                endpoint: SemanticCacheEndpoint::Chat,
+                prompt: "same prompt".to_string(),
+                scope_key: "history-a".to_string(),
+                embedding: SemanticCacheEmbedding::local_hash("same prompt").unwrap(),
+            },
+            "model-a",
+            "provider-a",
+            200,
+            Some("application/json".to_string()),
+            Bytes::from_static(b"{\"cached\":true}"),
+        );
+
+        let hit = cache.lookup(
+            &config,
+            &SemanticCacheRequest {
+                endpoint: SemanticCacheEndpoint::Chat,
+                prompt: "same prompt".to_string(),
+                scope_key: "history-b".to_string(),
+            },
+            &["model-a".to_string()],
+            &SemanticCacheEmbedding::local_hash("same prompt").unwrap(),
+        );
+
+        assert!(hit.is_none());
     }
 }

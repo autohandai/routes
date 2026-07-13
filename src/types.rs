@@ -651,6 +651,19 @@ impl OpenAiChatRequest {
         )
     }
 
+    pub fn semantic_cache_prompt(&self) -> Option<String> {
+        let message = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")?;
+        message
+            .content
+            .as_str()
+            .map(str::to_string)
+            .filter(|text| !text.trim().is_empty())
+    }
+
     pub fn required_capabilities(&self) -> Vec<ModelCapability> {
         let mut capabilities = Vec::new();
         if self
@@ -701,6 +714,13 @@ impl OpenAiResponsesRequest {
             serde_json::to_string(&self.input).unwrap_or_default(),
             serde_json::to_string(&self.extra).unwrap_or_default()
         )
+    }
+
+    pub fn semantic_cache_prompt(&self) -> Option<String> {
+        self.input
+            .as_str()
+            .map(str::to_string)
+            .filter(|text| !text.trim().is_empty())
     }
 
     pub fn into_upstream(mut self, model: String) -> Value {

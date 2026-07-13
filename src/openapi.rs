@@ -228,7 +228,8 @@ pub fn spec() -> Value {
                                 "x-autohand-router-failovers": { "schema": { "type": "integer" } },
                                 "x-autohand-router-input-tokens": { "schema": { "type": "integer" } },
                                 "x-autohand-router-output-tokens": { "schema": { "type": "integer" } },
-                                "x-autohand-router-cache": { "schema": { "type": "string", "enum": ["hit", "miss"] } },
+                                "x-autohand-router-cache": { "schema": { "type": "string", "enum": ["hit", "miss", "bypass"] } },
+                                "x-autohand-router-cache-bypass-reason": { "schema": { "type": "string" } },
                                 "x-autohand-router-cache-similarity": { "schema": { "type": "number" } },
                                 "x-autohand-router-cache-embedding-model": { "schema": { "type": "string" } },
                                 "x-autohand-router-request-id": { "schema": { "type": "string" } }
@@ -270,7 +271,8 @@ pub fn spec() -> Value {
                                 "x-autohand-router-failovers": { "schema": { "type": "integer" } },
                                 "x-autohand-router-input-tokens": { "schema": { "type": "integer" } },
                                 "x-autohand-router-output-tokens": { "schema": { "type": "integer" } },
-                                "x-autohand-router-cache": { "schema": { "type": "string", "enum": ["hit", "miss"] } },
+                                "x-autohand-router-cache": { "schema": { "type": "string", "enum": ["hit", "miss", "bypass"] } },
+                                "x-autohand-router-cache-bypass-reason": { "schema": { "type": "string" } },
                                 "x-autohand-router-cache-similarity": { "schema": { "type": "number" } },
                                 "x-autohand-router-cache-embedding-model": { "schema": { "type": "string" } },
                                 "x-autohand-router-request-id": { "schema": { "type": "string" } }

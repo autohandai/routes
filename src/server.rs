@@ -73,6 +73,18 @@ enum ShadowEvalDispatch {
     },
 }
 
+#[derive(Clone, Default)]
+struct SemanticCachePlan {
+    request: Option<SemanticCacheRequest>,
+    bypass_reason: Option<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+enum SemanticCacheResponseStatus {
+    Miss,
+    Bypass(&'static str),
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub engine: RoutingEngine<SmartClassifier>,
@@ -1296,7 +1308,7 @@ async fn chat_completions(
         models,
         estimated_input_tokens,
         requested_output_tokens,
-        semantic_cache_request,
+        semantic_cache_plan,
         shadow_eval_dispatch,
     ) = if automatic {
         let policy = parse_router_model_policy(&requested_model);
@@ -1367,14 +1379,15 @@ async fn chat_completions(
             models,
             route.estimated_input_tokens,
             route.requested_output_tokens,
-            semantic_cache_request_for_route(
+            semantic_cache_plan_for_route(
                 &config,
                 SemanticCacheEndpoint::Chat,
                 route.cacheability.as_ref(),
                 request.stream(),
-                route_input,
-            )
-            .filter(|_| semantic_cache_safe_for_request(&state.auth, &request.extra)),
+                semantic_cache_identity_for_chat(&request),
+                &state.auth,
+                &request.extra,
+            ),
             shadow_eval_dispatch,
         )
     } else {
@@ -1394,7 +1407,7 @@ async fn chat_completions(
             vec![model],
             estimate_tokens(&prompt),
             request.max_output_tokens().unwrap_or(1024),
-            None,
+            SemanticCachePlan::default(),
             None,
         )
     };
@@ -1407,7 +1420,7 @@ async fn chat_completions(
         automatic,
         estimated_input_tokens,
         requested_output_tokens,
-        semantic_cache_request,
+        semantic_cache_plan,
         shadow_eval_dispatch,
         sticky_key,
     )
@@ -1430,7 +1443,7 @@ async fn responses(
         models,
         estimated_input_tokens,
         requested_output_tokens,
-        semantic_cache_request,
+        semantic_cache_plan,
         shadow_eval_dispatch,
     ) = if automatic {
         let policy = parse_router_model_policy(&requested_model);
@@ -1506,14 +1519,15 @@ async fn responses(
             models,
             route.estimated_input_tokens,
             route.requested_output_tokens,
-            semantic_cache_request_for_route(
+            semantic_cache_plan_for_route(
                 &config,
                 SemanticCacheEndpoint::Responses,
                 route.cacheability.as_ref(),
                 request.stream(),
-                route_input,
-            )
-            .filter(|_| semantic_cache_safe_for_request(&state.auth, &request.extra)),
+                semantic_cache_identity_for_responses(&request),
+                &state.auth,
+                &request.extra,
+            ),
             shadow_eval_dispatch,
         )
     } else {
@@ -1533,7 +1547,7 @@ async fn responses(
             vec![model],
             estimate_tokens(&prompt),
             request.max_output_tokens().unwrap_or(1024),
-            None,
+            SemanticCachePlan::default(),
             None,
         )
     };
@@ -1546,7 +1560,7 @@ async fn responses(
         automatic,
         estimated_input_tokens,
         requested_output_tokens,
-        semantic_cache_request,
+        semantic_cache_plan,
         shadow_eval_dispatch,
         sticky_key,
     )
@@ -2393,23 +2407,141 @@ async fn parse_audio_multipart(
     })
 }
 
-fn semantic_cache_request_for_route(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemanticCacheIdentity {
+    prompt: String,
+    scope_key: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn semantic_cache_plan_for_route(
     config: &RouterConfig,
     endpoint: SemanticCacheEndpoint,
     cacheability: Option<&CacheabilityLabel>,
     stream: bool,
-    prompt: String,
-) -> Option<SemanticCacheRequest> {
-    if !config.cache.semantic.enabled || stream || prompt.trim().is_empty() {
-        return None;
+    identity: Option<SemanticCacheIdentity>,
+    auth: &RequestAuthenticator,
+    extra: &serde_json::Map<String, Value>,
+) -> SemanticCachePlan {
+    if !config.cache.semantic.enabled {
+        return SemanticCachePlan {
+            bypass_reason: Some("disabled"),
+            ..Default::default()
+        };
+    }
+    if stream {
+        return SemanticCachePlan {
+            bypass_reason: Some("streaming"),
+            ..Default::default()
+        };
+    }
+    if auth.is_enabled() {
+        return SemanticCachePlan {
+            bypass_reason: Some("authenticated"),
+            ..Default::default()
+        };
+    }
+    if !semantic_cache_safe_for_request(auth, extra) {
+        return SemanticCachePlan {
+            bypass_reason: Some("request_options"),
+            ..Default::default()
+        };
+    }
+    let Some(identity) = identity else {
+        return SemanticCachePlan {
+            bypass_reason: Some("unsupported_request_shape"),
+            ..Default::default()
+        };
+    };
+    if identity.prompt.trim().is_empty() {
+        return SemanticCachePlan {
+            bypass_reason: Some("empty_prompt"),
+            ..Default::default()
+        };
     }
     if !matches!(
         cacheability,
         Some(CacheabilityLabel::Medium | CacheabilityLabel::High)
     ) {
-        return None;
+        return SemanticCachePlan {
+            bypass_reason: Some("low_cacheability"),
+            ..Default::default()
+        };
     }
-    Some(SemanticCacheRequest { endpoint, prompt })
+    SemanticCachePlan {
+        request: Some(SemanticCacheRequest {
+            endpoint,
+            prompt: identity.prompt,
+            scope_key: identity.scope_key,
+        }),
+        bypass_reason: None,
+    }
+}
+
+fn semantic_cache_identity_for_chat(request: &OpenAiChatRequest) -> Option<SemanticCacheIdentity> {
+    let prompt = request.semantic_cache_prompt()?;
+    let mut scope = serde_json::to_value(request).ok()?;
+    let object = scope.as_object_mut()?;
+    object.remove("model");
+    object.remove("stream");
+    let messages = object.get_mut("messages")?.as_array_mut()?;
+    let current_user = messages.iter_mut().rev().find(|message| {
+        message
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(|role| role == "user")
+    })?;
+    current_user.as_object_mut()?.insert(
+        "content".to_string(),
+        Value::String("__autohand_semantic_cache_query_v1__".to_string()),
+    );
+    Some(SemanticCacheIdentity {
+        prompt,
+        scope_key: semantic_cache_scope_key(scope),
+    })
+}
+
+fn semantic_cache_identity_for_responses(
+    request: &OpenAiResponsesRequest,
+) -> Option<SemanticCacheIdentity> {
+    let prompt = request.semantic_cache_prompt()?;
+    let mut scope = serde_json::to_value(request).ok()?;
+    let object = scope.as_object_mut()?;
+    object.remove("model");
+    object.remove("stream");
+    object.insert(
+        "input".to_string(),
+        Value::String("__autohand_semantic_cache_query_v1__".to_string()),
+    );
+    Some(SemanticCacheIdentity {
+        prompt,
+        scope_key: semantic_cache_scope_key(scope),
+    })
+}
+
+fn semantic_cache_scope_key(scope: Value) -> String {
+    let canonical = canonical_json_value(scope);
+    let raw = serde_json::to_string(&canonical).expect("semantic cache scope serializes");
+    format!("v1:{raw}")
+}
+
+fn canonical_json_value(value: Value) -> Value {
+    match value {
+        Value::Array(values) => {
+            Value::Array(values.into_iter().map(canonical_json_value).collect())
+        }
+        Value::Object(object) => {
+            let mut entries = object.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json_value(value)))
+                    .collect(),
+            )
+        }
+        value => value,
+    }
 }
 
 fn semantic_cache_safe_for_request(
@@ -2621,10 +2753,14 @@ async fn dispatch_chat(
     allow_failover: bool,
     estimated_input_tokens: u32,
     requested_output_tokens: u32,
-    semantic_cache_request: Option<SemanticCacheRequest>,
+    semantic_cache_plan: SemanticCachePlan,
     shadow_eval_dispatch: Option<ShadowEvalDispatch>,
     sticky_key: Option<String>,
 ) -> Response {
+    let SemanticCachePlan {
+        request: semantic_cache_request,
+        bypass_reason: semantic_cache_bypass_reason,
+    } = semantic_cache_plan;
     let Some(first_model) = models.first() else {
         state
             .metrics
@@ -2664,6 +2800,15 @@ async fn dispatch_chat(
     let semantic_cache_embedding =
         semantic_cache_embedding_for_request(&state, &config, semantic_cache_request.as_ref())
             .await;
+    let semantic_cache_response_status = if semantic_cache_request.is_some() {
+        Some(if semantic_cache_embedding.is_some() {
+            SemanticCacheResponseStatus::Miss
+        } else {
+            SemanticCacheResponseStatus::Bypass("embedding_unavailable")
+        })
+    } else {
+        semantic_cache_bypass_reason.map(SemanticCacheResponseStatus::Bypass)
+    };
     let semantic_cache_hit = semantic_cache_request
         .as_ref()
         .zip(semantic_cache_embedding.as_ref())
@@ -2712,7 +2857,7 @@ async fn dispatch_chat(
         }
         return cached_upstream_response(hit, estimated_input_tokens, requested_output_tokens);
     }
-    if semantic_cache_request.is_some() {
+    if semantic_cache_request.is_some() && semantic_cache_embedding.is_some() {
         state
             .metrics
             .semantic_cache_misses
@@ -2772,8 +2917,10 @@ async fn dispatch_chat(
                         .map(|(request, embedding)| SemanticCacheWrite {
                             endpoint: request.endpoint,
                             prompt: request.prompt.clone(),
+                            scope_key: request.scope_key.clone(),
                             embedding,
                         }),
+                    semantic_cache_response_status,
                     shadow_eval_dispatch.clone(),
                 )
                 .await;
@@ -2825,10 +2972,14 @@ async fn dispatch_responses(
     allow_failover: bool,
     estimated_input_tokens: u32,
     requested_output_tokens: u32,
-    semantic_cache_request: Option<SemanticCacheRequest>,
+    semantic_cache_plan: SemanticCachePlan,
     shadow_eval_dispatch: Option<ShadowEvalDispatch>,
     sticky_key: Option<String>,
 ) -> Response {
+    let SemanticCachePlan {
+        request: semantic_cache_request,
+        bypass_reason: semantic_cache_bypass_reason,
+    } = semantic_cache_plan;
     let Some(first_model) = models.first() else {
         state
             .metrics
@@ -2868,6 +3019,15 @@ async fn dispatch_responses(
     let semantic_cache_embedding =
         semantic_cache_embedding_for_request(&state, &config, semantic_cache_request.as_ref())
             .await;
+    let semantic_cache_response_status = if semantic_cache_request.is_some() {
+        Some(if semantic_cache_embedding.is_some() {
+            SemanticCacheResponseStatus::Miss
+        } else {
+            SemanticCacheResponseStatus::Bypass("embedding_unavailable")
+        })
+    } else {
+        semantic_cache_bypass_reason.map(SemanticCacheResponseStatus::Bypass)
+    };
     let semantic_cache_hit = semantic_cache_request
         .as_ref()
         .zip(semantic_cache_embedding.as_ref())
@@ -2919,7 +3079,7 @@ async fn dispatch_responses(
         }
         return cached_upstream_response(hit, estimated_input_tokens, requested_output_tokens);
     }
-    if semantic_cache_request.is_some() {
+    if semantic_cache_request.is_some() && semantic_cache_embedding.is_some() {
         state
             .metrics
             .semantic_cache_misses
@@ -2979,8 +3139,10 @@ async fn dispatch_responses(
                         .map(|(request, embedding)| SemanticCacheWrite {
                             endpoint: request.endpoint,
                             prompt: request.prompt.clone(),
+                            scope_key: request.scope_key.clone(),
                             embedding,
                         }),
+                    semantic_cache_response_status,
                     shadow_eval_dispatch.clone(),
                 )
                 .await;
@@ -3111,6 +3273,7 @@ async fn dispatch_embeddings(
                     estimated_input_tokens,
                     0,
                     latency_ms,
+                    None,
                     None,
                     None,
                 )
@@ -3244,6 +3407,7 @@ async fn dispatch_images(
                     latency_ms,
                     None,
                     None,
+                    None,
                 )
                 .await;
             }
@@ -3373,6 +3537,7 @@ async fn dispatch_speech(
                     estimated_input_tokens,
                     0,
                     latency_ms,
+                    None,
                     None,
                     None,
                 )
@@ -3526,6 +3691,7 @@ async fn dispatch_audio_multipart(
                     estimated_input_tokens,
                     0,
                     latency_ms,
+                    None,
                     None,
                     None,
                 )
@@ -3708,6 +3874,7 @@ async fn upstream_response(
     requested_output_tokens: u32,
     selected_latency_ms: u32,
     semantic_cache_write: Option<SemanticCacheWrite>,
+    semantic_cache_status: Option<SemanticCacheResponseStatus>,
     shadow_eval_dispatch: Option<ShadowEvalDispatch>,
 ) -> Response {
     let status = upstream.status();
@@ -3716,7 +3883,6 @@ async fn upstream_response(
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let semantic_cache_was_enabled = semantic_cache_write.is_some();
     let mut response = if stream {
         match upstream {
             ProviderResponse::Upstream { response, permit } => {
@@ -3833,10 +3999,20 @@ async fn upstream_response(
             .headers_mut()
             .insert("x-autohand-router-output-tokens", value);
     }
-    if semantic_cache_was_enabled && let Ok(value) = HeaderValue::from_str("miss") {
+    if let Some(cache_status) = semantic_cache_status {
+        let (status, bypass_reason) = match cache_status {
+            SemanticCacheResponseStatus::Miss => ("miss", None),
+            SemanticCacheResponseStatus::Bypass(reason) => ("bypass", Some(reason)),
+        };
         response
             .headers_mut()
-            .insert("x-autohand-router-cache", value);
+            .insert("x-autohand-router-cache", HeaderValue::from_static(status));
+        if let Some(reason) = bypass_reason {
+            response.headers_mut().insert(
+                "x-autohand-router-cache-bypass-reason",
+                HeaderValue::from_static(reason),
+            );
+        }
     }
     response
 }
@@ -4252,8 +4428,10 @@ mod tests {
     use super::{
         AppState, RequestAuthenticator, RouterMetrics, RoutingEndpoint, UsageAccounting, app,
         budget_violation, constant_time_eq, is_known_router_model, legacy_raw_difficulty,
-        parse_router_model_policy, prometheus_escape, semantic_cache_safe_for_request,
-        supported_model_ids, supported_provider_names, usage_from_value,
+        parse_router_model_policy, prometheus_escape, semantic_cache_identity_for_chat,
+        semantic_cache_identity_for_responses, semantic_cache_plan_for_route,
+        semantic_cache_safe_for_request, supported_model_ids, supported_provider_names,
+        usage_from_value,
     };
     use crate::{
         classifier::SmartClassifier,
@@ -4265,11 +4443,13 @@ mod tests {
         },
         provider::ProviderClient,
         router::RoutingEngine,
+        semantic_cache::SemanticCacheEndpoint,
         telemetry::DecisionLogger,
         types::{
-            ChatMessage, Classification, DifficultyLabel, DomainLabel, LegacyRouterMode,
-            ModelConfig, ModelEndpoint, OpenAiChatRequest, OpenAiSpeechRequest, ProviderConfig,
-            ProviderKind, RouterPolicy,
+            CacheabilityLabel, ChatMessage, Classification, DifficultyLabel, DomainLabel,
+            LegacyRouterMode, ModelConfig, ModelEndpoint, OpenAiChatRequest,
+            OpenAiResponsesRequest, OpenAiSpeechRequest, ProviderConfig, ProviderKind,
+            RouterPolicy,
         },
     };
     use axum::{
@@ -4363,6 +4543,125 @@ mod tests {
             &unauthenticated,
             &serde_json::Map::from_iter([("tools".to_string(), Value::Array(vec![]))])
         ));
+    }
+
+    #[test]
+    fn semantic_cache_scope_captures_conversation_history_and_message_extensions() {
+        let request = OpenAiChatRequest {
+            model: "auto".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: Value::String("Be concise".to_string()),
+                    extra: Default::default(),
+                },
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: Value::String("Earlier answer A".to_string()),
+                    extra: Default::default(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String("Explain Rust ownership".to_string()),
+                    extra: Default::default(),
+                },
+            ],
+            extra: Default::default(),
+        };
+        let original = semantic_cache_identity_for_chat(&request).unwrap();
+        assert_eq!(
+            original,
+            semantic_cache_identity_for_chat(&request.clone()).unwrap()
+        );
+
+        let mut changed_history = request.clone();
+        changed_history.messages[1].content = Value::String("Earlier answer B".to_string());
+        let changed_history = semantic_cache_identity_for_chat(&changed_history).unwrap();
+        assert_eq!(original.prompt, changed_history.prompt);
+        assert_ne!(original.scope_key, changed_history.scope_key);
+
+        let mut changed_extension = request;
+        changed_extension.messages[1].extra.insert(
+            "tool_calls".to_string(),
+            serde_json::json!([{"id":"call-1"}]),
+        );
+        let changed_extension = semantic_cache_identity_for_chat(&changed_extension).unwrap();
+        assert_eq!(original.prompt, changed_extension.prompt);
+        assert_ne!(original.scope_key, changed_extension.scope_key);
+    }
+
+    #[test]
+    fn semantic_cache_only_accepts_unambiguous_text_query_shapes() {
+        let chat = OpenAiChatRequest {
+            model: "auto".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: serde_json::json!([{"type":"text","text":"hello"}]),
+                extra: Default::default(),
+            }],
+            extra: Default::default(),
+        };
+        assert!(semantic_cache_identity_for_chat(&chat).is_none());
+
+        let responses = OpenAiResponsesRequest {
+            model: "auto".to_string(),
+            input: serde_json::json!([{"role":"user","content":"hello"}]),
+            extra: Default::default(),
+        };
+        assert!(semantic_cache_identity_for_responses(&responses).is_none());
+    }
+
+    #[test]
+    fn semantic_cache_plan_reports_why_automatic_requests_are_bypassed() {
+        let config = semantic_cache_config("http://127.0.0.1:1".to_string());
+        let auth = RequestAuthenticator::from_config(&config).unwrap();
+        let request = OpenAiChatRequest {
+            model: "auto".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: Value::String("Explain Rust ownership".to_string()),
+                extra: Default::default(),
+            }],
+            extra: Default::default(),
+        };
+        let identity = semantic_cache_identity_for_chat(&request);
+
+        let streaming = semantic_cache_plan_for_route(
+            &config,
+            SemanticCacheEndpoint::Chat,
+            Some(&CacheabilityLabel::High),
+            true,
+            identity.clone(),
+            &auth,
+            &Default::default(),
+        );
+        assert_eq!(streaming.bypass_reason, Some("streaming"));
+
+        let unsupported_shape = semantic_cache_plan_for_route(
+            &config,
+            SemanticCacheEndpoint::Chat,
+            Some(&CacheabilityLabel::High),
+            false,
+            None,
+            &auth,
+            &Default::default(),
+        );
+        assert_eq!(
+            unsupported_shape.bypass_reason,
+            Some("unsupported_request_shape")
+        );
+
+        let options = serde_json::Map::from_iter([("temperature".to_string(), Value::from(0.5))]);
+        let request_options = semantic_cache_plan_for_route(
+            &config,
+            SemanticCacheEndpoint::Chat,
+            Some(&CacheabilityLabel::High),
+            false,
+            identity,
+            &auth,
+            &options,
+        );
+        assert_eq!(request_options.bypass_reason, Some("request_options"));
     }
 
     #[test]
@@ -4863,6 +5162,94 @@ mod tests {
         assert_eq!(metrics["semantic_cache_misses"], 1);
         assert_eq!(metrics["semantic_cache_hits"], 1);
         assert_eq!(metrics["chat_requests"], 2);
+    }
+
+    #[tokio::test]
+    async fn automatic_chat_cache_does_not_cross_conversation_history() {
+        let (upstream_url, calls) = spawn_counting_chat_upstream("cache-model").await;
+        let config = semantic_cache_config(upstream_url);
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        for prior_answer in ["Earlier answer A", "Earlier answer B"] {
+            let response = client
+                .post(format!("{router_url}/v1/chat/completions"))
+                .json(&OpenAiChatRequest {
+                    model: "auto".to_string(),
+                    messages: vec![
+                        ChatMessage {
+                            role: "assistant".to_string(),
+                            content: Value::String(prior_answer.to_string()),
+                            extra: Default::default(),
+                        },
+                        ChatMessage {
+                            role: "user".to_string(),
+                            content: Value::String(
+                                "Explain Rust ownership with examples".to_string(),
+                            ),
+                            extra: Default::default(),
+                        },
+                    ],
+                    extra: Default::default(),
+                })
+                .send()
+                .await
+                .unwrap();
+
+            assert!(response.status().is_success());
+            assert_eq!(
+                response
+                    .headers()
+                    .get("x-autohand-router-cache")
+                    .and_then(|value| value.to_str().ok()),
+                Some("miss")
+            );
+        }
+
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn automatic_chat_reports_semantic_cache_bypass_reason() {
+        let (upstream_url, calls) = spawn_counting_chat_upstream("cache-model").await;
+        let config = semantic_cache_config(upstream_url);
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&OpenAiChatRequest {
+                model: "auto".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: serde_json::json!([{
+                        "type": "text",
+                        "text": "Explain Rust ownership with examples"
+                    }]),
+                    extra: Default::default(),
+                }],
+                extra: Default::default(),
+            })
+            .send()
+            .await
+            .unwrap();
+
+        assert!(response.status().is_success());
+        assert_eq!(
+            response
+                .headers()
+                .get("x-autohand-router-cache")
+                .and_then(|value| value.to_str().ok()),
+            Some("bypass")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-autohand-router-cache-bypass-reason")
+                .and_then(|value| value.to_str().ok()),
+            Some("unsupported_request_shape")
+        );
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 1);
     }
 
     #[tokio::test]

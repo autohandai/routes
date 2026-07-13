@@ -30,10 +30,11 @@ where
     C: PromptClassifier,
 {
     pub fn new(config: RouterConfig, classifier: C) -> Self {
+        let provider_health = ProviderHealthStore::new(&config.runtime.provider_health_sampler);
         Self {
             config: Arc::new(config),
             classifier: Arc::new(classifier),
-            provider_health: ProviderHealthStore::default(),
+            provider_health,
         }
     }
 

@@ -39,6 +39,25 @@ pub fn spec() -> Value {
                     }
                 }
             },
+            "/health/live": {
+                "get": {
+                    "summary": "Dependency-free liveness check",
+                    "security": [],
+                    "responses": {
+                        "200": { "description": "Process is alive" }
+                    }
+                }
+            },
+            "/health/ready": {
+                "get": {
+                    "summary": "Routing readiness check",
+                    "security": [],
+                    "responses": {
+                        "200": { "description": "At least one configured route is viable" },
+                        "503": { "description": "No configured route is currently viable" }
+                    }
+                }
+            },
             "/openapi.json": {
                 "get": {
                     "summary": "OpenAPI document",
@@ -207,7 +226,7 @@ pub fn spec() -> Value {
                                         "properties": {
                                             "providers": {
                                                 "type": "array",
-                                                "items": { "$ref": "#/components/schemas/ProviderHealth" }
+                                                "items": { "$ref": "#/components/schemas/ProviderHealthObservation" }
                                             },
                                             "sampled": {
                                                 "type": "array",
@@ -1001,14 +1020,19 @@ fn schemas() -> Value {
             "type": "object",
             "properties": {
                 "provider": { "type": "string" },
+                "adapter": { "type": "string" },
                 "status": { "type": "string", "enum": ["ok", "error", "unknown"] },
                 "status_code": { "type": ["integer", "null"] },
                 "error": { "type": ["string", "null"] },
                 "latency_ms": { "type": ["integer", "null"] },
                 "health_penalty": { "type": "number" },
-                "observed_unix_seconds": { "type": "integer" }
+                "observed_unix_seconds": { "type": "integer" },
+                "fresh_until_unix_seconds": { "type": "integer" },
+                "fresh": { "type": "boolean" },
+                "circuit_state": { "type": "string", "enum": ["closed", "open", "half_open"] },
+                "consecutive_failures": { "type": "integer" }
             },
-            "required": ["provider", "status", "health_penalty", "observed_unix_seconds"]
+            "required": ["provider", "adapter", "status", "health_penalty", "observed_unix_seconds", "fresh_until_unix_seconds", "fresh", "circuit_state", "consecutive_failures"]
         },
         "MetricsSnapshot": {
             "type": "object",
@@ -1132,6 +1156,8 @@ mod tests {
     fn openapi_spec_contains_core_paths() {
         let spec = spec();
         assert_eq!(spec["openapi"], "3.1.0");
+        assert!(spec["paths"]["/health/live"].is_object());
+        assert!(spec["paths"]["/health/ready"].is_object());
         assert!(spec["paths"]["/v1/router/classify"].is_object());
         assert!(spec["paths"]["/v1/router/raw"].is_object());
         assert!(spec["paths"]["/v1/router/{provider}"].is_object());

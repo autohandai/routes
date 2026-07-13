@@ -1539,7 +1539,7 @@ pub struct ProviderHealth {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderHealthStatus {
     Ok,

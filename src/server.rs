@@ -924,6 +924,8 @@ pub fn app(state: AppState) -> Router {
         .max_multipart_body_bytes;
     Router::new()
         .route("/health", get(health))
+        .route("/health/live", get(health))
+        .route("/health/ready", get(readiness))
         .route("/openapi.json", get(openapi_json))
         .route("/v1/router/raw", post(raw_router))
         .route("/v1/router/classify", post(classify))
@@ -971,11 +973,9 @@ fn start_provider_health_sampler(state: &AppState) {
     tokio::spawn(async move {
         sleep(Duration::from_millis(sampler.initial_delay_ms)).await;
         loop {
-            for provider in &providers {
-                let started = Instant::now();
-                let health = client.check_provider(provider).await;
-                let latency_ms = started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
-                let observation = store.record(health, latency_ms);
+            let observations =
+                check_providers_concurrently(&client, &providers, &store, &sampler, true).await;
+            for observation in observations {
                 tracing::debug!(
                     provider = observation.provider,
                     latency_ms = observation.latency_ms,
@@ -1055,6 +1055,32 @@ async fn wait_for_shutdown_signal() {
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true, "service": "autohand-router" }))
+}
+
+async fn readiness(State(state): State<Arc<AppState>>) -> Response {
+    let config = state.engine.config();
+    let health = state.engine.provider_health();
+    let viable_models = config
+        .models
+        .iter()
+        .filter(|model| health.provider_is_viable(&model.provider))
+        .map(|model| model.id.clone())
+        .collect::<Vec<_>>();
+    let ready = !viable_models.is_empty();
+    (
+        if ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        Json(serde_json::json!({
+            "ok": ready,
+            "service": "autohand-router",
+            "viable_models": viable_models,
+            "sampled": health.snapshot()
+        })),
+    )
+        .into_response()
 }
 
 async fn openapi_json() -> Json<Value> {
@@ -1189,7 +1215,10 @@ fn with_body_idle_timeout(request: Request<Body>, idle_timeout: Duration) -> Req
 
 fn is_public_request(request: &Request<Body>) -> bool {
     request.method() == Method::OPTIONS
-        || matches!(request.uri().path(), "/health" | "/openapi.json")
+        || matches!(
+            request.uri().path(),
+            "/health" | "/health/live" | "/health/ready" | "/openapi.json"
+        )
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -1727,14 +1756,77 @@ fn prometheus_escape(value: &str) -> String {
 
 async fn provider_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let config = state.engine.config();
-    let mut providers = Vec::with_capacity(config.providers.len());
-    for provider in &config.providers {
-        providers.push(state.providers.check_provider(provider).await);
-    }
+    let store = state.engine.provider_health();
+    let providers = check_providers_concurrently(
+        &state.providers,
+        &config.providers,
+        &store,
+        &config.runtime.provider_health_sampler,
+        true,
+    )
+    .await;
     Json(serde_json::json!({
         "providers": providers,
-        "sampled": state.engine.provider_health().snapshot()
+        "sampled": store.snapshot()
     }))
+}
+
+async fn check_providers_concurrently(
+    client: &ProviderClient,
+    providers: &[ProviderConfig],
+    store: &crate::health::ProviderHealthStore,
+    sampler: &crate::config::ProviderHealthSamplerConfig,
+    respect_circuits: bool,
+) -> Vec<crate::health::ProviderHealthObservation> {
+    let timeout_duration = Duration::from_millis(sampler.check_timeout_ms);
+    let mut observations = stream::iter(providers.iter().cloned())
+        .map(|provider| {
+            let client = client.clone();
+            let store = store.clone();
+            async move {
+                if respect_circuits && !store.should_probe(&provider.name) {
+                    return store.observation(&provider.name).unwrap_or_else(|| {
+                        store.record(
+                            ProviderHealth {
+                                provider: provider.name.clone(),
+                                adapter: provider.kind.chat_adapter_contract().name.to_string(),
+                                status: ProviderHealthStatus::Error,
+                                status_code: None,
+                                error: Some("provider circuit is open".to_string()),
+                            },
+                            0,
+                        )
+                    });
+                }
+                let started = Instant::now();
+                let health = match timeout(timeout_duration, client.check_provider(&provider)).await
+                {
+                    Ok(health) => health,
+                    Err(_) => ProviderHealth {
+                        provider: provider.name.clone(),
+                        adapter: provider.kind.chat_adapter_contract().name.to_string(),
+                        status: ProviderHealthStatus::Error,
+                        status_code: None,
+                        error: Some(format!(
+                            "provider health check exceeded {} ms",
+                            timeout_duration.as_millis()
+                        )),
+                    },
+                };
+                let latency_ms = elapsed_millis_u32(started);
+                if health.status == ProviderHealthStatus::Unknown
+                    && let Some(observation) = store.observation(&provider.name)
+                {
+                    return observation;
+                }
+                store.record(health, latency_ms)
+            }
+        })
+        .buffer_unordered(sampler.max_concurrent_checks)
+        .collect::<Vec<_>>()
+        .await;
+    observations.sort_by(|left, right| left.provider.cmp(&right.provider));
+    observations
 }
 
 async fn models(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -5661,7 +5753,7 @@ mod tests {
             Arc, Mutex,
             atomic::{AtomicU64, Ordering as AtomicOrdering},
         },
-        time::{Duration, SystemTime},
+        time::{Duration, Instant, SystemTime},
     };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -6153,6 +6245,86 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(token_a_limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn provider_status_checks_are_concurrent_and_bounded_by_the_slowest_provider() {
+        let mut urls = Vec::new();
+        for _ in 0..4 {
+            urls.push(spawn_health_server(80, StatusCode::OK).await);
+        }
+        let mut config = failover_config(urls[0].clone(), urls[1].clone());
+        for provider in &mut config.providers {
+            provider.health_path = Some("/health".to_string());
+        }
+        for (index, url) in urls.iter().enumerate().skip(2) {
+            let mut provider = config.providers[0].clone();
+            provider.name = format!("provider-{index}");
+            provider.base_url = url.clone();
+            config.providers.push(provider);
+            let mut model = config.models[0].clone();
+            model.id = format!("model-{index}");
+            model.provider = format!("provider-{index}");
+            config.models.push(model);
+        }
+        config.runtime.provider_health_sampler.max_concurrent_checks = 4;
+        config.runtime.provider_health_sampler.check_timeout_ms = 500;
+        let router_url = spawn_router(config).await;
+
+        let started = Instant::now();
+        let response = reqwest::get(format!("{router_url}/v1/router/providers"))
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert!(response.status().is_success());
+        let status = response.json::<Value>().await.unwrap();
+        assert_eq!(status["providers"].as_array().unwrap().len(), 4);
+        assert!(
+            elapsed < Duration::from_millis(220),
+            "four 80 ms checks took {elapsed:?}; expected concurrent execution"
+        );
+    }
+
+    #[tokio::test]
+    async fn liveness_is_dependency_free_and_readiness_tracks_route_viability() {
+        for (first_status, second_status, expected_ready) in [
+            (StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK, true),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::SERVICE_UNAVAILABLE,
+                false,
+            ),
+        ] {
+            let first = spawn_health_server(0, first_status).await;
+            let second = spawn_health_server(0, second_status).await;
+            let mut config = failover_config(first, second);
+            for provider in &mut config.providers {
+                provider.health_path = Some("/health".to_string());
+            }
+            let router_url = spawn_router(config).await;
+            let client = reqwest::Client::new();
+
+            let liveness = client
+                .get(format!("{router_url}/health/live"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(liveness.status(), StatusCode::OK);
+
+            client
+                .get(format!("{router_url}/v1/router/providers"))
+                .send()
+                .await
+                .unwrap();
+            let readiness = client
+                .get(format!("{router_url}/health/ready"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(readiness.status().is_success(), expected_ready);
+            let body = readiness.json::<Value>().await.unwrap();
+            assert_eq!(body["ok"], expected_ready);
+        }
     }
 
     #[tokio::test]
@@ -8580,6 +8752,25 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{addr}"), calls)
+    }
+
+    async fn spawn_health_server(delay_ms: u64, status: StatusCode) -> String {
+        async fn health(
+            axum::extract::State((delay_ms, status)): axum::extract::State<(u64, StatusCode)>,
+        ) -> axum::response::Response {
+            sleep(Duration::from_millis(delay_ms)).await;
+            (status, Json(serde_json::json!({"ok": status.is_success()}))).into_response()
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/health", axum::routing::get(health))
+            .with_state((delay_ms, status));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
     }
 
     async fn spawn_slow_streaming_chat_upstream() -> String {

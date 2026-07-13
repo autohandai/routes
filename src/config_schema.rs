@@ -246,7 +246,12 @@ fn defs() -> Value {
             "properties": {
                 "enabled": bool_default(false),
                 "interval_ms": integer_min_default(1, 30000),
-                "initial_delay_ms": integer_min_default(0, 500)
+                "initial_delay_ms": integer_min_default(0, 500),
+                "check_timeout_ms": integer_min_default(1, 5000),
+                "max_concurrent_checks": integer_min_default(1, 8),
+                "observation_ttl_ms": integer_min_default(1, 90000),
+                "circuit_failure_threshold": integer_min_default(1, 3),
+                "circuit_open_ms": integer_min_default(1, 30000)
             }
         },
         "CacheConfig": {

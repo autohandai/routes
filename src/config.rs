@@ -296,6 +296,16 @@ pub struct ProviderHealthSamplerConfig {
     pub interval_ms: u64,
     #[serde(default = "default_provider_health_initial_delay_ms")]
     pub initial_delay_ms: u64,
+    #[serde(default = "default_provider_health_check_timeout_ms")]
+    pub check_timeout_ms: u64,
+    #[serde(default = "default_provider_health_max_concurrent_checks")]
+    pub max_concurrent_checks: usize,
+    #[serde(default = "default_provider_health_observation_ttl_ms")]
+    pub observation_ttl_ms: u64,
+    #[serde(default = "default_circuit_failure_threshold")]
+    pub circuit_failure_threshold: u32,
+    #[serde(default = "default_circuit_open_ms")]
+    pub circuit_open_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -725,6 +735,11 @@ impl Default for ProviderHealthSamplerConfig {
             enabled: false,
             interval_ms: default_provider_health_interval_ms(),
             initial_delay_ms: default_provider_health_initial_delay_ms(),
+            check_timeout_ms: default_provider_health_check_timeout_ms(),
+            max_concurrent_checks: default_provider_health_max_concurrent_checks(),
+            observation_ttl_ms: default_provider_health_observation_ttl_ms(),
+            circuit_failure_threshold: default_circuit_failure_threshold(),
+            circuit_open_ms: default_circuit_open_ms(),
         }
     }
 }
@@ -775,6 +790,26 @@ fn default_provider_health_interval_ms() -> u64 {
 
 fn default_provider_health_initial_delay_ms() -> u64 {
     500
+}
+
+fn default_provider_health_check_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_provider_health_max_concurrent_checks() -> usize {
+    8
+}
+
+fn default_provider_health_observation_ttl_ms() -> u64 {
+    90_000
+}
+
+fn default_circuit_failure_threshold() -> u32 {
+    3
+}
+
+fn default_circuit_open_ms() -> u64 {
+    30_000
 }
 
 fn default_semantic_cache_embedding_model() -> String {
@@ -1329,6 +1364,26 @@ impl ProviderHealthSamplerConfig {
         anyhow::ensure!(
             self.interval_ms > 0,
             "runtime.provider_health_sampler.interval_ms must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.check_timeout_ms > 0,
+            "runtime.provider_health_sampler.check_timeout_ms must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.max_concurrent_checks > 0,
+            "runtime.provider_health_sampler.max_concurrent_checks must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.observation_ttl_ms > 0,
+            "runtime.provider_health_sampler.observation_ttl_ms must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.circuit_failure_threshold > 0,
+            "runtime.provider_health_sampler.circuit_failure_threshold must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.circuit_open_ms > 0,
+            "runtime.provider_health_sampler.circuit_open_ms must be greater than zero"
         );
         Ok(())
     }
@@ -2204,6 +2259,7 @@ mod tests {
             enabled: true,
             interval_ms: 0,
             initial_delay_ms: 0,
+            ..Default::default()
         };
 
         let error = config
@@ -2214,6 +2270,32 @@ mod tests {
                 .to_string()
                 .contains("runtime.provider_health_sampler.interval_ms")
         );
+    }
+
+    #[test]
+    fn rejects_zero_provider_health_freshness_and_circuit_controls() {
+        type SamplerMutation = fn(&mut ProviderHealthSamplerConfig);
+        let cases: [(&str, SamplerMutation); 5] = [
+            ("check_timeout_ms", |sampler| sampler.check_timeout_ms = 0),
+            ("max_concurrent_checks", |sampler| {
+                sampler.max_concurrent_checks = 0
+            }),
+            ("observation_ttl_ms", |sampler| {
+                sampler.observation_ttl_ms = 0
+            }),
+            ("circuit_failure_threshold", |sampler| {
+                sampler.circuit_failure_threshold = 0
+            }),
+            ("circuit_open_ms", |sampler| sampler.circuit_open_ms = 0),
+        ];
+        for (field, mutate) in cases {
+            let mut config = valid_config();
+            mutate(&mut config.runtime.provider_health_sampler);
+            let error = config
+                .validate()
+                .expect_err("zero health policy control rejected");
+            assert!(error.to_string().contains(field), "{error}");
+        }
     }
 
     #[test]

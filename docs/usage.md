@@ -154,9 +154,16 @@ runtime:
     enabled: true
     interval_ms: 30000
     initial_delay_ms: 500
+    check_timeout_ms: 5000
+    max_concurrent_checks: 8
+    observation_ttl_ms: 90000
+    circuit_failure_threshold: 3
+    circuit_open_ms: 30000
 ```
 
-When enabled during `serve`, the router periodically checks provider health endpoints, records observed latency/status, and applies sampled latency/error penalties during automatic routing.
+`/health` and `/health/live` are dependency-free liveness probes. `/health/ready` returns 200 while at least one configured model has a viable provider and 503 only when sampled provider failures leave no safe route.
+
+When enabled during `serve`, the router checks providers concurrently up to `max_concurrent_checks`, bounds each probe by `check_timeout_ms`, and records latency/status for automatic routing. Observations stop affecting scores after `observation_ttl_ms`. Repeated failures open a provider circuit; after `circuit_open_ms`, exactly one half-open probe is admitted, and a successful probe closes the circuit. `/v1/router/providers` reports freshness and circuit state for each provider.
 
 ## Cache
 

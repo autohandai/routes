@@ -43,6 +43,11 @@ runtime:
     enabled: false
     interval_ms: 30000
     initial_delay_ms: 500
+    check_timeout_ms: 5000
+    max_concurrent_checks: 8
+    observation_ttl_ms: 90000
+    circuit_failure_threshold: 3
+    circuit_open_ms: 30000
 
 cache:
   semantic:

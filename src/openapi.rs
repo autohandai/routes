@@ -956,6 +956,10 @@ fn schemas() -> Value {
                 "failover_successes": { "type": "integer" },
                 "auth_failures": { "type": "integer" },
                 "upstream_errors": { "type": "integer" },
+                "upstream_attempts": { "type": "integer" },
+                "upstream_http_errors": { "type": "integer" },
+                "upstream_transport_errors": { "type": "integer" },
+                "upstream_stream_errors": { "type": "integer" },
                 "budget_rejections": { "type": "integer" },
                 "semantic_cache_hits": { "type": "integer" },
                 "semantic_cache_misses": { "type": "integer" },
@@ -975,8 +979,22 @@ fn schemas() -> Value {
                 "estimated_cost_usd": { "type": "number" },
                 "per_model": { "type": "array", "items": { "$ref": "#/components/schemas/SelectionMetrics" } },
                 "per_provider": { "type": "array", "items": { "$ref": "#/components/schemas/SelectionMetrics" } },
+                "upstream_outcomes": { "type": "array", "items": { "$ref": "#/components/schemas/UpstreamOutcome" } },
                 "budget": { "$ref": "#/components/schemas/BudgetSnapshot" },
                 "judge": { "$ref": "#/components/schemas/JudgeMetricsSnapshot" }
+            }
+        },
+        "UpstreamOutcome": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["scope", "endpoint", "provider", "model", "outcome", "count"],
+            "properties": {
+                "scope": { "type": "string", "enum": ["attempt", "final", "stream"] },
+                "endpoint": { "type": "string" },
+                "provider": { "type": "string" },
+                "model": { "type": "string" },
+                "outcome": { "type": "string" },
+                "count": { "type": "integer" }
             }
         },
         "JudgeMetricsSnapshot": {

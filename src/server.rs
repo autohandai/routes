@@ -37,7 +37,7 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -189,6 +189,10 @@ pub struct RouterMetrics {
     failover_successes: AtomicU64,
     auth_failures: AtomicU64,
     upstream_errors: AtomicU64,
+    upstream_attempts: AtomicU64,
+    upstream_http_errors: AtomicU64,
+    upstream_transport_errors: AtomicU64,
+    upstream_stream_errors: AtomicU64,
     budget_rejections: AtomicU64,
     semantic_cache_hits: AtomicU64,
     semantic_cache_misses: AtomicU64,
@@ -207,6 +211,7 @@ pub struct RouterMetrics {
     estimated_cost_micros: AtomicU64,
     per_model: Mutex<HashMap<String, SelectionMetrics>>,
     per_provider: Mutex<HashMap<String, SelectionMetrics>>,
+    upstream_outcomes: Mutex<HashMap<UpstreamOutcomeKey, u64>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -225,6 +230,10 @@ struct MetricsSnapshot {
     failover_successes: u64,
     auth_failures: u64,
     upstream_errors: u64,
+    upstream_attempts: u64,
+    upstream_http_errors: u64,
+    upstream_transport_errors: u64,
+    upstream_stream_errors: u64,
     budget_rejections: u64,
     semantic_cache_hits: u64,
     semantic_cache_misses: u64,
@@ -244,6 +253,7 @@ struct MetricsSnapshot {
     estimated_cost_usd: f64,
     per_model: Vec<SelectionMetricsSnapshot>,
     per_provider: Vec<SelectionMetricsSnapshot>,
+    upstream_outcomes: Vec<UpstreamOutcomeSnapshot>,
     budget: BudgetSnapshot,
     judge: JudgeMetricsSnapshot,
 }
@@ -266,6 +276,25 @@ struct SelectionMetricsSnapshot {
     total_tokens: u64,
     estimated_cost_micros: u64,
     estimated_cost_usd: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct UpstreamOutcomeKey {
+    scope: &'static str,
+    endpoint: &'static str,
+    provider: String,
+    model: String,
+    outcome: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct UpstreamOutcomeSnapshot {
+    scope: &'static str,
+    endpoint: &'static str,
+    provider: String,
+    model: String,
+    outcome: &'static str,
+    count: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -305,6 +334,10 @@ impl RouterMetrics {
             failover_successes: self.failover_successes.load(Ordering::Relaxed),
             auth_failures: self.auth_failures.load(Ordering::Relaxed),
             upstream_errors: self.upstream_errors.load(Ordering::Relaxed),
+            upstream_attempts: self.upstream_attempts.load(Ordering::Relaxed),
+            upstream_http_errors: self.upstream_http_errors.load(Ordering::Relaxed),
+            upstream_transport_errors: self.upstream_transport_errors.load(Ordering::Relaxed),
+            upstream_stream_errors: self.upstream_stream_errors.load(Ordering::Relaxed),
             budget_rejections: self.budget_rejections.load(Ordering::Relaxed),
             semantic_cache_hits: self.semantic_cache_hits.load(Ordering::Relaxed),
             semantic_cache_misses: self.semantic_cache_misses.load(Ordering::Relaxed),
@@ -324,6 +357,7 @@ impl RouterMetrics {
             estimated_cost_usd: estimated_cost_micros as f64 / 1_000_000.0,
             per_model: snapshot_selection_map(&self.per_model),
             per_provider: snapshot_selection_map(&self.per_provider),
+            upstream_outcomes: snapshot_upstream_outcomes(&self.upstream_outcomes),
             budget: BudgetSnapshot::from_config(budget, accounting),
             judge,
         }
@@ -333,6 +367,26 @@ impl RouterMetrics {
         self.selected_models.fetch_add(1, Ordering::Relaxed);
         increment_selection(&self.per_model, &model.id, 1, 0, 0, 0, 0);
         increment_selection(&self.per_provider, &model.provider, 1, 0, 0, 0, 0);
+    }
+
+    fn record_upstream_outcome(
+        &self,
+        scope: &'static str,
+        endpoint: &'static str,
+        model: &ModelConfig,
+        outcome: &'static str,
+    ) {
+        if let Ok(mut outcomes) = self.upstream_outcomes.lock() {
+            *outcomes
+                .entry(UpstreamOutcomeKey {
+                    scope,
+                    endpoint,
+                    provider: model.provider.clone(),
+                    model: model.id.clone(),
+                    outcome,
+                })
+                .or_default() += 1;
+        }
     }
 
     fn record_usage(&self, model: &ModelConfig, usage: UsageAccounting) {
@@ -452,6 +506,155 @@ fn usage_from_value(value: &Value) -> Option<UsageAccounting> {
     })
 }
 
+#[derive(Default)]
+struct StreamingUsageParser {
+    line_buffer: Vec<u8>,
+    event_data: String,
+    usage: Option<UsageAccounting>,
+}
+
+impl StreamingUsageParser {
+    const MAX_BUFFER_BYTES: usize = 1024 * 1024;
+
+    fn push(&mut self, chunk: &[u8]) {
+        self.line_buffer.extend_from_slice(chunk);
+        if self.line_buffer.len() > Self::MAX_BUFFER_BYTES {
+            self.line_buffer.clear();
+            self.event_data.clear();
+            return;
+        }
+        while let Some(newline) = self.line_buffer.iter().position(|byte| *byte == b'\n') {
+            let mut line = self.line_buffer.drain(..=newline).collect::<Vec<_>>();
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            self.process_line(&line);
+        }
+    }
+
+    fn finish(mut self) -> Option<UsageAccounting> {
+        if !self.line_buffer.is_empty() {
+            let line = std::mem::take(&mut self.line_buffer);
+            self.process_line(&line);
+        }
+        self.finish_event();
+        self.usage
+    }
+
+    fn process_line(&mut self, line: &[u8]) {
+        if line.is_empty() {
+            self.finish_event();
+            return;
+        }
+        let Ok(line) = std::str::from_utf8(line) else {
+            return;
+        };
+        let Some(data) = line.strip_prefix("data:") else {
+            return;
+        };
+        if !self.event_data.is_empty() {
+            self.event_data.push('\n');
+        }
+        self.event_data.push_str(data.trim_start());
+    }
+
+    fn finish_event(&mut self) {
+        let data = std::mem::take(&mut self.event_data);
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            return;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            return;
+        };
+        if let Some(usage) =
+            usage_from_value(&value).or_else(|| value.get("response").and_then(usage_from_value))
+        {
+            self.usage = Some(usage);
+        }
+    }
+}
+
+struct StreamMetricsObserver {
+    state: Arc<AppState>,
+    config: Arc<RouterConfig>,
+    endpoint: &'static str,
+    model: ModelConfig,
+    selected_latency_ms: u32,
+    parser: StreamingUsageParser,
+    terminal: bool,
+    final_http_recorded: bool,
+}
+
+impl StreamMetricsObserver {
+    fn on_chunk(&mut self, chunk: &[u8]) {
+        if !self.terminal {
+            self.parser.push(chunk);
+        }
+    }
+
+    fn on_error(&mut self, error: &dyn std::fmt::Display) {
+        if self.terminal {
+            return;
+        }
+        self.record_usage();
+        record_provider_health_error(
+            &self.state,
+            &self.config,
+            &self.model,
+            error,
+            self.selected_latency_ms,
+        );
+        self.state
+            .metrics
+            .upstream_errors
+            .fetch_add(1, Ordering::Relaxed);
+        self.state
+            .metrics
+            .upstream_stream_errors
+            .fetch_add(1, Ordering::Relaxed);
+        self.state.metrics.record_upstream_outcome(
+            "stream",
+            self.endpoint,
+            &self.model,
+            "body_error",
+        );
+        if !self.final_http_recorded {
+            self.state.metrics.record_upstream_outcome(
+                "final",
+                self.endpoint,
+                &self.model,
+                "stream_error",
+            );
+        }
+        self.terminal = true;
+    }
+
+    fn on_end(&mut self) {
+        if self.terminal {
+            return;
+        }
+        self.record_usage();
+        if !self.final_http_recorded {
+            self.state.metrics.record_upstream_outcome(
+                "final",
+                self.endpoint,
+                &self.model,
+                "success",
+            );
+        }
+        self.terminal = true;
+    }
+
+    fn record_usage(&mut self) {
+        let parser = std::mem::take(&mut self.parser);
+        if let Some(usage) = parser.finish() {
+            self.state.metrics.record_usage(&self.model, usage);
+        }
+    }
+}
+
 fn increment_selection(
     map: &Mutex<HashMap<String, SelectionMetrics>>,
     id: &str,
@@ -491,6 +694,34 @@ fn snapshot_selection_map(
         })
         .collect::<Vec<_>>();
     snapshots.sort_by(|left, right| left.id.cmp(&right.id));
+    snapshots
+}
+
+fn snapshot_upstream_outcomes(
+    map: &Mutex<HashMap<UpstreamOutcomeKey, u64>>,
+) -> Vec<UpstreamOutcomeSnapshot> {
+    let Ok(map) = map.lock() else {
+        return Vec::new();
+    };
+    let mut snapshots = map
+        .iter()
+        .map(|(key, count)| UpstreamOutcomeSnapshot {
+            scope: key.scope,
+            endpoint: key.endpoint,
+            provider: key.provider.clone(),
+            model: key.model.clone(),
+            outcome: key.outcome,
+            count: *count,
+        })
+        .collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| {
+        left.scope
+            .cmp(right.scope)
+            .then_with(|| left.endpoint.cmp(right.endpoint))
+            .then_with(|| left.provider.cmp(&right.provider))
+            .then_with(|| left.model.cmp(&right.model))
+            .then_with(|| left.outcome.cmp(right.outcome))
+    });
     snapshots
 }
 
@@ -817,6 +1048,30 @@ fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     push_labeled_metric(
         &mut output,
         "autohand_router_events_total",
+        &[("event", "upstream_attempts")],
+        snapshot.upstream_attempts,
+    );
+    push_labeled_metric(
+        &mut output,
+        "autohand_router_events_total",
+        &[("event", "upstream_http_errors")],
+        snapshot.upstream_http_errors,
+    );
+    push_labeled_metric(
+        &mut output,
+        "autohand_router_events_total",
+        &[("event", "upstream_transport_errors")],
+        snapshot.upstream_transport_errors,
+    );
+    push_labeled_metric(
+        &mut output,
+        "autohand_router_events_total",
+        &[("event", "upstream_stream_errors")],
+        snapshot.upstream_stream_errors,
+    );
+    push_labeled_metric(
+        &mut output,
+        "autohand_router_events_total",
         &[("event", "budget_rejections")],
         snapshot.budget_rejections,
     );
@@ -891,7 +1146,7 @@ fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         &mut output,
         "autohand_router_tokens_total",
         "counter",
-        "Buffered upstream token usage counters.",
+        "Parsed buffered and streaming upstream token usage counters.",
     );
     push_labeled_metric(
         &mut output,
@@ -925,6 +1180,7 @@ fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
 
     push_selection_metrics(&mut output, "model", &snapshot.per_model);
     push_selection_metrics(&mut output, "provider", &snapshot.per_provider);
+    push_upstream_outcome_metrics(&mut output, &snapshot.upstream_outcomes);
     push_budget_metrics(&mut output, &snapshot.budget);
     push_judge_metrics(&mut output, &snapshot.judge);
     output
@@ -988,6 +1244,29 @@ fn push_selection_metrics(
             &cost_name,
             &[(label_name, id)],
             selection.estimated_cost_micros,
+        );
+    }
+}
+
+fn push_upstream_outcome_metrics(output: &mut String, outcomes: &[UpstreamOutcomeSnapshot]) {
+    push_metric_family(
+        output,
+        "autohand_router_upstream_outcomes_total",
+        "counter",
+        "Upstream attempt and final proxy outcomes by bounded endpoint/provider/model labels.",
+    );
+    for outcome in outcomes {
+        push_labeled_metric(
+            output,
+            "autohand_router_upstream_outcomes_total",
+            &[
+                ("scope", outcome.scope),
+                ("endpoint", outcome.endpoint),
+                ("provider", &outcome.provider),
+                ("model", &outcome.model),
+                ("outcome", outcome.outcome),
+            ],
+            outcome.count,
         );
     }
 }
@@ -2689,6 +2968,7 @@ async fn semantic_cache_embedding_for_request(
             record_provider_dispatch_response(
                 state,
                 config,
+                "semantic_cache_embeddings",
                 &model,
                 response.status(),
                 elapsed_millis_u32(started),
@@ -2699,6 +2979,7 @@ async fn semantic_cache_embedding_for_request(
             record_provider_dispatch_error(
                 state,
                 config,
+                "semantic_cache_embeddings",
                 &model,
                 &error,
                 elapsed_millis_u32(started),
@@ -2978,6 +3259,7 @@ async fn dispatch_chat(
                 record_provider_dispatch_response(
                     &state,
                     &config,
+                    "chat",
                     model,
                     response.status(),
                     selected_latency_ms,
@@ -2993,7 +3275,7 @@ async fn dispatch_chat(
                         .fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
-                if failovers > 0 {
+                if failovers > 0 && response.status().is_success() {
                     state
                         .metrics
                         .failover_successes
@@ -3004,6 +3286,7 @@ async fn dispatch_chat(
                 return upstream_response(
                     state.clone(),
                     response,
+                    "chat",
                     model,
                     request.stream(),
                     failovers,
@@ -3026,7 +3309,7 @@ async fn dispatch_chat(
             }
             Err(error) => {
                 let latency_ms = elapsed_millis_u32(started);
-                record_provider_dispatch_error(&state, &config, model, &error, latency_ms);
+                record_provider_dispatch_error(&state, &config, "chat", model, &error, latency_ms);
                 if allow_failover && index + 1 < models.len() {
                     failovers += 1;
                     state
@@ -3036,10 +3319,7 @@ async fn dispatch_chat(
                     last_error = Some(error.to_string());
                     continue;
                 }
-                state
-                    .metrics
-                    .upstream_errors
-                    .fetch_add(1, Ordering::Relaxed);
+                record_final_transport_error(&state, "chat", model);
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(ProviderClient::error_json(error.to_string())),
@@ -3200,6 +3480,7 @@ async fn dispatch_responses(
                 record_provider_dispatch_response(
                     &state,
                     &config,
+                    "responses",
                     model,
                     response.status(),
                     selected_latency_ms,
@@ -3215,7 +3496,7 @@ async fn dispatch_responses(
                         .fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
-                if failovers > 0 {
+                if failovers > 0 && response.status().is_success() {
                     state
                         .metrics
                         .failover_successes
@@ -3226,6 +3507,7 @@ async fn dispatch_responses(
                 return upstream_response(
                     state.clone(),
                     response,
+                    "responses",
                     model,
                     request.stream(),
                     failovers,
@@ -3248,7 +3530,14 @@ async fn dispatch_responses(
             }
             Err(error) => {
                 let latency_ms = elapsed_millis_u32(started);
-                record_provider_dispatch_error(&state, &config, model, &error, latency_ms);
+                record_provider_dispatch_error(
+                    &state,
+                    &config,
+                    "responses",
+                    model,
+                    &error,
+                    latency_ms,
+                );
                 if allow_failover && index + 1 < models.len() {
                     failovers += 1;
                     state
@@ -3258,10 +3547,7 @@ async fn dispatch_responses(
                     last_error = Some(error.to_string());
                     continue;
                 }
-                state
-                    .metrics
-                    .upstream_errors
-                    .fetch_add(1, Ordering::Relaxed);
+                record_final_transport_error(&state, "responses", model);
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(ProviderClient::error_json(error.to_string())),
@@ -3341,6 +3627,7 @@ async fn dispatch_embeddings(
                 record_provider_dispatch_response(
                     &state,
                     &config,
+                    "embeddings",
                     model,
                     response.status(),
                     latency_ms,
@@ -3356,7 +3643,7 @@ async fn dispatch_embeddings(
                         .fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
-                if failovers > 0 {
+                if failovers > 0 && response.status().is_success() {
                     state
                         .metrics
                         .failover_successes
@@ -3366,6 +3653,7 @@ async fn dispatch_embeddings(
                 return upstream_response(
                     state.clone(),
                     response,
+                    "embeddings",
                     model,
                     false,
                     failovers,
@@ -3380,7 +3668,14 @@ async fn dispatch_embeddings(
             }
             Err(error) => {
                 let latency_ms = elapsed_millis_u32(started);
-                record_provider_dispatch_error(&state, &config, model, &error, latency_ms);
+                record_provider_dispatch_error(
+                    &state,
+                    &config,
+                    "embeddings",
+                    model,
+                    &error,
+                    latency_ms,
+                );
                 if allow_failover && index + 1 < models.len() {
                     failovers += 1;
                     state
@@ -3390,10 +3685,7 @@ async fn dispatch_embeddings(
                     last_error = Some(error.to_string());
                     continue;
                 }
-                state
-                    .metrics
-                    .upstream_errors
-                    .fetch_add(1, Ordering::Relaxed);
+                record_final_transport_error(&state, "embeddings", model);
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(ProviderClient::error_json(error.to_string())),
@@ -3473,6 +3765,7 @@ async fn dispatch_images(
                 record_provider_dispatch_response(
                     &state,
                     &config,
+                    "images",
                     model,
                     response.status(),
                     latency_ms,
@@ -3488,7 +3781,7 @@ async fn dispatch_images(
                         .fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
-                if failovers > 0 {
+                if failovers > 0 && response.status().is_success() {
                     state
                         .metrics
                         .failover_successes
@@ -3498,6 +3791,7 @@ async fn dispatch_images(
                 return upstream_response(
                     state.clone(),
                     response,
+                    "images",
                     model,
                     false,
                     failovers,
@@ -3512,7 +3806,9 @@ async fn dispatch_images(
             }
             Err(error) => {
                 let latency_ms = elapsed_millis_u32(started);
-                record_provider_dispatch_error(&state, &config, model, &error, latency_ms);
+                record_provider_dispatch_error(
+                    &state, &config, "images", model, &error, latency_ms,
+                );
                 if allow_failover && index + 1 < models.len() {
                     failovers += 1;
                     state
@@ -3522,10 +3818,7 @@ async fn dispatch_images(
                     last_error = Some(error.to_string());
                     continue;
                 }
-                state
-                    .metrics
-                    .upstream_errors
-                    .fetch_add(1, Ordering::Relaxed);
+                record_final_transport_error(&state, "images", model);
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(ProviderClient::error_json(error.to_string())),
@@ -3605,6 +3898,7 @@ async fn dispatch_speech(
                 record_provider_dispatch_response(
                     &state,
                     &config,
+                    "speech",
                     model,
                     response.status(),
                     latency_ms,
@@ -3620,7 +3914,7 @@ async fn dispatch_speech(
                         .fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
-                if failovers > 0 {
+                if failovers > 0 && response.status().is_success() {
                     state
                         .metrics
                         .failover_successes
@@ -3630,6 +3924,7 @@ async fn dispatch_speech(
                 return upstream_response(
                     state.clone(),
                     response,
+                    "speech",
                     model,
                     false,
                     failovers,
@@ -3644,7 +3939,9 @@ async fn dispatch_speech(
             }
             Err(error) => {
                 let latency_ms = elapsed_millis_u32(started);
-                record_provider_dispatch_error(&state, &config, model, &error, latency_ms);
+                record_provider_dispatch_error(
+                    &state, &config, "speech", model, &error, latency_ms,
+                );
                 if allow_failover && index + 1 < models.len() {
                     failovers += 1;
                     state
@@ -3654,10 +3951,7 @@ async fn dispatch_speech(
                     last_error = Some(error.to_string());
                     continue;
                 }
-                state
-                    .metrics
-                    .upstream_errors
-                    .fetch_add(1, Ordering::Relaxed);
+                record_final_transport_error(&state, "speech", model);
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(ProviderClient::error_json(error.to_string())),
@@ -3759,6 +4053,7 @@ async fn dispatch_audio_multipart(
                 record_provider_dispatch_response(
                     &state,
                     &config,
+                    endpoint.route_label(),
                     model,
                     response.status(),
                     latency_ms,
@@ -3774,7 +4069,7 @@ async fn dispatch_audio_multipart(
                         .fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
-                if failovers > 0 {
+                if failovers > 0 && response.status().is_success() {
                     state
                         .metrics
                         .failover_successes
@@ -3784,6 +4079,7 @@ async fn dispatch_audio_multipart(
                 return upstream_response(
                     state.clone(),
                     response,
+                    endpoint.route_label(),
                     model,
                     false,
                     failovers,
@@ -3798,7 +4094,14 @@ async fn dispatch_audio_multipart(
             }
             Err(error) => {
                 let latency_ms = elapsed_millis_u32(started);
-                record_provider_dispatch_error(&state, &config, model, &error, latency_ms);
+                record_provider_dispatch_error(
+                    &state,
+                    &config,
+                    endpoint.route_label(),
+                    model,
+                    &error,
+                    latency_ms,
+                );
                 if allow_failover && index + 1 < models.len() {
                     failovers += 1;
                     state
@@ -3808,10 +4111,7 @@ async fn dispatch_audio_multipart(
                     last_error = Some(error.to_string());
                     continue;
                 }
-                state
-                    .metrics
-                    .upstream_errors
-                    .fetch_add(1, Ordering::Relaxed);
+                record_final_transport_error(&state, endpoint.route_label(), model);
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(ProviderClient::error_json(error.to_string())),
@@ -3837,10 +4137,18 @@ async fn dispatch_audio_multipart(
 fn record_provider_dispatch_response(
     state: &AppState,
     config: &RouterConfig,
+    endpoint: &'static str,
     model: &ModelConfig,
     status: StatusCode,
     latency_ms: u32,
 ) {
+    state
+        .metrics
+        .upstream_attempts
+        .fetch_add(1, Ordering::Relaxed);
+    state
+        .metrics
+        .record_upstream_outcome("attempt", endpoint, model, status_outcome(status));
     let status_code = status.as_u16();
     let health_status = if status.is_success() {
         ProviderHealthStatus::Ok
@@ -3871,6 +4179,24 @@ fn record_provider_dispatch_response(
 fn record_provider_dispatch_error(
     state: &AppState,
     config: &RouterConfig,
+    endpoint: &'static str,
+    model: &ModelConfig,
+    error: &dyn std::fmt::Display,
+    latency_ms: u32,
+) {
+    state
+        .metrics
+        .upstream_attempts
+        .fetch_add(1, Ordering::Relaxed);
+    state
+        .metrics
+        .record_upstream_outcome("attempt", endpoint, model, "transport_error");
+    record_provider_health_error(state, config, model, error, latency_ms);
+}
+
+fn record_provider_health_error(
+    state: &AppState,
+    config: &RouterConfig,
     model: &ModelConfig,
     error: &dyn std::fmt::Display,
     latency_ms: u32,
@@ -3892,6 +4218,53 @@ fn record_provider_dispatch_error(
         },
         latency_ms,
     );
+}
+
+fn status_outcome(status: StatusCode) -> &'static str {
+    if status.is_success() {
+        "success"
+    } else if status.is_client_error() {
+        "http_client_error"
+    } else if status.is_server_error() {
+        "http_server_error"
+    } else {
+        "http_other_error"
+    }
+}
+
+fn record_final_http_outcome(
+    state: &AppState,
+    endpoint: &'static str,
+    model: &ModelConfig,
+    status: StatusCode,
+) {
+    state
+        .metrics
+        .record_upstream_outcome("final", endpoint, model, status_outcome(status));
+    if !status.is_success() {
+        state
+            .metrics
+            .upstream_errors
+            .fetch_add(1, Ordering::Relaxed);
+        state
+            .metrics
+            .upstream_http_errors
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn record_final_transport_error(state: &AppState, endpoint: &'static str, model: &ModelConfig) {
+    state
+        .metrics
+        .upstream_errors
+        .fetch_add(1, Ordering::Relaxed);
+    state
+        .metrics
+        .upstream_transport_errors
+        .fetch_add(1, Ordering::Relaxed);
+    state
+        .metrics
+        .record_upstream_outcome("final", endpoint, model, "transport_error");
 }
 
 #[cfg(test)]
@@ -3966,6 +4339,7 @@ fn reserve_budget(
 async fn upstream_response(
     state: Arc<AppState>,
     upstream: ProviderResponse,
+    endpoint: &'static str,
     model: &ModelConfig,
     stream: bool,
     failovers: u32,
@@ -3985,31 +4359,59 @@ async fn upstream_response(
     let mut response = if stream {
         match upstream {
             ProviderResponse::Upstream { response, permit } => {
-                let stream = ProviderResponse::Upstream { response, permit }
+                let upstream_stream = ProviderResponse::Upstream { response, permit }
                     .into_stream()
                     .expect("upstream response must expose a stream");
-                let health_state = state.clone();
-                let health_config = state.engine.config();
-                let health_model = model.clone();
-                let stream = stream.map(move |item| {
-                    if let Err(error) = &item {
-                        record_provider_dispatch_error(
-                            &health_state,
-                            &health_config,
-                            &health_model,
-                            error,
-                            selected_latency_ms,
-                        );
-                    }
-                    item
-                });
+                let final_http_recorded = !status.is_success();
+                if final_http_recorded {
+                    record_final_http_outcome(&state, endpoint, model, status);
+                }
+                let observer = StreamMetricsObserver {
+                    state: state.clone(),
+                    config: state.engine.config(),
+                    endpoint,
+                    model: model.clone(),
+                    selected_latency_ms,
+                    parser: StreamingUsageParser::default(),
+                    terminal: false,
+                    final_http_recorded,
+                };
+                let stream = stream::unfold(
+                    (Box::pin(upstream_stream), observer),
+                    |(mut upstream, mut observer)| async move {
+                        match upstream.as_mut().next().await {
+                            Some(Ok(bytes)) => {
+                                observer.on_chunk(&bytes);
+                                Some((Ok(bytes), (upstream, observer)))
+                            }
+                            Some(Err(error)) => {
+                                observer.on_error(&error);
+                                Some((Err(error), (upstream, observer)))
+                            }
+                            None => {
+                                observer.on_end();
+                                None
+                            }
+                        }
+                    },
+                );
                 Response::new(Body::from_stream(stream))
             }
-            ProviderResponse::Buffered { body, .. } => Response::new(Body::from(body)),
+            ProviderResponse::Buffered { body, .. } => {
+                record_final_http_outcome(&state, endpoint, model, status);
+                if status.is_success()
+                    && let Ok(value) = serde_json::from_slice::<Value>(&body)
+                    && let Some(usage) = usage_from_value(&value)
+                {
+                    state.metrics.record_usage(model, usage);
+                }
+                Response::new(Body::from(body))
+            }
         }
     } else {
         match upstream.bytes().await {
             Ok(bytes) => {
+                record_final_http_outcome(&state, endpoint, model, status);
                 if status.is_success() {
                     if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
                         if let Some(usage) = usage_from_value(&value) {
@@ -4042,17 +4444,14 @@ async fn upstream_response(
             }
             Err(error) => {
                 let health_config = state.engine.config();
-                record_provider_dispatch_error(
+                record_provider_health_error(
                     &state,
                     &health_config,
                     model,
                     &error,
                     selected_latency_ms,
                 );
-                state
-                    .metrics
-                    .upstream_errors
-                    .fetch_add(1, Ordering::Relaxed);
+                record_final_transport_error(&state, endpoint, model);
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(ProviderClient::error_json(format!(
@@ -4525,10 +4924,10 @@ fn elapsed_millis_u32(started: Instant) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, RequestAuthenticator, RouterMetrics, RoutingEndpoint, UsageAccounting, app,
-        budget_violation, constant_time_eq, is_known_router_model, legacy_raw_difficulty,
-        model_ineligibility_reason, parse_router_model_policy, prometheus_escape,
-        semantic_cache_identity_for_chat, semantic_cache_identity_for_responses,
+        AppState, RequestAuthenticator, RouterMetrics, RoutingEndpoint, StreamingUsageParser,
+        UsageAccounting, app, budget_violation, constant_time_eq, is_known_router_model,
+        legacy_raw_difficulty, model_ineligibility_reason, parse_router_model_policy,
+        prometheus_escape, semantic_cache_identity_for_chat, semantic_cache_identity_for_responses,
         semantic_cache_plan_for_route, semantic_cache_safe_for_request, supported_model_ids,
         supported_provider_names, usage_from_value,
     };
@@ -4553,11 +4952,13 @@ mod tests {
     };
     use axum::{
         Json, Router,
+        body::Body,
         extract::Multipart,
         http::{HeaderMap, HeaderValue, StatusCode, header},
         response::IntoResponse,
         routing::post,
     };
+    use bytes::Bytes;
     use serde_json::Value;
     use std::{
         sync::{
@@ -4566,7 +4967,11 @@ mod tests {
         },
         time::{Duration, SystemTime},
     };
-    use tokio::{net::TcpListener, time::sleep};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        time::sleep,
+    };
 
     #[test]
     fn constant_time_equality_checks_full_input() {
@@ -4995,6 +5400,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_usage_from_split_chat_and_responses_sse_events() {
+        let mut chat = StreamingUsageParser::default();
+        chat.push(b"data: {\"usage\":{\"prompt_tokens\":7,");
+        chat.push(b"\"completion_tokens\":3,\"total_tokens\":10}}\n\n");
+        let usage = chat.finish().unwrap();
+        assert_eq!(usage.prompt_tokens, 7);
+        assert_eq!(usage.completion_tokens, 3);
+        assert_eq!(usage.total_tokens, 10);
+
+        let mut responses = StreamingUsageParser::default();
+        responses.push(
+            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":11,\"output_tokens\":4,\"total_tokens\":15}}}\n\n",
+        );
+        let usage = responses.finish().unwrap();
+        assert_eq!(usage.prompt_tokens, 11);
+        assert_eq!(usage.completion_tokens, 4);
+        assert_eq!(usage.total_tokens, 15);
+    }
+
+    #[test]
     fn estimates_cost_in_micros_from_model_prices() {
         let model = ModelConfig {
             id: "priced".to_string(),
@@ -5179,6 +5604,189 @@ mod tests {
             .expect("successful dispatch health observation");
         assert_eq!(healthy["status"], "ok");
         assert_eq!(healthy["status_code"], 200);
+    }
+
+    #[tokio::test]
+    async fn failed_failover_is_not_counted_as_success() {
+        let failing_base_url =
+            spawn_chat_upstream("strong-fail", StatusCode::SERVICE_UNAVAILABLE).await;
+        let final_base_url = spawn_chat_upstream("strong-ok", StatusCode::BAD_REQUEST).await;
+        let config = failover_config(failing_base_url, final_base_url);
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "router-capability",
+                "messages": [{"role": "user", "content": "Design a distributed system"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let metrics = client
+            .get(format!("{router_url}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(metrics["failover_attempts"], 1);
+        assert_eq!(metrics["failover_successes"], 0);
+        assert_eq!(metrics["upstream_attempts"], 2);
+        assert_eq!(metrics["upstream_errors"], 1);
+        assert_eq!(metrics["upstream_http_errors"], 1);
+        assert!(
+            metrics["upstream_outcomes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| {
+                    item["scope"] == "final"
+                        && item["endpoint"] == "chat"
+                        && item["model"] == "strong-ok"
+                        && item["outcome"] == "http_client_error"
+                        && item["count"] == 1
+                })
+        );
+        let prometheus = client
+            .get(format!("{router_url}/metrics/prometheus"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(prometheus.contains(
+            "autohand_router_upstream_outcomes_total{scope=\"final\",endpoint=\"chat\",provider=\"healthy\",model=\"strong-ok\",outcome=\"http_client_error\"} 1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn final_transport_failure_has_a_distinct_outcome() {
+        let config = semantic_cache_config("http://127.0.0.1:1".to_string());
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "cache-model",
+                "messages": [{"role": "user", "content": "transport failure"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+        let metrics = client
+            .get(format!("{router_url}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(metrics["upstream_attempts"], 1);
+        assert_eq!(metrics["upstream_errors"], 1);
+        assert_eq!(metrics["upstream_transport_errors"], 1);
+        assert_eq!(metrics["upstream_http_errors"], 0);
+        assert!(
+            metrics["upstream_outcomes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| {
+                    item["scope"] == "final"
+                        && item["endpoint"] == "chat"
+                        && item["outcome"] == "transport_error"
+                })
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_usage_and_body_errors_are_recorded_without_buffering() {
+        let success_upstream = spawn_streaming_chat_upstream(false).await;
+        let success_router = spawn_router(semantic_cache_config(success_upstream)).await;
+        let client = reqwest::Client::new();
+        let success = client
+            .post(format!("{success_router}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "cache-model",
+                "messages": [{"role":"user","content":"stream usage"}],
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(success.status(), StatusCode::OK);
+        let body = success.bytes().await.unwrap();
+        assert!(body.windows(12).any(|window| window == b"data: [DONE]"));
+
+        let success_metrics = client
+            .get(format!("{success_router}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(success_metrics["prompt_tokens"], 7);
+        assert_eq!(success_metrics["completion_tokens"], 3);
+        assert_eq!(success_metrics["total_tokens"], 10);
+        assert_eq!(success_metrics["upstream_stream_errors"], 0);
+        assert!(
+            success_metrics["upstream_outcomes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| {
+                    item["scope"] == "final"
+                        && item["endpoint"] == "chat"
+                        && item["outcome"] == "success"
+                })
+        );
+
+        let failing_upstream = spawn_streaming_chat_upstream(true).await;
+        let failing_router = spawn_router(semantic_cache_config(failing_upstream)).await;
+        let failure = client
+            .post(format!("{failing_router}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "cache-model",
+                "messages": [{"role":"user","content":"stream failure"}],
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        let _ = failure.bytes().await;
+
+        let failure_metrics = client
+            .get(format!("{failing_router}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(failure_metrics["prompt_tokens"], 7);
+        assert_eq!(failure_metrics["completion_tokens"], 3);
+        assert_eq!(failure_metrics["upstream_errors"], 1);
+        assert_eq!(failure_metrics["upstream_stream_errors"], 1);
+        assert!(
+            failure_metrics["upstream_outcomes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| {
+                    item["scope"] == "final"
+                        && item["endpoint"] == "chat"
+                        && item["outcome"] == "stream_error"
+                })
+        );
     }
 
     #[tokio::test]
@@ -6593,6 +7201,60 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{addr}"), calls)
+    }
+
+    async fn spawn_streaming_chat_upstream(fail_after_usage: bool) -> String {
+        if fail_after_usage {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = socket.read(&mut request).await.unwrap();
+                let usage = b"data: {\"id\":\"chatcmpl-stream\",\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n\n";
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                socket
+                    .write_all(format!("{:X}\r\n", usage.len()).as_bytes())
+                    .await
+                    .unwrap();
+                socket.write_all(usage).await.unwrap();
+                socket.write_all(b"\r\n").await.unwrap();
+                socket.shutdown().await.unwrap();
+            });
+            return format!("http://{addr}");
+        }
+
+        async fn chat() -> axum::response::Response {
+            let usage = Bytes::from_static(
+                b"data: {\"id\":\"chatcmpl-stream\",\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n\n",
+            );
+            let stream: std::pin::Pin<
+                Box<dyn futures_util::Stream<Item = std::io::Result<Bytes>> + Send>,
+            > = Box::pin(futures_util::stream::iter(vec![
+                Ok(Bytes::from_static(b"data: {\"choices\":[")),
+                Ok(Bytes::from_static(b"]}\n\n")),
+                Ok(usage),
+                Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+            ]));
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                Body::from_stream(stream),
+            )
+                .into_response()
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route("/v1/chat/completions", post(chat));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
     }
 
     async fn spawn_embedding_cache_upstream(

@@ -369,6 +369,7 @@ models:
     domains: [general, summary, coding]
     context_window: 128000
     capabilities:
+      supported_endpoints: [chat, responses]
       supports_json: true
       supports_code: true
       supports_long_context: true
@@ -383,6 +384,7 @@ models:
     domains: [coding, data]
     context_window: 128000
     capabilities:
+      supported_endpoints: [chat, responses]
       supports_tools: true
       supports_json: true
       supports_code: true
@@ -399,6 +401,7 @@ models:
     domains: [general, summary, coding]
     context_window: 128000
     capabilities:
+      supported_endpoints: [chat, responses]
       supports_vision: true
       supports_tools: true
       supports_json: true
@@ -416,6 +419,7 @@ models:
     domains: [general, coding]
     context_window: 8192
     capabilities:
+      supported_endpoints: [chat]
       supports_json: true
       supports_code: true
     local: true
@@ -429,6 +433,7 @@ models:
     domains: [coding, data, general]
     context_window: 32768
     capabilities:
+      supported_endpoints: [chat, responses]
       supports_tools: true
       supports_json: true
       supports_code: true
@@ -445,6 +450,7 @@ models:
     domains: [coding, design, general]
     context_window: 200000
     capabilities:
+      supported_endpoints: [chat, responses]
       supports_vision: true
       supports_audio: true
       supports_tools: true
@@ -462,6 +468,7 @@ models:
     domains: [coding, design, data, general]
     context_window: 200000
     capabilities:
+      supported_endpoints: [chat, responses]
       supports_vision: true
       supports_audio: true
       supports_tools: true

@@ -23,6 +23,7 @@ models:
     domains: [general, coding]
     context_window: 128000
     capabilities:
+      supported_endpoints: [chat]
       supports_json: true
       supports_code: true
     local: true

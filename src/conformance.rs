@@ -2,15 +2,114 @@ use crate::{
     config::RouterConfig,
     provider::{ProviderClient, ProviderHealth},
     types::{
-        ChatMessage, ModelConfig, OpenAiAudioMultipartRequest, OpenAiChatRequest,
+        ChatMessage, ModelConfig, ModelEndpoint, OpenAiAudioMultipartRequest, OpenAiChatRequest,
         OpenAiEmbeddingsRequest, OpenAiImagesRequest, OpenAiMultipartPart, OpenAiResponsesRequest,
         OpenAiSpeechRequest, ProviderConfig, ProviderKind,
     },
 };
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::{collections::HashMap, path::Path};
+
+pub type VerifiedEndpointCatalog = HashMap<(String, String), Vec<crate::types::ModelEndpoint>>;
+
+#[derive(Deserialize)]
+struct ConformanceArtifact {
+    schema_version: u32,
+    reports: Vec<ConformanceArtifactReport>,
+}
+
+#[derive(Deserialize)]
+struct ConformanceArtifactReport {
+    provider: String,
+    model: String,
+    chat: ConformanceArtifactChat,
+    endpoints: Vec<ConformanceArtifactEndpoint>,
+}
+
+#[derive(Deserialize)]
+struct ConformanceArtifactChat {
+    #[serde(default = "default_true")]
+    configured: bool,
+    status: u16,
+    openai_chat_shape: bool,
+    response_model_matches: bool,
+    assistant_content_present: bool,
+}
+
+#[derive(Deserialize)]
+struct ConformanceArtifactEndpoint {
+    endpoint: String,
+    configured: bool,
+    pass: bool,
+}
+
+pub fn load_verified_endpoint_catalog(path: &Path) -> Result<VerifiedEndpointCatalog> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read conformance artifact {}", path.display()))?;
+    let artifact = serde_json::from_str::<ConformanceArtifact>(&raw)
+        .with_context(|| format!("failed to parse conformance artifact {}", path.display()))?;
+    anyhow::ensure!(
+        artifact.schema_version == 1,
+        "unsupported conformance artifact schema_version {} in {}",
+        artifact.schema_version,
+        path.display()
+    );
+    let mut catalog = HashMap::new();
+    for report in artifact.reports {
+        let key = (report.provider.clone(), report.model.clone());
+        anyhow::ensure!(
+            !catalog.contains_key(&key),
+            "duplicate conformance report for provider {} model {}",
+            report.provider,
+            report.model
+        );
+        let mut endpoints = Vec::new();
+        if report.chat.configured
+            && (200..300).contains(&report.chat.status)
+            && report.chat.openai_chat_shape
+            && report.chat.response_model_matches
+            && report.chat.assistant_content_present
+        {
+            endpoints.push(crate::types::ModelEndpoint::Chat);
+        }
+        for endpoint in report.endpoints {
+            if endpoint.configured && endpoint.pass {
+                let endpoint =
+                    model_endpoint_from_artifact(&endpoint.endpoint).with_context(|| {
+                        format!(
+                            "unknown endpoint {} in conformance report for provider {} model {}",
+                            endpoint.endpoint, report.provider, report.model
+                        )
+                    })?;
+                if !endpoints.contains(&endpoint) {
+                    endpoints.push(endpoint);
+                }
+            }
+        }
+        catalog.insert(key, endpoints);
+    }
+    Ok(catalog)
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn model_endpoint_from_artifact(value: &str) -> Option<crate::types::ModelEndpoint> {
+    match value {
+        "chat" => Some(crate::types::ModelEndpoint::Chat),
+        "responses" => Some(crate::types::ModelEndpoint::Responses),
+        "embeddings" => Some(crate::types::ModelEndpoint::Embeddings),
+        "images" => Some(crate::types::ModelEndpoint::Images),
+        "speech" => Some(crate::types::ModelEndpoint::Speech),
+        "audio_transcriptions" => Some(crate::types::ModelEndpoint::AudioTranscriptions),
+        "audio_translations" => Some(crate::types::ModelEndpoint::AudioTranslations),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderConformanceReport {
@@ -38,6 +137,7 @@ pub struct ProviderConformanceMatrixReport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatConformance {
+    pub configured: bool,
     pub status: u16,
     pub content_type: Option<String>,
     pub openai_chat_shape: bool,
@@ -117,24 +217,42 @@ async fn run_provider_conformance_for_model(
     input: String,
 ) -> Result<ProviderConformanceReport> {
     let health = client.check_provider(provider).await;
-    let chat = match client
-        .send_chat(
-            config,
-            model,
-            OpenAiChatRequest {
-                model: model.id.clone(),
-                messages: vec![ChatMessage {
-                    role: "user".to_string(),
-                    content: Value::String(input.clone()),
+    let chat_configured = endpoint_configured(provider, model, ModelEndpoint::Chat);
+    let chat = if chat_configured {
+        match client
+            .send_chat(
+                config,
+                model,
+                OpenAiChatRequest {
+                    model: model.id.clone(),
+                    messages: vec![ChatMessage {
+                        role: "user".to_string(),
+                        content: Value::String(input.clone()),
+                        extra: Default::default(),
+                    }],
                     extra: Default::default(),
-                }],
-                extra: Default::default(),
+                },
+            )
+            .await
+        {
+            Ok(response) => response_chat_conformance(model, response).await,
+            Err(error) => ChatConformance {
+                configured: true,
+                status: 0,
+                content_type: None,
+                openai_chat_shape: false,
+                response_model_matches: false,
+                assistant_content_present: false,
+                usage_present: false,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                error: Some(format!("provider chat request failed: {error:#}")),
             },
-        )
-        .await
-    {
-        Ok(response) => response_chat_conformance(model, response).await,
-        Err(error) => ChatConformance {
+        }
+    } else {
+        ChatConformance {
+            configured: false,
             status: 0,
             content_type: None,
             openai_chat_shape: false,
@@ -144,19 +262,20 @@ async fn run_provider_conformance_for_model(
             prompt_tokens: None,
             completion_tokens: None,
             total_tokens: None,
-            error: Some(format!("provider chat request failed: {error:#}")),
-        },
+            error: None,
+        }
     };
     let endpoints = run_endpoint_conformance(config, client, provider, model, &input).await;
     let endpoints_pass = endpoints
         .iter()
         .filter(|endpoint| endpoint.configured)
         .all(|endpoint| endpoint.pass);
-    let pass = (200..300).contains(&chat.status)
-        && chat.openai_chat_shape
-        && chat.response_model_matches
-        && chat.assistant_content_present
-        && endpoints_pass;
+    let chat_pass = !chat.configured
+        || ((200..300).contains(&chat.status)
+            && chat.openai_chat_shape
+            && chat.response_model_matches
+            && chat.assistant_content_present);
+    let pass = chat_pass && endpoints_pass;
 
     Ok(ProviderConformanceReport {
         schema_version: 1,
@@ -185,6 +304,7 @@ async fn response_chat_conformance(
         Ok(bytes) => bytes,
         Err(error) => {
             return ChatConformance {
+                configured: true,
                 status: status.as_u16(),
                 content_type,
                 openai_chat_shape: false,
@@ -201,6 +321,7 @@ async fn response_chat_conformance(
     match serde_json::from_slice::<Value>(&bytes) {
         Ok(value) => chat_conformance(status.as_u16(), content_type, &model.id, &value),
         Err(error) => ChatConformance {
+            configured: true,
             status: status.as_u16(),
             content_type,
             openai_chat_shape: false,
@@ -223,11 +344,12 @@ async fn run_endpoint_conformance(
     input: &str,
 ) -> Vec<EndpointConformance> {
     let mut endpoints = Vec::with_capacity(6);
+    let responses = endpoint_configured(provider, model, ModelEndpoint::Responses);
     endpoints.push(
         endpoint_result(
             "responses",
-            provider.responses_path.is_some(),
-            if provider.responses_path.is_some() {
+            responses,
+            if responses {
                 Some(
                     client
                         .send_responses(
@@ -248,11 +370,12 @@ async fn run_endpoint_conformance(
         )
         .await,
     );
+    let embeddings = endpoint_configured(provider, model, ModelEndpoint::Embeddings);
     endpoints.push(
         endpoint_result(
             "embeddings",
-            provider.embeddings_path.is_some(),
-            if provider.embeddings_path.is_some() {
+            embeddings,
+            if embeddings {
                 Some(
                     client
                         .send_embeddings(
@@ -273,11 +396,12 @@ async fn run_endpoint_conformance(
         )
         .await,
     );
+    let images = endpoint_configured(provider, model, ModelEndpoint::Images);
     endpoints.push(
         endpoint_result(
             "images",
-            provider.images_path.is_some(),
-            if provider.images_path.is_some() {
+            images,
+            if images {
                 Some(
                     client
                         .send_images(
@@ -298,11 +422,12 @@ async fn run_endpoint_conformance(
         )
         .await,
     );
+    let speech = endpoint_configured(provider, model, ModelEndpoint::Speech);
     endpoints.push(
         endpoint_result(
             "speech",
-            provider.speech_path.is_some(),
-            if provider.speech_path.is_some() {
+            speech,
+            if speech {
                 Some(
                     client
                         .send_speech(
@@ -324,11 +449,13 @@ async fn run_endpoint_conformance(
         )
         .await,
     );
+    let audio_transcriptions =
+        endpoint_configured(provider, model, ModelEndpoint::AudioTranscriptions);
     endpoints.push(
         endpoint_result(
             "audio_transcriptions",
-            provider.audio_transcriptions_path.is_some(),
-            if provider.audio_transcriptions_path.is_some() {
+            audio_transcriptions,
+            if audio_transcriptions {
                 Some(
                     client
                         .send_audio_transcription(
@@ -345,11 +472,12 @@ async fn run_endpoint_conformance(
         )
         .await,
     );
+    let audio_translations = endpoint_configured(provider, model, ModelEndpoint::AudioTranslations);
     endpoints.push(
         endpoint_result(
             "audio_translations",
-            provider.audio_translations_path.is_some(),
-            if provider.audio_translations_path.is_some() {
+            audio_translations,
+            if audio_translations {
                 Some(
                     client
                         .send_audio_translation(
@@ -367,6 +495,14 @@ async fn run_endpoint_conformance(
         .await,
     );
     endpoints
+}
+
+fn endpoint_configured(
+    provider: &ProviderConfig,
+    model: &ModelConfig,
+    endpoint: ModelEndpoint,
+) -> bool {
+    provider.supports_endpoint(endpoint) && model.capabilities.supports_endpoint(endpoint)
 }
 
 async fn endpoint_result(
@@ -525,6 +661,7 @@ fn chat_conformance(
         .and_then(|usage| usage.get("total_tokens"))
         .and_then(Value::as_u64);
     ChatConformance {
+        configured: true,
         status,
         content_type,
         openai_chat_shape: object_ok,
@@ -658,6 +795,32 @@ mod tests {
                 .iter()
                 .all(|endpoint| endpoint.configured && endpoint.pass)
         );
+    }
+
+    #[tokio::test]
+    async fn conformance_only_probes_model_declared_endpoints() {
+        let base_url = spawn_full_provider_server().await;
+        let mut config = full_openai_config(base_url);
+        config.models[0].capabilities.supported_endpoints =
+            Some(vec![ModelEndpoint::Chat, ModelEndpoint::Responses]);
+
+        let report = run_provider_conformance_matrix(
+            config,
+            "hello declared endpoint conformance".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let model_report = &report.reports[0];
+        assert!(model_report.chat.configured);
+        for endpoint in &model_report.endpoints {
+            assert_eq!(
+                endpoint.configured,
+                endpoint.endpoint == "responses",
+                "provider path alone enabled {}",
+                endpoint.endpoint
+            );
+        }
     }
 
     async fn spawn_ollama_native_server() -> String {
@@ -927,6 +1090,8 @@ mod tests {
     }
 
     fn full_openai_config(base_url: String) -> RouterConfig {
+        let mut model = test_model("full-model", "full-provider");
+        model.capabilities.supported_endpoints = Some(ModelEndpoint::ALL.to_vec());
         RouterConfig {
             bind: "127.0.0.1:0".to_string(),
             default_model: "full-model".to_string(),
@@ -951,7 +1116,7 @@ mod tests {
                 queue_timeout_ms: None,
                 extra_headers: Default::default(),
             }],
-            models: vec![test_model("full-model", "full-provider")],
+            models: vec![model],
             classifier: ClassifierConfig::default(),
             auth: AuthConfig::default(),
             scoring: ScoringConfig::default(),

@@ -272,6 +272,7 @@ models:
     domains: [general, summary, coding]
     context_window: 128000
     capabilities:
+      supported_endpoints: [chat, responses]
       supports_vision: true
       supports_tools: true
       supports_json: true
@@ -280,9 +281,7 @@ models:
       supports_long_context: true
 ```
 
-When a provider exposes different models for different APIs, add an optional
-model-level endpoint allowlist. Omit it to keep the provider's configured
-endpoint behavior, or list only the APIs that the model is known to support:
+Endpoint support is explicit at both boundaries. Optional provider paths default to absent, and a model with no `supported_endpoints` entry is Chat-only. List only APIs proven for that exact provider/model pair:
 
 ```yaml
     capabilities:
@@ -296,6 +295,7 @@ and explicit model requests both enforce this allowlist before dispatch.
 `/v1/router/multimodel` accepts `required_capabilities` such as `vision`, `audio`, `tools`, `json`, `code`, `web_apps`, and `long_context`. Automatic chat and Responses routing infer `vision`, `tools`, and `json` from OpenAI request payloads; automatic audio routes require `audio`.
 
 Startup validation rejects ambiguous configs: provider names, model IDs, and aliases must be unique; provider URLs and paths must be valid HTTP-style values; timeouts and concurrency limits must be positive.
+It also rejects duplicate model endpoints, endpoints without a compatible provider path, and non-Chat paths on native Ollama/llama.cpp adapters.
 
 ## Provider Conformance
 
@@ -315,7 +315,16 @@ cargo run -- --config examples/router.yaml provider-conformance-matrix \
   --output router.provider-matrix.json
 ```
 
-The matrix also exercises each configured optional endpoint path for Responses, embeddings, images, speech, transcriptions, and translations. Paths set to `null` are recorded as skipped.
+The matrix exercises only the intersection of explicit provider paths and each model's declared endpoints. A provider path alone never causes an endpoint probe or makes a model eligible. Paths or model endpoints that are absent are recorded as skipped.
+
+To require live conformance evidence at startup, point runtime config at a previously generated matrix. Relative paths resolve from the router config directory:
+
+```yaml
+runtime:
+  provider_conformance_artifact: router.provider-matrix.json
+```
+
+Every declared endpoint for every configured provider/model pair must have a passing matrix entry. Missing, failed, duplicate, unknown-version, or mismatched reports fail config loading before the server starts.
 
 ## Evaluation and Calibration
 

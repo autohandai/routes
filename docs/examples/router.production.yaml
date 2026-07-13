@@ -245,6 +245,8 @@ models:
     cost_per_million_output: 0.04
     domains: [coding, data, general]
     context_window: 32768
+    capabilities:
+      supported_endpoints: [chat, responses]
     local: true
 
   - id: openrouter/anthropic/claude-sonnet-4.5
@@ -255,4 +257,6 @@ models:
     cost_per_million_output: 15.0
     domains: [coding, design, general]
     context_window: 200000
+    capabilities:
+      supported_endpoints: [chat, responses]
     local: false

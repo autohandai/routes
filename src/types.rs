@@ -125,17 +125,17 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
     #[serde(default = "default_chat_path")]
     pub chat_path: String,
-    #[serde(default = "default_responses_path")]
+    #[serde(default)]
     pub responses_path: Option<String>,
-    #[serde(default = "default_embeddings_path")]
+    #[serde(default)]
     pub embeddings_path: Option<String>,
-    #[serde(default = "default_images_path")]
+    #[serde(default)]
     pub images_path: Option<String>,
-    #[serde(default = "default_speech_path")]
+    #[serde(default)]
     pub speech_path: Option<String>,
-    #[serde(default = "default_audio_transcriptions_path")]
+    #[serde(default)]
     pub audio_transcriptions_path: Option<String>,
-    #[serde(default = "default_audio_translations_path")]
+    #[serde(default)]
     pub audio_translations_path: Option<String>,
     #[serde(default)]
     pub health_path: Option<String>,
@@ -174,30 +174,6 @@ impl Default for ProviderKind {
 
 fn default_chat_path() -> String {
     "/v1/chat/completions".to_string()
-}
-
-fn default_responses_path() -> Option<String> {
-    Some("/v1/responses".to_string())
-}
-
-fn default_embeddings_path() -> Option<String> {
-    Some("/v1/embeddings".to_string())
-}
-
-fn default_images_path() -> Option<String> {
-    Some("/v1/images/generations".to_string())
-}
-
-fn default_speech_path() -> Option<String> {
-    Some("/v1/audio/speech".to_string())
-}
-
-fn default_audio_transcriptions_path() -> Option<String> {
-    Some("/v1/audio/transcriptions".to_string())
-}
-
-fn default_audio_translations_path() -> Option<String> {
-    Some("/v1/audio/translations".to_string())
 }
 
 fn default_timeout_ms() -> u64 {
@@ -243,6 +219,50 @@ pub enum ModelEndpoint {
     AudioTranslations,
 }
 
+impl ModelEndpoint {
+    pub const ALL: [Self; 7] = [
+        Self::Chat,
+        Self::Responses,
+        Self::Embeddings,
+        Self::Images,
+        Self::Speech,
+        Self::AudioTranscriptions,
+        Self::AudioTranslations,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Responses => "responses",
+            Self::Embeddings => "embeddings",
+            Self::Images => "images",
+            Self::Speech => "speech",
+            Self::AudioTranscriptions => "audio_transcriptions",
+            Self::AudioTranslations => "audio_translations",
+        }
+    }
+}
+
+impl ProviderConfig {
+    pub fn supports_endpoint(&self, endpoint: ModelEndpoint) -> bool {
+        if matches!(
+            self.kind,
+            ProviderKind::OllamaNative | ProviderKind::LlamaCppNative
+        ) {
+            return endpoint == ModelEndpoint::Chat && !self.chat_path.trim().is_empty();
+        }
+        match endpoint {
+            ModelEndpoint::Chat => !self.chat_path.trim().is_empty(),
+            ModelEndpoint::Responses => self.responses_path.is_some(),
+            ModelEndpoint::Embeddings => self.embeddings_path.is_some(),
+            ModelEndpoint::Images => self.images_path.is_some(),
+            ModelEndpoint::Speech => self.speech_path.is_some(),
+            ModelEndpoint::AudioTranscriptions => self.audio_transcriptions_path.is_some(),
+            ModelEndpoint::AudioTranslations => self.audio_translations_path.is_some(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelCapabilities {
@@ -260,8 +280,8 @@ pub struct ModelCapabilities {
     pub supports_web_apps: bool,
     #[serde(default)]
     pub supports_long_context: bool,
-    /// Optional model-level endpoint allowlist. Omitted means every endpoint
-    /// exposed by the backing provider remains eligible for this model.
+    /// Optional model-level endpoint allowlist. Omitted is the conservative
+    /// chat-only default; non-chat endpoints always require an explicit entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported_endpoints: Option<Vec<ModelEndpoint>>,
 }
@@ -282,7 +302,9 @@ impl ModelCapabilities {
     pub fn supports_endpoint(&self, endpoint: ModelEndpoint) -> bool {
         self.supported_endpoints
             .as_ref()
-            .is_none_or(|endpoints| endpoints.contains(&endpoint))
+            .map_or(endpoint == ModelEndpoint::Chat, |endpoints| {
+                endpoints.contains(&endpoint)
+            })
     }
 }
 
@@ -1000,9 +1022,9 @@ mod tests {
     use super::{
         AmbiguityLabel, CacheabilityLabel, ChatMessage, Classification, ClassificationHead,
         Classifications, DifficultyLabel, DomainLabel, LatencySensitivityLabel, LegacyRouterMode,
-        ModalityLabel, ModelCapability, OpenAiChatRequest, OpenAiEmbeddingsRequest,
-        OpenAiResponsesRequest, RawRouterResponse, ReasoningDepthLabel, RouterPolicy, SafetyLabel,
-        SelectedClassifications,
+        ModalityLabel, ModelCapabilities, ModelCapability, ModelEndpoint, OpenAiChatRequest,
+        OpenAiEmbeddingsRequest, OpenAiResponsesRequest, ProviderConfig, ProviderKind,
+        RawRouterResponse, ReasoningDepthLabel, RouterPolicy, SafetyLabel, SelectedClassifications,
     };
     use serde_json::Value;
 
@@ -1327,6 +1349,80 @@ mod tests {
         assert!(security_text.contains("sk-url-secret"));
         assert!(!security_text.contains("function_call"));
         assert!(!security_text.contains("lookup"));
+    }
+
+    #[test]
+    fn absent_endpoint_configuration_is_conservatively_chat_only() {
+        let provider = serde_yaml::from_str::<ProviderConfig>(
+            "name: local\nbase_url: http://127.0.0.1:11434\n",
+        )
+        .unwrap();
+        let capabilities = ModelCapabilities::default();
+
+        assert!(provider.supports_endpoint(ModelEndpoint::Chat));
+        assert!(capabilities.supports_endpoint(ModelEndpoint::Chat));
+        for endpoint in ModelEndpoint::ALL
+            .into_iter()
+            .filter(|endpoint| *endpoint != ModelEndpoint::Chat)
+        {
+            assert!(
+                !provider.supports_endpoint(endpoint),
+                "provider exposed {}",
+                endpoint.as_str()
+            );
+            assert!(
+                !capabilities.supports_endpoint(endpoint),
+                "model exposed {}",
+                endpoint.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn provider_kind_endpoint_matrix_keeps_native_adapters_chat_only() {
+        for kind in [
+            ProviderKind::OpenAiCompatible,
+            ProviderKind::Ollama,
+            ProviderKind::OllamaNative,
+            ProviderKind::LlamaCpp,
+            ProviderKind::LlamaCppNative,
+            ProviderKind::Vllm,
+            ProviderKind::OpenRouter,
+            ProviderKind::CloudflareAiGateway,
+        ] {
+            let provider = ProviderConfig {
+                name: "matrix".to_string(),
+                kind: kind.clone(),
+                base_url: "http://127.0.0.1:9999".to_string(),
+                api_key_env: None,
+                api_key: None,
+                chat_path: "/v1/chat/completions".to_string(),
+                responses_path: Some("/v1/responses".to_string()),
+                embeddings_path: Some("/v1/embeddings".to_string()),
+                images_path: Some("/v1/images/generations".to_string()),
+                speech_path: Some("/v1/audio/speech".to_string()),
+                audio_transcriptions_path: Some("/v1/audio/transcriptions".to_string()),
+                audio_translations_path: Some("/v1/audio/translations".to_string()),
+                health_path: None,
+                timeout_ms: 1_000,
+                retries: 0,
+                max_concurrency: None,
+                queue_timeout_ms: None,
+                extra_headers: Default::default(),
+            };
+            let native = matches!(
+                kind,
+                ProviderKind::OllamaNative | ProviderKind::LlamaCppNative
+            );
+            for endpoint in ModelEndpoint::ALL {
+                assert_eq!(
+                    provider.supports_endpoint(endpoint),
+                    endpoint == ModelEndpoint::Chat || !native,
+                    "unexpected {} support for {kind:?}",
+                    endpoint.as_str()
+                );
+            }
+        }
     }
 
     #[test]

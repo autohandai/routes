@@ -23,7 +23,7 @@ use crate::{
         ModelCapability, ModelConfig, ModelEndpoint, MultimodelRequest, MultimodelResponse,
         OpenAiAudioMultipartRequest, OpenAiChatRequest, OpenAiEmbeddingsRequest,
         OpenAiImagesRequest, OpenAiMultipartPart, OpenAiResponsesRequest, OpenAiSpeechRequest,
-        ProviderConfig, ProviderKind, RouterPolicy, SafetyLabel, forwarded_string_kind,
+        ProviderConfig, RouterPolicy, SafetyLabel, forwarded_string_kind,
     },
 };
 use anyhow::Result;
@@ -1667,7 +1667,7 @@ async fn chat_completions(
         let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Chat);
         let allowed_models = supported_model_ids(&config, RoutingEndpoint::Chat);
         if allowed_providers.is_empty() || allowed_models.is_empty() {
-            return unsupported_endpoint_response(RoutingEndpoint::Chat);
+            return unsupported_endpoint_response(&config, RoutingEndpoint::Chat);
         }
         let mut route = state
             .engine
@@ -1831,7 +1831,7 @@ async fn responses(
         let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Responses);
         let allowed_models = supported_model_ids(&config, RoutingEndpoint::Responses);
         if allowed_providers.is_empty() || allowed_models.is_empty() {
-            return unsupported_endpoint_response(RoutingEndpoint::Responses);
+            return unsupported_endpoint_response(&config, RoutingEndpoint::Responses);
         }
         let mut route = state
             .engine
@@ -2421,7 +2421,7 @@ async fn embeddings(
         let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Embeddings);
         let allowed_models = supported_model_ids(&config, RoutingEndpoint::Embeddings);
         if allowed_providers.is_empty() || allowed_models.is_empty() {
-            return unsupported_endpoint_response(RoutingEndpoint::Embeddings);
+            return unsupported_endpoint_response(&config, RoutingEndpoint::Embeddings);
         }
         let route = state
             .engine
@@ -2515,7 +2515,7 @@ async fn images_generations(
         let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Images);
         let allowed_models = supported_model_ids(&config, RoutingEndpoint::Images);
         if allowed_providers.is_empty() || allowed_models.is_empty() {
-            return unsupported_endpoint_response(RoutingEndpoint::Images);
+            return unsupported_endpoint_response(&config, RoutingEndpoint::Images);
         }
         let route = state
             .engine
@@ -2604,7 +2604,7 @@ async fn audio_speech(
         let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Speech);
         let allowed_models = supported_model_ids(&config, RoutingEndpoint::Speech);
         if allowed_providers.is_empty() || allowed_models.is_empty() {
-            return unsupported_endpoint_response(RoutingEndpoint::Speech);
+            return unsupported_endpoint_response(&config, RoutingEndpoint::Speech);
         }
         let route = state
             .engine
@@ -2742,23 +2742,7 @@ impl RoutingEndpoint {
 }
 
 fn provider_supports_endpoint(provider: &ProviderConfig, endpoint: RoutingEndpoint) -> bool {
-    let native_only_chat = matches!(
-        provider.kind,
-        ProviderKind::OllamaNative | ProviderKind::LlamaCppNative
-    );
-    match endpoint {
-        RoutingEndpoint::Chat => !provider.chat_path.trim().is_empty(),
-        RoutingEndpoint::Responses => !native_only_chat && provider.responses_path.is_some(),
-        RoutingEndpoint::Embeddings => !native_only_chat && provider.embeddings_path.is_some(),
-        RoutingEndpoint::Images => !native_only_chat && provider.images_path.is_some(),
-        RoutingEndpoint::Speech => !native_only_chat && provider.speech_path.is_some(),
-        RoutingEndpoint::AudioTranscriptions => {
-            !native_only_chat && provider.audio_transcriptions_path.is_some()
-        }
-        RoutingEndpoint::AudioTranslations => {
-            !native_only_chat && provider.audio_translations_path.is_some()
-        }
-    }
+    provider.supports_endpoint(endpoint.model_endpoint())
 }
 
 fn supported_provider_names(config: &RouterConfig, endpoint: RoutingEndpoint) -> Vec<String> {
@@ -2854,7 +2838,28 @@ fn model_ineligibility_reason(
     requested_output_tokens: u32,
 ) -> Option<String> {
     if !model_supports_endpoint(config, model, endpoint) {
-        return Some(format!("endpoint {} is not supported", endpoint.label()));
+        if !model
+            .capabilities
+            .supports_endpoint(endpoint.model_endpoint())
+        {
+            return Some(format!(
+                "model endpoint allowlist does not include {}",
+                endpoint.label()
+            ));
+        }
+        let Some(provider) = config
+            .providers
+            .iter()
+            .find(|provider| provider.name == model.provider)
+        else {
+            return Some(format!("provider {} is not configured", model.provider));
+        };
+        return Some(format!(
+            "provider {} ({:?}) has no compatible configured {} path",
+            provider.name,
+            provider.kind,
+            endpoint.label()
+        ));
     }
     let missing = required_capabilities
         .iter()
@@ -2875,12 +2880,46 @@ fn model_ineligibility_reason(
     None
 }
 
-fn unsupported_endpoint_response(endpoint: RoutingEndpoint) -> Response {
+fn unsupported_endpoint_response(config: &RouterConfig, endpoint: RoutingEndpoint) -> Response {
+    let provider_exclusions = config
+        .providers
+        .iter()
+        .filter(|provider| !provider_supports_endpoint(provider, endpoint))
+        .map(|provider| format!("{} ({:?}): path unavailable", provider.name, provider.kind))
+        .collect::<Vec<_>>();
+    let model_exclusions = config
+        .models
+        .iter()
+        .filter(|model| {
+            !model
+                .capabilities
+                .supports_endpoint(endpoint.model_endpoint())
+        })
+        .map(|model| format!("{}: endpoint not declared", model.id))
+        .collect::<Vec<_>>();
+    let mut details = Vec::new();
+    if !provider_exclusions.is_empty() {
+        details.push(format!(
+            "provider exclusions [{}]",
+            provider_exclusions.join(", ")
+        ));
+    }
+    if !model_exclusions.is_empty() {
+        details.push(format!(
+            "model exclusions [{}]",
+            model_exclusions.join(", ")
+        ));
+    }
+    let detail = if details.is_empty() {
+        "no provider/model pair is eligible".to_string()
+    } else {
+        details.join("; ")
+    };
     (
         StatusCode::BAD_GATEWAY,
         Json(ProviderClient::error_json(format!(
-            "no configured provider supports {}",
-            endpoint.label()
+            "no eligible configured model supports {}: {detail}",
+            endpoint.label(),
         ))),
     )
         .into_response()
@@ -2930,7 +2969,7 @@ async fn audio_multipart_endpoint(
         let allowed_providers = supported_provider_names(&config, routing_endpoint);
         let allowed_models = supported_model_ids(&config, routing_endpoint);
         if allowed_providers.is_empty() || allowed_models.is_empty() {
-            return unsupported_endpoint_response(routing_endpoint);
+            return unsupported_endpoint_response(&config, routing_endpoint);
         }
         let route = state
             .engine
@@ -5564,6 +5603,10 @@ mod tests {
         let mut config = failover_config(plain_url, json_url);
         config.models[0].capability = 0.99;
         config.models[1].capability = 0.20;
+        for model in &mut config.models {
+            model.capabilities.supported_endpoints =
+                Some(vec![ModelEndpoint::Chat, ModelEndpoint::Responses]);
+        }
         config.models[1].capabilities.supports_json = true;
         let router_url = spawn_router(config).await;
         let client = reqwest::Client::new();
@@ -5600,6 +5643,53 @@ mod tests {
         );
         assert_eq!(plain_calls.load(AtomicOrdering::Relaxed), 0);
         assert_eq!(json_calls.load(AtomicOrdering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn undeclared_endpoint_rejections_explain_model_exclusions_without_dispatch() {
+        let (first_url, first_calls) = spawn_counting_responses_upstream("strong-fail").await;
+        let (second_url, second_calls) = spawn_counting_responses_upstream("strong-ok").await;
+        let config = failover_config(first_url, second_url);
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let automatic = client
+            .post(format!("{router_url}/v1/responses"))
+            .json(&OpenAiResponsesRequest {
+                model: "auto".to_string(),
+                input: Value::String("summarize this".to_string()),
+                extra: Default::default(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(automatic.status(), StatusCode::BAD_GATEWAY);
+        let automatic_error = automatic.json::<Value>().await.unwrap();
+        let automatic_message = automatic_error["error"]["message"].as_str().unwrap();
+        assert!(automatic_message.contains("model exclusions"));
+        assert!(automatic_message.contains("endpoint not declared"));
+
+        let explicit = client
+            .post(format!("{router_url}/v1/responses"))
+            .json(&OpenAiResponsesRequest {
+                model: "strong-fail".to_string(),
+                input: Value::String("summarize this".to_string()),
+                extra: Default::default(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(explicit.status(), StatusCode::BAD_REQUEST);
+        let explicit_error = explicit.json::<Value>().await.unwrap();
+        assert!(
+            explicit_error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("model endpoint allowlist does not include /v1/responses"),
+            "{explicit_error}"
+        );
+        assert_eq!(first_calls.load(AtomicOrdering::Relaxed), 0);
+        assert_eq!(second_calls.load(AtomicOrdering::Relaxed), 0);
     }
 
     #[test]
@@ -7120,6 +7210,7 @@ mod tests {
         );
         for model in &mut config.models {
             model.capabilities.supports_tools = true;
+            model.capabilities.supported_endpoints = Some(vec![ModelEndpoint::Chat]);
         }
         config.telemetry = TelemetryConfig {
             decision_log_path: Some(trace_path.to_string_lossy().to_string()),
@@ -7276,6 +7367,8 @@ mod tests {
         );
         for model in &mut config.models {
             model.capabilities.supports_tools = true;
+            model.capabilities.supported_endpoints =
+                Some(vec![ModelEndpoint::Chat, ModelEndpoint::Responses]);
         }
         let router_url = spawn_router(config).await;
         let client = reqwest::Client::new();
@@ -8501,6 +8594,11 @@ mod tests {
                 context_window: Some(4096),
                 capabilities: crate::types::ModelCapabilities {
                     supports_audio: true,
+                    supported_endpoints: Some(vec![
+                        ModelEndpoint::Speech,
+                        ModelEndpoint::AudioTranscriptions,
+                        ModelEndpoint::AudioTranslations,
+                    ]),
                     ..Default::default()
                 },
                 local: true,

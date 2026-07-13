@@ -262,6 +262,10 @@ pub struct RuntimeConfig {
     pub graceful_shutdown_timeout_ms: u64,
     #[serde(default)]
     pub provider_health_sampler: ProviderHealthSamplerConfig,
+    /// Optional provider-conformance matrix used to prove every declared
+    /// model endpoint before the config is accepted.
+    #[serde(default)]
+    pub provider_conformance_artifact: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -601,6 +605,7 @@ impl Default for RuntimeConfig {
         Self {
             graceful_shutdown_timeout_ms: default_graceful_shutdown_timeout_ms(),
             provider_health_sampler: ProviderHealthSamplerConfig::default(),
+            provider_conformance_artifact: None,
         }
     }
 }
@@ -802,11 +807,17 @@ impl RouterConfig {
             .with_context(|| format!("failed to read config {}", path.display()))?;
         let config = serde_yaml::from_str::<Self>(&raw)
             .with_context(|| format!("failed to parse YAML config {}", path.display()))?;
-        config.validate()?;
+        config.validate_conformance_artifact(path.parent().unwrap_or_else(|| Path::new(".")))?;
+        config.validate_core()?;
         Ok(config)
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.validate_conformance_artifact(Path::new("."))?;
+        self.validate_core()
+    }
+
+    fn validate_core(&self) -> Result<()> {
         anyhow::ensure!(!self.models.is_empty(), "at least one model is required");
         anyhow::ensure!(
             !self.providers.is_empty(),
@@ -836,6 +847,35 @@ impl RouterConfig {
                 "model {} capability must be between 0.0 and 1.0",
                 model.id
             );
+            let provider = self
+                .providers
+                .iter()
+                .find(|provider| provider.name == model.provider)
+                .expect("provider existence checked above");
+            if let Some(endpoints) = &model.capabilities.supported_endpoints {
+                anyhow::ensure!(
+                    !endpoints.is_empty(),
+                    "model {} capabilities.supported_endpoints cannot be empty",
+                    model.id
+                );
+                let mut unique = HashSet::new();
+                for endpoint in endpoints {
+                    anyhow::ensure!(
+                        unique.insert(*endpoint),
+                        "model {} capabilities.supported_endpoints contains duplicate {}",
+                        model.id,
+                        endpoint.as_str()
+                    );
+                    anyhow::ensure!(
+                        provider.supports_endpoint(*endpoint),
+                        "model {} declares endpoint {} but provider {} ({:?}) has no compatible configured path",
+                        model.id,
+                        endpoint.as_str(),
+                        provider.name,
+                        provider.kind
+                    );
+                }
+            }
         }
         for provider in &self.providers {
             validate_provider(provider)?;
@@ -882,6 +922,52 @@ impl RouterConfig {
         self.models.iter().find(|model| {
             model.id == id_or_alias || model.aliases.iter().any(|alias| alias == id_or_alias)
         })
+    }
+
+    fn validate_conformance_artifact(&self, config_dir: &Path) -> Result<()> {
+        let Some(artifact_path) = self
+            .runtime
+            .provider_conformance_artifact
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        else {
+            return Ok(());
+        };
+        let artifact_path = Path::new(artifact_path);
+        let resolved = if artifact_path.is_absolute() {
+            artifact_path.to_path_buf()
+        } else {
+            config_dir.join(artifact_path)
+        };
+        let catalog = crate::conformance::load_verified_endpoint_catalog(&resolved)?;
+        for model in &self.models {
+            let key = (model.provider.clone(), model.id.clone());
+            let verified = catalog.get(&key).with_context(|| {
+                format!(
+                    "conformance artifact {} has no report for provider {} model {}",
+                    resolved.display(),
+                    model.provider,
+                    model.id
+                )
+            })?;
+            let declared = model
+                .capabilities
+                .supported_endpoints
+                .clone()
+                .unwrap_or_else(|| vec![ModelEndpoint::Chat]);
+            for endpoint in declared {
+                anyhow::ensure!(
+                    verified.contains(&endpoint),
+                    "conformance artifact {} does not verify endpoint {} for provider {} model {}",
+                    resolved.display(),
+                    endpoint.as_str(),
+                    model.provider,
+                    model.id
+                );
+            }
+        }
+        Ok(())
     }
 
     fn validate_scoring_hints(&self, providers: &HashSet<&str>) -> Result<()> {
@@ -1002,6 +1088,33 @@ fn validate_provider(provider: &ProviderConfig) -> Result<()> {
         "provider {} base_url must start with http:// or https://",
         provider.name
     );
+    if matches!(
+        provider.kind,
+        crate::types::ProviderKind::OllamaNative | crate::types::ProviderKind::LlamaCppNative
+    ) {
+        for (endpoint, configured) in [
+            ("responses", provider.responses_path.is_some()),
+            ("embeddings", provider.embeddings_path.is_some()),
+            ("images", provider.images_path.is_some()),
+            ("speech", provider.speech_path.is_some()),
+            (
+                "audio_transcriptions",
+                provider.audio_transcriptions_path.is_some(),
+            ),
+            (
+                "audio_translations",
+                provider.audio_translations_path.is_some(),
+            ),
+        ] {
+            anyhow::ensure!(
+                !configured,
+                "provider {} kind {:?} cannot configure unsupported endpoint {}",
+                provider.name,
+                provider.kind,
+                endpoint
+            );
+        }
+    }
     anyhow::ensure!(
         !provider.chat_path.trim().is_empty(),
         "provider {} chat_path cannot be empty",
@@ -1107,6 +1220,12 @@ impl RuntimeConfig {
             "runtime.graceful_shutdown_timeout_ms must be greater than zero"
         );
         self.provider_health_sampler.validate()?;
+        if let Some(path) = &self.provider_conformance_artifact {
+            anyhow::ensure!(
+                !path.trim().is_empty(),
+                "runtime.provider_conformance_artifact cannot be empty"
+            );
+        }
         Ok(())
     }
 }
@@ -1591,7 +1710,7 @@ mod tests {
         SemanticCacheConfig, ShadowEvalConfig, ShadowEvalJudgeConfig, StickyRoutingBackend,
         StickyRoutingConfig, TelemetryConfig,
     };
-    use crate::types::{ModelConfig, ProviderConfig, ProviderKind, RouterPolicy};
+    use crate::types::{ModelConfig, ModelEndpoint, ProviderConfig, ProviderKind, RouterPolicy};
 
     fn valid_config() -> RouterConfig {
         RouterConfig {
@@ -2029,6 +2148,8 @@ mod tests {
     #[test]
     fn accepts_provider_backed_semantic_cache_embedding_model() {
         let mut config = valid_config();
+        config.models[0].capabilities.supported_endpoints =
+            Some(vec![ModelEndpoint::Chat, ModelEndpoint::Embeddings]);
         config.cache.semantic = SemanticCacheConfig {
             enabled: true,
             embedding_model: "alias-a".to_string(),
@@ -2293,5 +2414,128 @@ mod tests {
 
         let error = config.validate().expect_err("safety force model required");
         assert!(error.to_string().contains("safety.force_model"));
+    }
+
+    #[test]
+    fn rejects_model_endpoint_without_a_compatible_provider_path() {
+        let mut config = valid_config();
+        config.providers[0].responses_path = None;
+        config.models[0].capabilities.supported_endpoints =
+            Some(vec![ModelEndpoint::Chat, ModelEndpoint::Responses]);
+
+        let error = config
+            .validate()
+            .expect_err("model endpoint requires provider path");
+
+        assert!(
+            error
+                .to_string()
+                .contains("model model-a declares endpoint responses")
+        );
+        assert!(error.to_string().contains("provider-a"));
+    }
+
+    #[test]
+    fn rejects_duplicate_model_endpoint_declarations() {
+        let mut config = valid_config();
+        config.models[0].capabilities.supported_endpoints =
+            Some(vec![ModelEndpoint::Chat, ModelEndpoint::Chat]);
+
+        let error = config
+            .validate()
+            .expect_err("duplicate endpoint declaration rejected");
+
+        assert!(error.to_string().contains("duplicate chat"));
+    }
+
+    #[test]
+    fn native_provider_rejects_non_chat_endpoint_paths() {
+        for kind in [ProviderKind::OllamaNative, ProviderKind::LlamaCppNative] {
+            let mut config = valid_config();
+            config.providers[0].kind = kind;
+            config.providers[0].responses_path = Some("/v1/responses".to_string());
+
+            let error = config
+                .validate()
+                .expect_err("native adapter endpoint path rejected");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot configure unsupported endpoint responses")
+            );
+        }
+    }
+
+    #[test]
+    fn imports_conformance_artifact_and_rejects_unverified_endpoints() {
+        let directory = std::env::temp_dir().join(format!(
+            "autohand-router-conformance-import-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let config_path = directory.join("router.yaml");
+        let artifact_path = directory.join("matrix.json");
+        std::fs::write(
+            &config_path,
+            r#"
+bind: 127.0.0.1:8080
+default_model: model-a
+runtime:
+  provider_conformance_artifact: matrix.json
+providers:
+  - name: provider-a
+    base_url: http://127.0.0.1:9999
+    responses_path: /v1/responses
+models:
+  - id: model-a
+    provider: provider-a
+    capabilities:
+      supported_endpoints: [chat, responses]
+"#,
+        )
+        .unwrap();
+        let artifact = |responses_pass| {
+            serde_json::json!({
+                "schema_version": 1,
+                "reports": [{
+                    "provider": "provider-a",
+                    "model": "model-a",
+                    "chat": {
+                        "configured": true,
+                        "status": 200,
+                        "openai_chat_shape": true,
+                        "response_model_matches": true,
+                        "assistant_content_present": true
+                    },
+                    "endpoints": [{
+                        "endpoint": "responses",
+                        "configured": true,
+                        "pass": responses_pass
+                    }]
+                }]
+            })
+        };
+        std::fs::write(
+            &artifact_path,
+            serde_json::to_vec_pretty(&artifact(true)).unwrap(),
+        )
+        .unwrap();
+
+        RouterConfig::from_path(&config_path).expect("verified endpoint artifact is imported");
+
+        std::fs::write(
+            &artifact_path,
+            serde_json::to_vec_pretty(&artifact(false)).unwrap(),
+        )
+        .unwrap();
+        let error = RouterConfig::from_path(&config_path)
+            .expect_err("unverified endpoint must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("does not verify endpoint responses")
+        );
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

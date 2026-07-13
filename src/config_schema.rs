@@ -98,12 +98,12 @@ fn defs() -> Value {
                 "api_key_env": nullable_string(),
                 "api_key": nullable_string(),
                 "chat_path": string_default("/v1/chat/completions"),
-                "responses_path": nullable_string_default("/v1/responses"),
-                "embeddings_path": nullable_string_default("/v1/embeddings"),
-                "images_path": nullable_string_default("/v1/images/generations"),
-                "speech_path": nullable_string_default("/v1/audio/speech"),
-                "audio_transcriptions_path": nullable_string_default("/v1/audio/transcriptions"),
-                "audio_translations_path": nullable_string_default("/v1/audio/translations"),
+                "responses_path": nullable_string(),
+                "embeddings_path": nullable_string(),
+                "images_path": nullable_string(),
+                "speech_path": nullable_string(),
+                "audio_transcriptions_path": nullable_string(),
+                "audio_translations_path": nullable_string(),
                 "health_path": nullable_string(),
                 "timeout_ms": integer_min_default(1, 120000),
                 "retries": integer_min_default(0, 1),
@@ -148,7 +148,7 @@ fn defs() -> Value {
                     "type": ["array", "null"],
                     "items": ref_schema("ModelEndpoint"),
                     "default": null,
-                    "description": "Optional model-level endpoint allowlist; omitted means all provider-supported endpoints."
+                    "description": "Explicit model-level endpoint allowlist; omitted means chat only."
                 }
             }
         },
@@ -223,7 +223,8 @@ fn defs() -> Value {
             "additionalProperties": false,
             "properties": {
                 "graceful_shutdown_timeout_ms": integer_min_default(1, 30000),
-                "provider_health_sampler": ref_schema("ProviderHealthSamplerConfig")
+                "provider_health_sampler": ref_schema("ProviderHealthSamplerConfig"),
+                "provider_conformance_artifact": nullable_string()
             }
         },
         "ProviderHealthSamplerConfig": {
@@ -390,13 +391,6 @@ fn nullable_string() -> Value {
     })
 }
 
-fn nullable_string_default(default: &str) -> Value {
-    json!({
-        "type": ["string", "null"],
-        "default": default
-    })
-}
-
 fn string_array() -> Value {
     json!({
         "type": "array",
@@ -533,6 +527,19 @@ mod tests {
         assert_eq!(
             schema["$defs"]["ModelCapabilities"]["properties"]["supports_web_apps"]["type"],
             "boolean"
+        );
+        assert!(
+            schema["$defs"]["ProviderConfig"]["properties"]["responses_path"]
+                .get("default")
+                .is_none()
+        );
+        assert_eq!(
+            schema["$defs"]["ModelCapabilities"]["properties"]["supported_endpoints"]["description"],
+            "Explicit model-level endpoint allowlist; omitted means chat only."
+        );
+        assert!(
+            schema["$defs"]["RuntimeConfig"]["properties"]["provider_conformance_artifact"]
+                .is_object()
         );
     }
 }

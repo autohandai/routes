@@ -1,16 +1,16 @@
 use crate::{
     config::{StickyRoutingBackend, StickyRoutingConfig},
+    file_state::{BlockingFileGate, FileLeaseLock, atomic_write},
     types::ModelConfig,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs::{self, OpenOptions},
+    fs,
     io::ErrorKind,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    thread::sleep,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tracing::warn;
@@ -43,6 +43,7 @@ struct FileStickyRoutingStore {
     path: PathBuf,
     lock_path: PathBuf,
     lock_timeout: Duration,
+    blocking: BlockingFileGate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,7 +82,7 @@ impl StickyRoutingStore {
         }
     }
 
-    pub(crate) fn get(&self, key: &str) -> Option<StickyRoute> {
+    pub(crate) async fn get(&self, key: &str) -> Option<StickyRoute> {
         match &self.backend {
             StickyRoutingStoreBackend::Memory(routes) => {
                 let mut routes = routes.lock().ok()?;
@@ -92,7 +93,7 @@ impl StickyRoutingStore {
                 }
                 Some(route.route)
             }
-            StickyRoutingStoreBackend::File(store) => match store.get(key) {
+            StickyRoutingStoreBackend::File(store) => match store.get(key.to_string()).await {
                 Ok(route) => route,
                 Err(error) => {
                     warn!(?error, "failed to read sticky routing store");
@@ -102,7 +103,7 @@ impl StickyRoutingStore {
         }
     }
 
-    pub(crate) fn record(&self, key: String, model: &ModelConfig, ttl: Duration) {
+    pub(crate) async fn record(&self, key: String, model: &ModelConfig, ttl: Duration) {
         match &self.backend {
             StickyRoutingStoreBackend::Memory(routes) => {
                 if let Ok(mut routes) = routes.lock() {
@@ -119,7 +120,7 @@ impl StickyRoutingStore {
                 }
             }
             StickyRoutingStoreBackend::File(store) => {
-                if let Err(error) = store.record(key, model, ttl) {
+                if let Err(error) = store.record(key, model.clone(), ttl).await {
                     warn!(?error, "failed to write sticky routing store");
                 }
             }
@@ -141,11 +142,29 @@ impl FileStickyRoutingStore {
             path,
             lock_path,
             lock_timeout,
+            blocking: BlockingFileGate::default(),
         }
     }
 
-    fn get(&self, key: &str) -> Result<Option<StickyRoute>> {
-        let _lock = FileLock::acquire(&self.lock_path, self.lock_timeout)?;
+    async fn get(self: &Arc<Self>, key: String) -> Result<Option<StickyRoute>> {
+        let store = Arc::clone(self);
+        self.blocking.run(move || store.get_blocking(&key)).await
+    }
+
+    async fn record(
+        self: &Arc<Self>,
+        key: String,
+        model: ModelConfig,
+        ttl: Duration,
+    ) -> Result<()> {
+        let store = Arc::clone(self);
+        self.blocking
+            .run(move || store.record_blocking(key, &model, ttl))
+            .await
+    }
+
+    fn get_blocking(&self, key: &str) -> Result<Option<StickyRoute>> {
+        let _lock = FileLeaseLock::acquire(&self.lock_path, self.lock_timeout, "sticky routing")?;
         let now_ms = now_millis();
         let mut routes = self.read_routes()?;
         purge_expired(&mut routes, now_ms);
@@ -157,8 +176,8 @@ impl FileStickyRoutingStore {
         }))
     }
 
-    fn record(&self, key: String, model: &ModelConfig, ttl: Duration) -> Result<()> {
-        let _lock = FileLock::acquire(&self.lock_path, self.lock_timeout)?;
+    fn record_blocking(&self, key: String, model: &ModelConfig, ttl: Duration) -> Result<()> {
+        let _lock = FileLeaseLock::acquire(&self.lock_path, self.lock_timeout, "sticky routing")?;
         let now_ms = now_millis();
         let mut routes = self.read_routes()?;
         purge_expired(&mut routes, now_ms);
@@ -184,14 +203,8 @@ impl FileStickyRoutingStore {
     }
 
     fn write_routes(&self, routes: &HashMap<String, FileStickyRoute>) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create sticky routing dir {}", parent.display())
-            })?;
-        }
         let raw = serde_json::to_vec_pretty(routes).context("failed to serialize sticky routes")?;
-        fs::write(&self.path, raw)
-            .with_context(|| format!("failed to write sticky routes {}", self.path.display()))
+        atomic_write(&self.path, &raw, "sticky routing store")
     }
 }
 
@@ -210,52 +223,6 @@ fn now_millis() -> u64 {
         .unwrap_or_default()
 }
 
-struct FileLock {
-    path: PathBuf,
-}
-
-impl FileLock {
-    fn acquire(path: &Path, timeout: Duration) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create sticky routing lock dir {}",
-                    parent.display()
-                )
-            })?;
-        }
-        let start = Instant::now();
-        loop {
-            match OpenOptions::new().write(true).create_new(true).open(path) {
-                Ok(_) => {
-                    return Ok(Self {
-                        path: path.to_path_buf(),
-                    });
-                }
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    anyhow::ensure!(
-                        start.elapsed() < timeout,
-                        "timed out acquiring sticky routing lock {}",
-                        path.display()
-                    );
-                    sleep(Duration::from_millis(10));
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("failed to acquire sticky routing lock {}", path.display())
-                    });
-                }
-            }
-        }
-    }
-}
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::StickyRoutingStore;
@@ -265,8 +232,8 @@ mod tests {
     };
     use std::time::Duration;
 
-    #[test]
-    fn file_sticky_routing_store_shares_routes_across_instances() {
+    #[tokio::test]
+    async fn file_sticky_routing_store_shares_routes_across_instances() {
         let path = std::env::temp_dir().join(format!(
             "autohand-router-sticky-{}.json",
             uuid::Uuid::new_v4()
@@ -283,16 +250,22 @@ mod tests {
         let second = StickyRoutingStore::from_config(&config).unwrap();
         let model = sticky_model("shared-sticky", "shared-provider");
 
-        first.record("v1:session".to_string(), &model, Duration::from_secs(60));
-        let route = second.get("v1:session").expect("shared route is visible");
+        first
+            .record("v1:session".to_string(), &model, Duration::from_secs(60))
+            .await;
+        let route = second
+            .get("v1:session")
+            .await
+            .expect("shared route is visible");
 
         assert_eq!(route.model, "shared-sticky");
         assert_eq!(route.provider, "shared-provider");
+        let _ = std::fs::remove_file(path.with_extension("json.lock"));
         let _ = std::fs::remove_file(path);
     }
 
-    #[test]
-    fn file_sticky_routing_store_expires_routes() {
+    #[tokio::test]
+    async fn file_sticky_routing_store_expires_routes() {
         let path = std::env::temp_dir().join(format!(
             "autohand-router-sticky-expired-{}.json",
             uuid::Uuid::new_v4()
@@ -308,9 +281,35 @@ mod tests {
         let store = StickyRoutingStore::from_config(&config).unwrap();
         let model = sticky_model("expired-sticky", "shared-provider");
 
-        store.record("v1:session".to_string(), &model, Duration::from_millis(0));
+        store
+            .record("v1:session".to_string(), &model, Duration::from_millis(0))
+            .await;
 
-        assert!(store.get("v1:session").is_none());
+        assert!(store.get("v1:session").await.is_none());
+        let _ = std::fs::remove_file(path.with_extension("json.lock"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn corrupt_file_sticky_state_degrades_to_a_miss_without_overwrite() {
+        let path = std::env::temp_dir().join(format!(
+            "autohand-router-sticky-corrupt-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"{partial").unwrap();
+        let config = StickyRoutingConfig {
+            enabled: true,
+            ttl_seconds: 60,
+            prefer_model: true,
+            backend: StickyRoutingBackend::File,
+            file_path: Some(path.to_string_lossy().to_string()),
+            lock_timeout_ms: 1_000,
+        };
+        let store = StickyRoutingStore::from_config(&config).unwrap();
+
+        assert!(store.get("v1:session").await.is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{partial");
+        let _ = std::fs::remove_file(path.with_extension("json.lock"));
         let _ = std::fs::remove_file(path);
     }
 

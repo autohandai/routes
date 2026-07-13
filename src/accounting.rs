@@ -1,16 +1,16 @@
 use crate::{
     config::{BudgetAccountingBackend, BudgetConfig},
+    file_state::{BlockingFileGate, FileLeaseLock, atomic_write},
     types::ModelConfig,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::ErrorKind,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    thread::sleep,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 #[derive(Clone)]
@@ -53,17 +53,21 @@ impl BudgetAccounting {
         }
     }
 
-    pub fn reserve(&self, budget: &BudgetConfig, reservation: BudgetReservation) -> Result<()> {
+    pub async fn reserve(
+        &self,
+        budget: &BudgetConfig,
+        reservation: BudgetReservation,
+    ) -> Result<()> {
         match self {
             Self::Process(ledger) => ledger.reserve(budget, reservation),
-            Self::File(ledger) => ledger.reserve(budget, reservation),
+            Self::File(ledger) => ledger.reserve(budget.clone(), reservation).await,
         }
     }
 
-    pub fn snapshot(&self) -> Option<BudgetUsageSnapshot> {
+    pub async fn snapshot(&self) -> Option<BudgetUsageSnapshot> {
         match self {
             Self::Process(ledger) => ledger.snapshot().ok(),
-            Self::File(ledger) => ledger.snapshot().ok(),
+            Self::File(ledger) => ledger.snapshot().await.ok(),
         }
     }
 }
@@ -120,6 +124,7 @@ pub struct FileBudgetLedger {
     path: PathBuf,
     lock_path: PathBuf,
     lock_timeout: Duration,
+    blocking: BlockingFileGate,
 }
 
 impl FileBudgetLedger {
@@ -136,19 +141,40 @@ impl FileBudgetLedger {
             path,
             lock_path,
             lock_timeout,
+            blocking: BlockingFileGate::default(),
         }
     }
 
-    fn reserve(&self, budget: &BudgetConfig, reservation: BudgetReservation) -> Result<()> {
-        let _lock = FileLock::acquire(&self.lock_path, self.lock_timeout)?;
+    async fn reserve(
+        self: &Arc<Self>,
+        budget: BudgetConfig,
+        reservation: BudgetReservation,
+    ) -> Result<()> {
+        let store = Arc::clone(self);
+        self.blocking
+            .run(move || store.reserve_blocking(&budget, reservation))
+            .await
+    }
+
+    async fn snapshot(self: &Arc<Self>) -> Result<BudgetUsageSnapshot> {
+        let store = Arc::clone(self);
+        self.blocking.run(move || store.snapshot_blocking()).await
+    }
+
+    fn reserve_blocking(
+        &self,
+        budget: &BudgetConfig,
+        reservation: BudgetReservation,
+    ) -> Result<()> {
+        let _lock = FileLeaseLock::acquire(&self.lock_path, self.lock_timeout, "budget ledger")?;
         let mut usage = self.read_usage()?;
         ensure_within_budget(budget, &usage, reservation)?;
         add_reservation(&mut usage, reservation);
         self.write_usage(&usage)
     }
 
-    fn snapshot(&self) -> Result<BudgetUsageSnapshot> {
-        let _lock = FileLock::acquire(&self.lock_path, self.lock_timeout)?;
+    fn snapshot_blocking(&self) -> Result<BudgetUsageSnapshot> {
+        let _lock = FileLeaseLock::acquire(&self.lock_path, self.lock_timeout, "budget ledger")?;
         self.read_usage()
     }
 
@@ -163,14 +189,8 @@ impl FileBudgetLedger {
     }
 
     fn write_usage(&self, usage: &BudgetUsageSnapshot) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create budget ledger dir {}", parent.display())
-            })?;
-        }
         let raw = serde_json::to_vec_pretty(usage).context("failed to serialize budget ledger")?;
-        fs::write(&self.path, raw)
-            .with_context(|| format!("failed to write budget ledger {}", self.path.display()))
+        atomic_write(&self.path, &raw, "budget ledger")
     }
 }
 
@@ -222,67 +242,23 @@ fn ensure_within_budget(
     Ok(())
 }
 
-struct FileLock {
-    path: PathBuf,
-}
-
-impl FileLock {
-    fn acquire(path: &Path, timeout: Duration) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create budget lock dir {}", parent.display())
-            })?;
-        }
-        let start = Instant::now();
-        loop {
-            match OpenOptions::new().write(true).create_new(true).open(path) {
-                Ok(_) => {
-                    return Ok(Self {
-                        path: path.to_path_buf(),
-                    });
-                }
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    anyhow::ensure!(
-                        start.elapsed() < timeout,
-                        "timed out acquiring budget ledger lock {}",
-                        path.display()
-                    );
-                    sleep(Duration::from_millis(10));
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("failed to acquire budget ledger lock {}", path.display())
-                    });
-                }
-            }
-        }
-    }
-}
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{BudgetAccounting, BudgetReservation};
     use crate::{
         config::{BudgetAccountingBackend, BudgetAccountingConfig, BudgetConfig},
+        file_state::FileLeaseLock,
         types::ModelConfig,
     };
-    use std::{fs, thread, time::SystemTime};
+    use std::{
+        fs,
+        process::{Command, Stdio},
+        time::Duration,
+    };
 
-    #[test]
-    fn file_accounting_enforces_shared_request_limit() {
-        let path = std::env::temp_dir().join(format!(
-            "autohand-router-budget-{}.json",
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+    #[tokio::test]
+    async fn file_accounting_enforces_shared_request_limit() {
+        let path = temp_path("shared-limit");
         let budget = BudgetConfig {
             max_chat_requests: Some(1),
             max_total_tokens: None,
@@ -297,17 +273,17 @@ mod tests {
         let second = BudgetAccounting::from_budget_config(&budget).unwrap();
         let reservation = BudgetReservation::new(&test_model(), 10, 0);
 
-        first.reserve(&budget, reservation).unwrap();
-        let error = second.reserve(&budget, reservation).unwrap_err();
+        first.reserve(&budget, reservation).await.unwrap();
+        let error = second.reserve(&budget, reservation).await.unwrap_err();
 
         assert!(error.to_string().contains("model request budget"));
-        assert_eq!(first.snapshot().unwrap().request_count, 1);
+        assert_eq!(first.snapshot().await.unwrap().request_count, 1);
         let _ = fs::remove_file(path.with_extension("json.lock"));
         let _ = fs::remove_file(path);
     }
 
-    #[test]
-    fn process_accounting_reserves_concurrent_requests_atomically() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_accounting_reserves_concurrent_requests_atomically() {
         let budget = BudgetConfig {
             max_chat_requests: Some(1),
             max_total_tokens: None,
@@ -316,23 +292,158 @@ mod tests {
         };
         let accounting = BudgetAccounting::from_budget_config(&budget).unwrap();
         let reservation = BudgetReservation::new(&test_model(), 10, 0);
-        let successes = thread::scope(|scope| {
-            let handles = (0..8)
-                .map(|_| {
-                    let accounting = accounting.clone();
-                    let budget = budget.clone();
-                    scope.spawn(move || accounting.reserve(&budget, reservation).is_ok())
-                })
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .filter_map(|handle| handle.join().ok())
-                .filter(|success| *success)
-                .count()
-        });
+        let handles = (0..8)
+            .map(|_| {
+                let accounting = accounting.clone();
+                let budget = budget.clone();
+                tokio::spawn(async move { accounting.reserve(&budget, reservation).await.is_ok() })
+            })
+            .collect::<Vec<_>>();
+        let mut successes = 0;
+        for handle in handles {
+            if handle.await.unwrap() {
+                successes += 1;
+            }
+        }
 
         assert_eq!(successes, 1);
-        assert_eq!(accounting.snapshot().unwrap().request_count, 1);
+        assert_eq!(accounting.snapshot().await.unwrap().request_count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_accounting_serializes_multithreaded_contention() {
+        let path = temp_path("contention");
+        let mut budget = file_budget(&path, 16);
+        budget.accounting.lock_timeout_ms = 5_000;
+        let reservation = BudgetReservation::new(&test_model(), 10, 0);
+        let handles = (0..16)
+            .map(|_| {
+                let accounting = BudgetAccounting::from_budget_config(&budget).unwrap();
+                let budget = budget.clone();
+                tokio::spawn(async move { accounting.reserve(&budget, reservation).await })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
+        let accounting = BudgetAccounting::from_budget_config(&budget).unwrap();
+        assert_eq!(accounting.snapshot().await.unwrap().request_count, 16);
+        cleanup(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn contended_file_accounting_does_not_starve_the_tokio_worker() {
+        let path = temp_path("worker-starvation");
+        let budget = file_budget(&path, 1);
+        let lock_path = path.with_extension("json.lock");
+        let held_lock =
+            FileLeaseLock::acquire(&lock_path, Duration::from_secs(1), "budget ledger").unwrap();
+        let accounting = BudgetAccounting::from_budget_config(&budget).unwrap();
+        let task_budget = budget.clone();
+        let task = tokio::spawn(async move {
+            accounting
+                .reserve(&task_budget, BudgetReservation::new(&test_model(), 10, 0))
+                .await
+        });
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            tokio::time::sleep(Duration::from_millis(20)),
+        )
+        .await
+        .expect("Tokio timer was starved by file lock contention");
+        assert!(!task.is_finished());
+        drop(held_lock);
+        task.await.unwrap().unwrap();
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn corrupt_budget_ledger_fails_closed() {
+        let path = temp_path("corrupt");
+        fs::write(&path, b"{partial").unwrap();
+        let budget = file_budget(&path, 1);
+        let accounting = BudgetAccounting::from_budget_config(&budget).unwrap();
+
+        let error = accounting
+            .reserve(&budget, BudgetReservation::new(&test_model(), 10, 0))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("failed to parse budget ledger"));
+        assert_eq!(fs::read(&path).unwrap(), b"{partial");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn file_budget_is_enforced_across_processes() {
+        if std::env::var_os("AUTOHAND_BUDGET_CHILD_PATH").is_some() {
+            return;
+        }
+        let path = temp_path("cross-process");
+        run_budget_child(&path, true);
+        run_budget_child(&path, false);
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn budget_child_process_reservation() {
+        let Some(path) = std::env::var_os("AUTOHAND_BUDGET_CHILD_PATH") else {
+            return;
+        };
+        let expect_success = std::env::var("AUTOHAND_BUDGET_CHILD_SUCCESS").unwrap() == "true";
+        let path = std::path::PathBuf::from(path);
+        let budget = file_budget(&path, 1);
+        let accounting = BudgetAccounting::from_budget_config(&budget).unwrap();
+        let result = accounting
+            .reserve(&budget, BudgetReservation::new(&test_model(), 10, 0))
+            .await;
+        assert_eq!(
+            result.is_ok(),
+            expect_success,
+            "reservation result: {result:?}"
+        );
+    }
+
+    fn run_budget_child(path: &std::path::Path, expect_success: bool) {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "accounting::tests::budget_child_process_reservation",
+                "--nocapture",
+            ])
+            .env("AUTOHAND_BUDGET_CHILD_PATH", path)
+            .env("AUTOHAND_BUDGET_CHILD_SUCCESS", expect_success.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "budget child process failed: {status}");
+    }
+
+    fn file_budget(path: &std::path::Path, limit: u64) -> BudgetConfig {
+        BudgetConfig {
+            max_chat_requests: Some(limit),
+            max_total_tokens: None,
+            max_estimated_cost_micros: None,
+            accounting: BudgetAccountingConfig {
+                backend: BudgetAccountingBackend::File,
+                file_path: Some(path.to_string_lossy().to_string()),
+                lock_timeout_ms: 1_000,
+            },
+        }
+    }
+
+    fn temp_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "autohand-router-budget-{label}-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    fn cleanup(path: &std::path::Path) {
+        let _ = fs::remove_file(path.with_extension("json.lock"));
+        let _ = fs::remove_file(path);
     }
 
     fn test_model() -> ModelConfig {

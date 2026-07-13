@@ -1,16 +1,18 @@
-use crate::config::{SemanticCacheBackend, SemanticCacheConfig};
+use crate::{
+    config::{SemanticCacheBackend, SemanticCacheConfig},
+    file_state::{BlockingFileGate, FileLeaseLock, atomic_write},
+};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
-    fs::{self, OpenOptions},
+    fs,
     hash::{Hash, Hasher},
     io::ErrorKind,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
-    thread::sleep,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::warn;
 
@@ -92,6 +94,7 @@ struct FileSemanticCacheStore {
     path: PathBuf,
     lock_path: PathBuf,
     lock_timeout: Duration,
+    blocking: BlockingFileGate,
 }
 
 impl Default for SemanticCache {
@@ -123,7 +126,7 @@ impl SemanticCache {
         }
     }
 
-    pub fn lookup(
+    pub async fn lookup(
         &self,
         config: &SemanticCacheConfig,
         request: &SemanticCacheRequest,
@@ -141,7 +144,16 @@ impl SemanticCache {
                 best_hit(config, request, candidate_models, query, &state)
             }
             SemanticCacheStoreBackend::File(store) => {
-                match store.lookup(config, request, candidate_models, query, now) {
+                match store
+                    .lookup(
+                        config.clone(),
+                        request.clone(),
+                        candidate_models.to_vec(),
+                        query.clone(),
+                        now,
+                    )
+                    .await
+                {
                     Ok(hit) => hit,
                     Err(error) => {
                         warn!(?error, "failed to read semantic cache store");
@@ -153,7 +165,7 @@ impl SemanticCache {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn record(
+    pub async fn record(
         &self,
         config: &SemanticCacheConfig,
         write: SemanticCacheWrite,
@@ -186,19 +198,19 @@ impl SemanticCache {
                 prune_entries(&mut state, config, unix_seconds());
             }
             SemanticCacheStoreBackend::File(store) => {
-                if let Err(error) = store.record(config, entry) {
+                if let Err(error) = store.record(config.clone(), entry).await {
                     warn!(?error, "failed to write semantic cache store");
                 }
             }
         }
     }
 
-    pub fn snapshot(&self) -> SemanticCacheSnapshot {
+    pub async fn snapshot(&self) -> SemanticCacheSnapshot {
         let entries = match &self.backend {
             SemanticCacheStoreBackend::Memory(state) => {
                 state.read().map(|state| state.len()).unwrap_or_default()
             }
-            SemanticCacheStoreBackend::File(store) => store.snapshot().unwrap_or_default(),
+            SemanticCacheStoreBackend::File(store) => store.snapshot().await.unwrap_or_default(),
         };
         SemanticCacheSnapshot { entries }
     }
@@ -218,10 +230,41 @@ impl FileSemanticCacheStore {
             path,
             lock_path,
             lock_timeout,
+            blocking: BlockingFileGate::default(),
         }
     }
 
-    fn lookup(
+    async fn lookup(
+        self: &Arc<Self>,
+        config: SemanticCacheConfig,
+        request: SemanticCacheRequest,
+        candidate_models: Vec<String>,
+        query: SemanticCacheEmbedding,
+        now: u64,
+    ) -> Result<Option<SemanticCacheHit>> {
+        let store = Arc::clone(self);
+        self.blocking
+            .run(move || store.lookup_blocking(&config, &request, &candidate_models, &query, now))
+            .await
+    }
+
+    async fn record(
+        self: &Arc<Self>,
+        config: SemanticCacheConfig,
+        entry: SemanticCacheEntry,
+    ) -> Result<()> {
+        let store = Arc::clone(self);
+        self.blocking
+            .run(move || store.record_blocking(&config, entry))
+            .await
+    }
+
+    async fn snapshot(self: &Arc<Self>) -> Result<usize> {
+        let store = Arc::clone(self);
+        self.blocking.run(move || store.snapshot_blocking()).await
+    }
+
+    fn lookup_blocking(
         &self,
         config: &SemanticCacheConfig,
         request: &SemanticCacheRequest,
@@ -229,7 +272,7 @@ impl FileSemanticCacheStore {
         query: &SemanticCacheEmbedding,
         now: u64,
     ) -> Result<Option<SemanticCacheHit>> {
-        let _lock = FileLock::acquire(&self.lock_path, self.lock_timeout)?;
+        let _lock = FileLeaseLock::acquire(&self.lock_path, self.lock_timeout, "semantic cache")?;
         let mut entries = self.read_entries()?;
         prune_entries(&mut entries, config, now);
         let hit = best_hit(config, request, candidate_models, query, &entries);
@@ -237,16 +280,20 @@ impl FileSemanticCacheStore {
         Ok(hit)
     }
 
-    fn record(&self, config: &SemanticCacheConfig, entry: SemanticCacheEntry) -> Result<()> {
-        let _lock = FileLock::acquire(&self.lock_path, self.lock_timeout)?;
+    fn record_blocking(
+        &self,
+        config: &SemanticCacheConfig,
+        entry: SemanticCacheEntry,
+    ) -> Result<()> {
+        let _lock = FileLeaseLock::acquire(&self.lock_path, self.lock_timeout, "semantic cache")?;
         let mut entries = self.read_entries()?;
         entries.push(entry);
         prune_entries(&mut entries, config, unix_seconds());
         self.write_entries(&entries)
     }
 
-    fn snapshot(&self) -> Result<usize> {
-        let _lock = FileLock::acquire(&self.lock_path, self.lock_timeout)?;
+    fn snapshot_blocking(&self) -> Result<usize> {
+        let _lock = FileLeaseLock::acquire(&self.lock_path, self.lock_timeout, "semantic cache")?;
         Ok(self.read_entries()?.len())
     }
 
@@ -261,15 +308,9 @@ impl FileSemanticCacheStore {
     }
 
     fn write_entries(&self, entries: &[SemanticCacheEntry]) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create semantic cache dir {}", parent.display())
-            })?;
-        }
         let raw =
             serde_json::to_vec_pretty(entries).context("failed to serialize semantic cache")?;
-        fs::write(&self.path, raw)
-            .with_context(|| format!("failed to write semantic cache {}", self.path.display()))
+        atomic_write(&self.path, &raw, "semantic cache")
     }
 }
 
@@ -490,59 +531,13 @@ mod sparse_values_serde {
     }
 }
 
-struct FileLock {
-    path: PathBuf,
-}
-
-impl FileLock {
-    fn acquire(path: &Path, timeout: Duration) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create semantic cache lock dir {}",
-                    parent.display()
-                )
-            })?;
-        }
-        let start = Instant::now();
-        loop {
-            match OpenOptions::new().write(true).create_new(true).open(path) {
-                Ok(_) => {
-                    return Ok(Self {
-                        path: path.to_path_buf(),
-                    });
-                }
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    anyhow::ensure!(
-                        start.elapsed() < timeout,
-                        "timed out acquiring semantic cache lock {}",
-                        path.display()
-                    );
-                    sleep(Duration::from_millis(10));
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("failed to acquire semantic cache lock {}", path.display())
-                    });
-                }
-            }
-        }
-    }
-}
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::SemanticCacheBackend;
 
-    #[test]
-    fn semantic_cache_matches_similar_prompt_above_threshold() {
+    #[tokio::test]
+    async fn semantic_cache_matches_similar_prompt_above_threshold() {
         let cache = SemanticCache::default();
         let config = SemanticCacheConfig {
             enabled: true,
@@ -554,23 +549,25 @@ mod tests {
             file_path: None,
             lock_timeout_ms: 1_000,
         };
-        cache.record(
-            &config,
-            SemanticCacheWrite {
-                endpoint: SemanticCacheEndpoint::Chat,
-                prompt: "Explain Rust ownership with examples".to_string(),
-                scope_key: "scope-a".to_string(),
-                embedding: SemanticCacheEmbedding::local_hash(
-                    "Explain Rust ownership with examples",
-                )
-                .unwrap(),
-            },
-            "model-a",
-            "provider-a",
-            200,
-            Some("application/json".to_string()),
-            Bytes::from_static(b"{\"cached\":true}"),
-        );
+        cache
+            .record(
+                &config,
+                SemanticCacheWrite {
+                    endpoint: SemanticCacheEndpoint::Chat,
+                    prompt: "Explain Rust ownership with examples".to_string(),
+                    scope_key: "scope-a".to_string(),
+                    embedding: SemanticCacheEmbedding::local_hash(
+                        "Explain Rust ownership with examples",
+                    )
+                    .unwrap(),
+                },
+                "model-a",
+                "provider-a",
+                200,
+                Some("application/json".to_string()),
+                Bytes::from_static(b"{\"cached\":true}"),
+            )
+            .await;
 
         let hit = cache
             .lookup(
@@ -583,14 +580,15 @@ mod tests {
                 &["model-a".to_string()],
                 &SemanticCacheEmbedding::local_hash("Explain Rust ownership examples").unwrap(),
             )
+            .await
             .expect("similar prompt should hit");
 
         assert_eq!(hit.model, "model-a");
         assert!(hit.similarity >= 0.70);
     }
 
-    #[test]
-    fn semantic_cache_respects_ttl() {
+    #[tokio::test]
+    async fn semantic_cache_respects_ttl() {
         let cache = SemanticCache::default();
         let config = SemanticCacheConfig {
             enabled: true,
@@ -602,21 +600,24 @@ mod tests {
             file_path: None,
             lock_timeout_ms: 1_000,
         };
-        cache.record(
-            &config,
-            SemanticCacheWrite {
-                endpoint: SemanticCacheEndpoint::Responses,
-                prompt: "Summarize routing docs".to_string(),
-                scope_key: "scope-a".to_string(),
-                embedding: SemanticCacheEmbedding::local_hash("Summarize routing docs").unwrap(),
-            },
-            "model-a",
-            "provider-a",
-            200,
-            None,
-            Bytes::from_static(b"{}"),
-        );
-        std::thread::sleep(Duration::from_millis(1100));
+        cache
+            .record(
+                &config,
+                SemanticCacheWrite {
+                    endpoint: SemanticCacheEndpoint::Responses,
+                    prompt: "Summarize routing docs".to_string(),
+                    scope_key: "scope-a".to_string(),
+                    embedding: SemanticCacheEmbedding::local_hash("Summarize routing docs")
+                        .unwrap(),
+                },
+                "model-a",
+                "provider-a",
+                200,
+                None,
+                Bytes::from_static(b"{}"),
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(1100)).await;
         assert!(
             cache
                 .lookup(
@@ -629,12 +630,13 @@ mod tests {
                     &["model-a".to_string()],
                     &SemanticCacheEmbedding::local_hash("Summarize routing docs").unwrap(),
                 )
+                .await
                 .is_none()
         );
     }
 
-    #[test]
-    fn semantic_cache_matches_dense_provider_embeddings() {
+    #[tokio::test]
+    async fn semantic_cache_matches_dense_provider_embeddings() {
         let cache = SemanticCache::default();
         let config = SemanticCacheConfig {
             enabled: true,
@@ -646,21 +648,23 @@ mod tests {
             file_path: None,
             lock_timeout_ms: 1_000,
         };
-        cache.record(
-            &config,
-            SemanticCacheWrite {
-                endpoint: SemanticCacheEndpoint::Chat,
-                prompt: "Prompt A".to_string(),
-                scope_key: "scope-a".to_string(),
-                embedding: SemanticCacheEmbedding::dense("embed-model", vec![0.1, 0.2, 0.3])
-                    .unwrap(),
-            },
-            "model-a",
-            "provider-a",
-            200,
-            Some("application/json".to_string()),
-            Bytes::from_static(b"{\"cached\":true}"),
-        );
+        cache
+            .record(
+                &config,
+                SemanticCacheWrite {
+                    endpoint: SemanticCacheEndpoint::Chat,
+                    prompt: "Prompt A".to_string(),
+                    scope_key: "scope-a".to_string(),
+                    embedding: SemanticCacheEmbedding::dense("embed-model", vec![0.1, 0.2, 0.3])
+                        .unwrap(),
+                },
+                "model-a",
+                "provider-a",
+                200,
+                Some("application/json".to_string()),
+                Bytes::from_static(b"{\"cached\":true}"),
+            )
+            .await;
 
         let hit = cache
             .lookup(
@@ -673,6 +677,7 @@ mod tests {
                 &["model-a".to_string()],
                 &SemanticCacheEmbedding::dense("embed-model", vec![0.1, 0.2, 0.3]).unwrap(),
             )
+            .await
             .expect("matching dense embedding should hit");
 
         assert_eq!(hit.model, "model-a");
@@ -680,8 +685,8 @@ mod tests {
         assert!(hit.similarity >= 0.95);
     }
 
-    #[test]
-    fn file_semantic_cache_shares_hits_across_instances() {
+    #[tokio::test]
+    async fn file_semantic_cache_shares_hits_across_instances() {
         let path = std::env::temp_dir().join(format!(
             "autohand-router-semantic-cache-{}.json",
             uuid::Uuid::new_v4()
@@ -699,23 +704,25 @@ mod tests {
         let first = SemanticCache::from_config(&config).unwrap();
         let second = SemanticCache::from_config(&config).unwrap();
 
-        first.record(
-            &config,
-            SemanticCacheWrite {
-                endpoint: SemanticCacheEndpoint::Chat,
-                prompt: "Explain Rust ownership with examples".to_string(),
-                scope_key: "scope-a".to_string(),
-                embedding: SemanticCacheEmbedding::local_hash(
-                    "Explain Rust ownership with examples",
-                )
-                .unwrap(),
-            },
-            "model-a",
-            "provider-a",
-            200,
-            Some("application/json".to_string()),
-            Bytes::from_static(b"{\"cached\":true}"),
-        );
+        first
+            .record(
+                &config,
+                SemanticCacheWrite {
+                    endpoint: SemanticCacheEndpoint::Chat,
+                    prompt: "Explain Rust ownership with examples".to_string(),
+                    scope_key: "scope-a".to_string(),
+                    embedding: SemanticCacheEmbedding::local_hash(
+                        "Explain Rust ownership with examples",
+                    )
+                    .unwrap(),
+                },
+                "model-a",
+                "provider-a",
+                200,
+                Some("application/json".to_string()),
+                Bytes::from_static(b"{\"cached\":true}"),
+            )
+            .await;
         let hit = second
             .lookup(
                 &config,
@@ -727,16 +734,18 @@ mod tests {
                 &["model-a".to_string()],
                 &SemanticCacheEmbedding::local_hash("Explain Rust ownership examples").unwrap(),
             )
+            .await
             .expect("shared file cache should hit");
 
         assert_eq!(hit.model, "model-a");
         assert_eq!(hit.body, Bytes::from_static(b"{\"cached\":true}"));
-        assert_eq!(second.snapshot().entries, 1);
+        assert_eq!(second.snapshot().await.entries, 1);
+        let _ = std::fs::remove_file(path.with_extension("json.lock"));
         let _ = std::fs::remove_file(path);
     }
 
-    #[test]
-    fn semantic_cache_requires_an_exact_scope_match() {
+    #[tokio::test]
+    async fn semantic_cache_requires_an_exact_scope_match() {
         let cache = SemanticCache::default();
         let config = SemanticCacheConfig {
             enabled: true,
@@ -748,32 +757,74 @@ mod tests {
             file_path: None,
             lock_timeout_ms: 1_000,
         };
-        cache.record(
-            &config,
-            SemanticCacheWrite {
-                endpoint: SemanticCacheEndpoint::Chat,
-                prompt: "same prompt".to_string(),
-                scope_key: "history-a".to_string(),
-                embedding: SemanticCacheEmbedding::local_hash("same prompt").unwrap(),
-            },
-            "model-a",
-            "provider-a",
-            200,
-            Some("application/json".to_string()),
-            Bytes::from_static(b"{\"cached\":true}"),
-        );
+        cache
+            .record(
+                &config,
+                SemanticCacheWrite {
+                    endpoint: SemanticCacheEndpoint::Chat,
+                    prompt: "same prompt".to_string(),
+                    scope_key: "history-a".to_string(),
+                    embedding: SemanticCacheEmbedding::local_hash("same prompt").unwrap(),
+                },
+                "model-a",
+                "provider-a",
+                200,
+                Some("application/json".to_string()),
+                Bytes::from_static(b"{\"cached\":true}"),
+            )
+            .await;
 
-        let hit = cache.lookup(
-            &config,
-            &SemanticCacheRequest {
-                endpoint: SemanticCacheEndpoint::Chat,
-                prompt: "same prompt".to_string(),
-                scope_key: "history-b".to_string(),
-            },
-            &["model-a".to_string()],
-            &SemanticCacheEmbedding::local_hash("same prompt").unwrap(),
-        );
+        let hit = cache
+            .lookup(
+                &config,
+                &SemanticCacheRequest {
+                    endpoint: SemanticCacheEndpoint::Chat,
+                    prompt: "same prompt".to_string(),
+                    scope_key: "history-b".to_string(),
+                },
+                &["model-a".to_string()],
+                &SemanticCacheEmbedding::local_hash("same prompt").unwrap(),
+            )
+            .await;
 
         assert!(hit.is_none());
+    }
+
+    #[tokio::test]
+    async fn corrupt_file_cache_degrades_to_a_miss_without_overwriting_state() {
+        let path = std::env::temp_dir().join(format!(
+            "autohand-router-semantic-cache-corrupt-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"[partial").unwrap();
+        let config = SemanticCacheConfig {
+            enabled: true,
+            embedding_model: "local-hash".to_string(),
+            similarity_threshold: 0.70,
+            ttl_seconds: 60,
+            max_entries: 16,
+            backend: SemanticCacheBackend::File,
+            file_path: Some(path.to_string_lossy().to_string()),
+            lock_timeout_ms: 1_000,
+        };
+        let cache = SemanticCache::from_config(&config).unwrap();
+
+        let hit = cache
+            .lookup(
+                &config,
+                &SemanticCacheRequest {
+                    endpoint: SemanticCacheEndpoint::Chat,
+                    prompt: "safe miss".to_string(),
+                    scope_key: "scope".to_string(),
+                },
+                &["model-a".to_string()],
+                &SemanticCacheEmbedding::local_hash("safe miss").unwrap(),
+            )
+            .await;
+
+        assert!(hit.is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), b"[partial");
+        let _ = std::fs::remove_file(path.with_extension("json.lock"));
+        let _ = std::fs::remove_file(path);
     }
 }

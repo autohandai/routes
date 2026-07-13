@@ -6,6 +6,7 @@ pub mod config;
 pub mod config_schema;
 pub mod conformance;
 pub mod eval;
+mod file_state;
 pub mod health;
 pub mod judge;
 pub mod load;

@@ -351,7 +351,7 @@ struct BudgetSnapshot {
 }
 
 impl RouterMetrics {
-    fn snapshot_with_budget(
+    async fn snapshot_with_budget(
         &self,
         budget: Option<&BudgetConfig>,
         accounting: &BudgetAccounting,
@@ -397,7 +397,7 @@ impl RouterMetrics {
             per_model: snapshot_selection_map(&self.per_model),
             per_provider: snapshot_selection_map(&self.per_provider),
             upstream_outcomes: snapshot_upstream_outcomes(&self.upstream_outcomes),
-            budget: BudgetSnapshot::from_config(budget, accounting),
+            budget: BudgetSnapshot::from_config(budget, accounting).await,
             judge,
         }
     }
@@ -460,7 +460,7 @@ impl RouterMetrics {
 }
 
 impl BudgetSnapshot {
-    fn from_config(budget: Option<&BudgetConfig>, accounting: &BudgetAccounting) -> Self {
+    async fn from_config(budget: Option<&BudgetConfig>, accounting: &BudgetAccounting) -> Self {
         let Some(budget) = budget else {
             return Self {
                 accounting_backend: "disabled".to_string(),
@@ -478,11 +478,11 @@ impl BudgetSnapshot {
         let (accounting_backend, used) = match accounting {
             BudgetAccounting::Process(_) => (
                 "process".to_string(),
-                accounting.snapshot().unwrap_or_default(),
+                accounting.snapshot().await.unwrap_or_default(),
             ),
             BudgetAccounting::File(_) => (
                 "file".to_string(),
-                accounting.snapshot().unwrap_or_default(),
+                accounting.snapshot().await.unwrap_or_default(),
             ),
         };
         Self {
@@ -964,17 +964,18 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Json<MetricsSnapshot> {
     Json(
         state
             .metrics
-            .snapshot_with_budget(Some(&config.budget), &state.accounting, judge),
+            .snapshot_with_budget(Some(&config.budget), &state.accounting, judge)
+            .await,
     )
 }
 
 async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> Response {
     let config = state.engine.config();
     let judge = state.engine.classifier().judge_metrics();
-    let snapshot =
-        state
-            .metrics
-            .snapshot_with_budget(Some(&config.budget), &state.accounting, judge);
+    let snapshot = state
+        .metrics
+        .snapshot_with_budget(Some(&config.budget), &state.accounting, judge)
+        .await;
     (
         [(
             header::CONTENT_TYPE,
@@ -1701,7 +1702,7 @@ async fn chat_completions(
             )
                 .into_response();
         };
-        apply_sticky_routing(&state, &config, sticky_key.as_deref(), &mut models);
+        apply_sticky_routing(&state, &config, sticky_key.as_deref(), &mut models).await;
         let shadow_eval_dispatch = shadow_eval_request_for_chat(
             &state,
             &config,
@@ -1848,7 +1849,7 @@ async fn responses(
             )
                 .into_response();
         };
-        apply_sticky_routing(&state, &config, sticky_key.as_deref(), &mut models);
+        apply_sticky_routing(&state, &config, sticky_key.as_deref(), &mut models).await;
         let shadow_eval_dispatch = shadow_eval_request_for_responses(
             &state,
             &config,
@@ -2144,7 +2145,7 @@ fn string_field(value: Option<&Value>) -> Option<String> {
         .map(str::to_string)
 }
 
-fn apply_sticky_routing(
+async fn apply_sticky_routing(
     state: &Arc<AppState>,
     config: &RouterConfig,
     sticky_key: Option<&str>,
@@ -2156,7 +2157,7 @@ fn apply_sticky_routing(
     let Some(key) = sticky_key else {
         return;
     };
-    let Some(route) = state.sticky_routing.get(key) else {
+    let Some(route) = state.sticky_routing.get(key).await else {
         return;
     };
     let exact_idx = config.sticky_routing.prefer_model.then(|| {
@@ -2179,7 +2180,7 @@ fn apply_sticky_routing(
         .fetch_add(1, Ordering::Relaxed);
 }
 
-fn record_sticky_routing(
+async fn record_sticky_routing(
     state: &Arc<AppState>,
     config: &RouterConfig,
     sticky_key: Option<String>,
@@ -2191,11 +2192,14 @@ fn record_sticky_routing(
     let Some(key) = sticky_key else {
         return;
     };
-    state.sticky_routing.record(
-        key,
-        selected_model,
-        Duration::from_secs(config.sticky_routing.ttl_seconds),
-    );
+    state
+        .sticky_routing
+        .record(
+            key,
+            selected_model,
+            Duration::from_secs(config.sticky_routing.ttl_seconds),
+        )
+        .await;
     state
         .metrics
         .sticky_routing_writes
@@ -3247,6 +3251,7 @@ async fn dispatch_chat(
             estimated_input_tokens,
             requested_output_tokens,
         )
+        .await
     {
         state
             .metrics
@@ -3270,17 +3275,22 @@ async fn dispatch_chat(
     } else {
         semantic_cache_bypass_reason.map(SemanticCacheResponseStatus::Bypass)
     };
-    let semantic_cache_hit = semantic_cache_request
+    let semantic_cache_hit = if let Some((request, embedding)) = semantic_cache_request
         .as_ref()
         .zip(semantic_cache_embedding.as_ref())
-        .and_then(|(request, embedding)| {
-            state.semantic_cache.lookup(
+    {
+        state
+            .semantic_cache
+            .lookup(
                 &config.cache.semantic,
                 request,
                 &candidate_model_ids,
                 embedding,
             )
-        });
+            .await
+    } else {
+        None
+    };
     if !provider_backed_semantic_cache {
         let budget_model = semantic_cache_hit
             .as_ref()
@@ -3293,7 +3303,9 @@ async fn dispatch_chat(
             budget_model,
             estimated_input_tokens,
             requested_output_tokens,
-        ) {
+        )
+        .await
+        {
             state
                 .metrics
                 .budget_rejections
@@ -3314,7 +3326,7 @@ async fn dispatch_chat(
             .fetch_add(1, Ordering::Relaxed);
         if let Some(model) = config.find_model(&hit.model) {
             state.metrics.record_selection(model);
-            record_sticky_routing(&state, &config, sticky_key.clone(), model);
+            record_sticky_routing(&state, &config, sticky_key.clone(), model).await;
         }
         return cached_upstream_response(hit, estimated_input_tokens, requested_output_tokens);
     }
@@ -3363,7 +3375,7 @@ async fn dispatch_chat(
                         .fetch_add(1, Ordering::Relaxed);
                 }
                 state.metrics.record_selection(model);
-                record_sticky_routing(&state, &config, sticky_key.clone(), model);
+                record_sticky_routing(&state, &config, sticky_key.clone(), model).await;
                 return upstream_response(
                     state.clone(),
                     response,
@@ -3465,6 +3477,7 @@ async fn dispatch_responses(
             estimated_input_tokens,
             requested_output_tokens,
         )
+        .await
     {
         state
             .metrics
@@ -3488,17 +3501,22 @@ async fn dispatch_responses(
     } else {
         semantic_cache_bypass_reason.map(SemanticCacheResponseStatus::Bypass)
     };
-    let semantic_cache_hit = semantic_cache_request
+    let semantic_cache_hit = if let Some((request, embedding)) = semantic_cache_request
         .as_ref()
         .zip(semantic_cache_embedding.as_ref())
-        .and_then(|(request, embedding)| {
-            state.semantic_cache.lookup(
+    {
+        state
+            .semantic_cache
+            .lookup(
                 &config.cache.semantic,
                 request,
                 &candidate_model_ids,
                 embedding,
             )
-        });
+            .await
+    } else {
+        None
+    };
     if !provider_backed_semantic_cache {
         let budget_model = semantic_cache_hit
             .as_ref()
@@ -3511,7 +3529,9 @@ async fn dispatch_responses(
             budget_model,
             estimated_input_tokens,
             requested_output_tokens,
-        ) {
+        )
+        .await
+        {
             state
                 .metrics
                 .budget_rejections
@@ -3535,7 +3555,7 @@ async fn dispatch_responses(
             .fetch_add(1, Ordering::Relaxed);
         if let Some(model) = config.find_model(&hit.model) {
             state.metrics.record_selection(model);
-            record_sticky_routing(&state, &config, sticky_key.clone(), model);
+            record_sticky_routing(&state, &config, sticky_key.clone(), model).await;
         }
         return cached_upstream_response(hit, estimated_input_tokens, requested_output_tokens);
     }
@@ -3584,7 +3604,7 @@ async fn dispatch_responses(
                         .fetch_add(1, Ordering::Relaxed);
                 }
                 state.metrics.record_selection(model);
-                record_sticky_routing(&state, &config, sticky_key.clone(), model);
+                record_sticky_routing(&state, &config, sticky_key.clone(), model).await;
                 return upstream_response(
                     state.clone(),
                     response,
@@ -3676,7 +3696,9 @@ async fn dispatch_embeddings(
         first_model,
         estimated_input_tokens,
         0,
-    ) {
+    )
+    .await
+    {
         state
             .metrics
             .budget_rejections
@@ -3814,7 +3836,9 @@ async fn dispatch_images(
         first_model,
         estimated_input_tokens,
         0,
-    ) {
+    )
+    .await
+    {
         state
             .metrics
             .budget_rejections
@@ -3947,7 +3971,9 @@ async fn dispatch_speech(
         first_model,
         estimated_input_tokens,
         0,
-    ) {
+    )
+    .await
+    {
         state
             .metrics
             .budget_rejections
@@ -4081,7 +4107,9 @@ async fn dispatch_audio_multipart(
         first_model,
         estimated_input_tokens,
         0,
-    ) {
+    )
+    .await
+    {
         state
             .metrics
             .budget_rejections
@@ -4400,7 +4428,7 @@ fn budget_violation(
     None
 }
 
-fn reserve_budget(
+async fn reserve_budget(
     state: &AppState,
     budget: &BudgetConfig,
     model: &ModelConfig,
@@ -4412,6 +4440,7 @@ fn reserve_budget(
     state
         .accounting
         .reserve(budget, reservation)
+        .await
         .err()
         .map(|error| error.to_string())
 }
@@ -4500,15 +4529,18 @@ async fn upstream_response(
                         }
                     }
                     if let Some(write) = semantic_cache_write {
-                        state.semantic_cache.record(
-                            &state.engine.config().cache.semantic,
-                            write,
-                            &model.id,
-                            &model.provider,
-                            status.as_u16(),
-                            content_type.clone(),
-                            bytes.clone(),
-                        );
+                        state
+                            .semantic_cache
+                            .record(
+                                &state.engine.config().cache.semantic,
+                                write,
+                                &model.id,
+                                &model.provider,
+                                status.as_u16(),
+                                content_type.clone(),
+                                bytes.clone(),
+                            )
+                            .await;
                     }
                     if let Some(dispatch) = shadow_eval_dispatch {
                         spawn_shadow_eval(
@@ -6528,15 +6560,8 @@ mod tests {
             Some("primary-shadow")
         );
 
-        for _ in 0..40 {
-            if calls.load(AtomicOrdering::Relaxed) >= 2 && shadow_path.exists() {
-                break;
-            }
-            sleep(Duration::from_millis(25)).await;
-        }
-
+        let raw = wait_for_complete_jsonl_record(&shadow_path).await;
         assert_eq!(calls.load(AtomicOrdering::Relaxed), 2);
-        let raw = std::fs::read_to_string(&shadow_path).unwrap();
         assert!(raw.contains("\"selected_model\":\"primary-shadow\""));
         assert!(raw.contains("\"shadow_model\":\"secondary-shadow\""));
         assert!(raw.contains("\"shadow_status\":200"));
@@ -6600,15 +6625,8 @@ mod tests {
             .unwrap();
 
         assert!(response.status().is_success());
-        for _ in 0..40 {
-            if calls.load(AtomicOrdering::Relaxed) >= 3 && shadow_path.exists() {
-                break;
-            }
-            sleep(Duration::from_millis(25)).await;
-        }
-
+        let raw = wait_for_complete_jsonl_record(&shadow_path).await;
         assert_eq!(calls.load(AtomicOrdering::Relaxed), 3);
-        let raw = std::fs::read_to_string(&shadow_path).unwrap();
         let record: Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
         assert_eq!(record["selected_model"], "primary-shadow");
         assert_eq!(record["shadow_model"], "secondary-shadow");
@@ -6626,6 +6644,24 @@ mod tests {
             "{record}"
         );
         let _ = std::fs::remove_file(shadow_path);
+    }
+
+    async fn wait_for_complete_jsonl_record(path: &std::path::Path) -> String {
+        for _ in 0..80 {
+            if let Ok(raw) = std::fs::read_to_string(path)
+                && raw
+                    .lines()
+                    .next()
+                    .is_some_and(|line| serde_json::from_str::<Value>(line).is_ok())
+            {
+                return raw;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+        panic!(
+            "timed out waiting for complete JSONL record at {}",
+            path.display()
+        );
     }
 
     #[tokio::test]

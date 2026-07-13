@@ -443,6 +443,7 @@ struct MetricsSnapshot {
     per_model: Vec<SelectionMetricsSnapshot>,
     per_provider: Vec<SelectionMetricsSnapshot>,
     upstream_outcomes: Vec<UpstreamOutcomeSnapshot>,
+    histograms: Vec<crate::metrics::HistogramSnapshot>,
     budget: BudgetSnapshot,
     judge: JudgeMetricsSnapshot,
 }
@@ -547,6 +548,7 @@ impl RouterMetrics {
             per_model: snapshot_selection_map(&self.per_model),
             per_provider: snapshot_selection_map(&self.per_provider),
             upstream_outcomes: snapshot_upstream_outcomes(&self.upstream_outcomes),
+            histograms: crate::metrics::snapshots(),
             budget: BudgetSnapshot::from_config(budget, accounting).await,
             judge,
         }
@@ -774,11 +776,24 @@ struct StreamMetricsObserver {
     parser: StreamingUsageParser,
     terminal: bool,
     final_http_recorded: bool,
+    started: Instant,
+    first_chunk_recorded: bool,
 }
 
 impl StreamMetricsObserver {
     fn on_chunk(&mut self, chunk: &[u8]) {
         if !self.terminal {
+            if !self.first_chunk_recorded {
+                crate::metrics::observe(
+                    "autohand_router_stream_first_chunk_duration_ms",
+                    self.endpoint,
+                    &self.model.provider,
+                    &self.model.id,
+                    "success",
+                    crate::metrics::elapsed_ms(self.started),
+                );
+                self.first_chunk_recorded = true;
+            }
             self.parser.push(chunk);
         }
     }
@@ -817,6 +832,7 @@ impl StreamMetricsObserver {
                 "stream_error",
             );
         }
+        self.record_duration("error");
         self.terminal = true;
     }
 
@@ -833,6 +849,7 @@ impl StreamMetricsObserver {
                 "success",
             );
         }
+        self.record_duration("success");
         self.terminal = true;
     }
 
@@ -840,6 +857,25 @@ impl StreamMetricsObserver {
         let parser = std::mem::take(&mut self.parser);
         if let Some(usage) = parser.finish() {
             self.state.metrics.record_usage(&self.model, usage);
+        }
+    }
+
+    fn record_duration(&self, outcome: &'static str) {
+        crate::metrics::observe(
+            "autohand_router_stream_duration_ms",
+            self.endpoint,
+            &self.model.provider,
+            &self.model.id,
+            outcome,
+            crate::metrics::elapsed_ms(self.started),
+        );
+    }
+}
+
+impl Drop for StreamMetricsObserver {
+    fn drop(&mut self) {
+        if !self.terminal {
+            self.record_duration("cancelled");
         }
     }
 }
@@ -1092,6 +1128,8 @@ async fn request_context(
     request: Request<Body>,
     next: Next,
 ) -> Response {
+    let started = Instant::now();
+    let endpoint = request_endpoint_label(request.uri().path());
     let request_id = request
         .headers()
         .get("x-request-id")
@@ -1114,6 +1152,7 @@ async fn request_context(
             .headers_mut()
             .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         insert_request_id(response.headers_mut(), &request_id);
+        observe_request_headers(endpoint, response.status(), started);
         return response;
     }
 
@@ -1133,6 +1172,7 @@ async fn request_context(
                 "request_too_large",
             );
             insert_request_id(response.headers_mut(), &request_id);
+            observe_request_headers(endpoint, response.status(), started);
             return response;
         }
         if !state
@@ -1146,6 +1186,7 @@ async fn request_context(
                 "rate_limit_exceeded",
             );
             insert_request_id(response.headers_mut(), &request_id);
+            observe_request_headers(endpoint, response.status(), started);
             return response;
         }
     }
@@ -1163,6 +1204,7 @@ async fn request_context(
                     "router_overloaded",
                 );
                 insert_request_id(response.headers_mut(), &request_id);
+                observe_request_headers(endpoint, response.status(), started);
                 return response;
             }
         }
@@ -1175,7 +1217,49 @@ async fn request_context(
 
     let mut response = next.run(request).await;
     insert_request_id(response.headers_mut(), &request_id);
+    observe_request_headers(endpoint, response.status(), started);
     response
+}
+
+fn request_endpoint_label(path: &str) -> &'static str {
+    match path {
+        "/v1/chat/completions" => "chat",
+        "/v1/responses" => "responses",
+        "/v1/embeddings" => "embeddings",
+        "/v1/images/generations" => "images",
+        "/v1/audio/speech" => "speech",
+        "/v1/audio/transcriptions" => "audio_transcriptions",
+        "/v1/audio/translations" => "audio_translations",
+        "/v1/router/classify" => "classify",
+        "/v1/router/multimodel" => "multimodel",
+        "/v1/router/raw" => "raw",
+        "/v1/router/providers" => "providers",
+        "/v1/models" => "models",
+        "/metrics" => "metrics",
+        "/metrics/prometheus" => "prometheus",
+        "/health" | "/health/live" => "liveness",
+        "/health/ready" => "readiness",
+        "/openapi.json" => "openapi",
+        _ if path.starts_with("/v1/router/") => "provider_router",
+        _ => "other",
+    }
+}
+
+fn observe_request_headers(endpoint: &'static str, status: StatusCode, started: Instant) {
+    crate::metrics::observe(
+        "autohand_router_request_headers_duration_ms",
+        endpoint,
+        "",
+        "",
+        if status.is_success() {
+            "success"
+        } else if status.is_client_error() {
+            "client_error"
+        } else {
+            "server_error"
+        },
+        crate::metrics::elapsed_ms(started),
+    );
 }
 
 fn request_body_limit(config: &IngressConfig, path: &str) -> usize {
@@ -1502,6 +1586,7 @@ fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     push_upstream_outcome_metrics(&mut output, &snapshot.upstream_outcomes);
     push_budget_metrics(&mut output, &snapshot.budget);
     push_judge_metrics(&mut output, &snapshot.judge);
+    output.push_str(&crate::metrics::prometheus());
     output
 }
 
@@ -5145,6 +5230,8 @@ async fn upstream_response(
                     parser: StreamingUsageParser::default(),
                     terminal: false,
                     final_http_recorded,
+                    started: Instant::now(),
+                    first_chunk_recorded: false,
                 };
                 let stream_idle_timeout = state
                     .engine
@@ -5201,7 +5288,21 @@ async fn upstream_response(
             }
         }
     } else {
-        match upstream.bytes().await {
+        let body_started = Instant::now();
+        let body_result = upstream.bytes().await;
+        crate::metrics::observe(
+            "autohand_router_upstream_body_duration_ms",
+            endpoint,
+            &model.provider,
+            &model.id,
+            if body_result.is_ok() {
+                "success"
+            } else {
+                "error"
+            },
+            crate::metrics::elapsed_ms(body_started),
+        );
+        match body_result {
             Ok(bytes) => {
                 record_final_http_outcome(&state, endpoint, model, status);
                 if status.is_success() {
@@ -5792,6 +5893,22 @@ mod tests {
     }
 
     #[test]
+    fn request_metric_labels_collapse_untrusted_paths_to_bounded_values() {
+        assert_eq!(
+            super::request_endpoint_label("/v1/chat/completions"),
+            "chat"
+        );
+        assert_eq!(
+            super::request_endpoint_label("/attacker-controlled/high-cardinality-value"),
+            "other"
+        );
+        assert_eq!(
+            super::request_endpoint_label("/v1/router/configured-provider"),
+            "provider_router"
+        );
+    }
+
+    #[test]
     fn automatic_endpoint_candidates_exclude_native_adapters_without_support() {
         let mut config = failover_config(
             "http://127.0.0.1:1".to_string(),
@@ -6223,6 +6340,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(metrics["upstream_stream_errors"], 1);
+        let prometheus = client
+            .get(format!("{router_url}/metrics/prometheus"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(prometheus.contains("autohand_router_stream_first_chunk_duration_ms_bucket"));
+        assert!(prometheus.contains("autohand_router_stream_duration_ms_bucket"));
     }
 
     #[tokio::test]
@@ -6900,6 +7027,15 @@ mod tests {
                 "autohand_router_selection_requests_total_by_model{model=\"strong-ok\"} 1"
             )
         );
+        for metric in [
+            "autohand_router_request_headers_duration_ms_bucket",
+            "autohand_router_routing_duration_ms_bucket",
+            "autohand_router_provider_queue_duration_ms_bucket",
+            "autohand_router_upstream_headers_duration_ms_bucket",
+            "autohand_router_upstream_body_duration_ms_bucket",
+        ] {
+            assert!(body.contains(metric), "missing histogram {metric}");
+        }
 
         let health = client
             .get(format!("{router_url}/v1/router/providers"))

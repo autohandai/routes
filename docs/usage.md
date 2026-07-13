@@ -114,6 +114,8 @@ curl -s http://127.0.0.1:8080/metrics/prometheus
 curl -s http://127.0.0.1:8080/v1/router/providers
 ```
 
+`/metrics` includes bounded histogram summaries, and `/metrics/prometheus` exports cumulative bucket, sum, and count series for request-to-headers, route decisions, provider queue wait, upstream headers, upstream body, retry delay, stream first chunk, and stream duration. Labels are limited to fixed endpoint/outcome values plus configured provider/model identifiers; request paths and prompt content never become labels. Streaming time-to-first-chunk and full stream duration are separate from the non-streaming upstream-body distribution.
+
 Provider config supports `kind`, `base_url`, `connect_timeout_ms`, `timeout_ms` (response headers), `stream_idle_timeout_ms`, `retries`, `retry_max_delay_ms`, `health_path`, endpoint paths, `max_concurrency`, and `queue_timeout_ms`. Supported provider kinds are `open_ai_compatible`, `ollama`, `ollama_native`, `llama_cpp`, `llama_cpp_native`, `vllm`, `openrouter`, and `cloudflare_ai_gateway`.
 
 Transient retries honor numeric and HTTP-date `Retry-After` values up to `retry_max_delay_ms`. When the provider gives no delay, each attempt uses full jitter within a capped exponential window so concurrent router instances do not synchronize. `connect_timeout_ms` is enforced while establishing the socket, `timeout_ms` bounds receipt of response headers, and `stream_idle_timeout_ms` only bounds gaps between upstream response chunks. Explicit model requests retry the same provider according to its policy and never fail over; automatic requests may proceed to the next scored model only after that provider policy is exhausted.

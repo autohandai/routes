@@ -331,19 +331,41 @@ impl ProviderClient {
         &self,
         provider: &ProviderConfig,
     ) -> Result<Option<OwnedSemaphorePermit>> {
+        let started = std::time::Instant::now();
         let Some(semaphore) = self.concurrency.get(&provider.name).cloned() else {
+            crate::metrics::observe(
+                "autohand_router_provider_queue_duration_ms",
+                "dispatch",
+                &provider.name,
+                "",
+                "unlimited",
+                0,
+            );
             return Ok(None);
         };
-        let permit = if let Some(timeout_ms) = provider.queue_timeout_ms {
+        let result = if let Some(timeout_ms) = provider.queue_timeout_ms {
             timeout(Duration::from_millis(timeout_ms), semaphore.acquire_owned())
                 .await
-                .context("provider concurrency queue timeout exceeded")??
+                .context("provider concurrency queue timeout exceeded")?
+                .context("provider concurrency semaphore closed")
         } else {
             semaphore
                 .try_acquire_owned()
-                .with_context(|| format!("provider {} concurrency limit reached", provider.name))?
+                .with_context(|| format!("provider {} concurrency limit reached", provider.name))
         };
-        Ok(Some(permit))
+        crate::metrics::observe(
+            "autohand_router_provider_queue_duration_ms",
+            "dispatch",
+            &provider.name,
+            "",
+            if result.is_ok() {
+                "admitted"
+            } else {
+                "rejected"
+            },
+            crate::metrics::elapsed_ms(started),
+        );
+        result.map(Some)
     }
 
     pub fn error_json(message: impl Into<String>) -> Value {
@@ -1607,12 +1629,29 @@ async fn send_with_header_timeout(
     request: reqwest::RequestBuilder,
     provider: &ProviderConfig,
 ) -> std::result::Result<Response, ProviderSendError> {
-    timeout(provider.response_header_timeout(), request.send())
-        .await
-        .map_err(|_| ProviderSendError::HeaderTimeout {
+    let started = std::time::Instant::now();
+    let result = match timeout(provider.response_header_timeout(), request.send()).await {
+        Ok(result) => result.map_err(ProviderSendError::Http),
+        Err(_) => Err(ProviderSendError::HeaderTimeout {
             timeout_ms: provider.timeout_ms,
-        })?
-        .map_err(ProviderSendError::Http)
+        }),
+    };
+    let outcome = match &result {
+        Ok(response) if response.status().is_success() => "ok",
+        Ok(_) => "http_error",
+        Err(ProviderSendError::HeaderTimeout { .. }) => "header_timeout",
+        Err(ProviderSendError::Http(error)) if error.is_connect() => "connect_error",
+        Err(_) => "transport_error",
+    };
+    crate::metrics::observe(
+        "autohand_router_upstream_headers_duration_ms",
+        "dispatch",
+        &provider.name,
+        "",
+        outcome,
+        crate::metrics::elapsed_ms(started),
+    );
+    result
 }
 
 static RETRY_ENTROPY: AtomicU64 = AtomicU64::new(1);
@@ -1632,6 +1671,14 @@ fn retry_delay(
         delay_ms = delay.as_millis(),
         reason = if guided { "retry_after" } else { "backoff" },
         "provider retry scheduled"
+    );
+    crate::metrics::observe(
+        "autohand_router_retry_delay_ms",
+        "dispatch",
+        &provider.name,
+        "",
+        if guided { "retry_after" } else { "backoff" },
+        delay.as_millis().min(u128::from(u64::MAX)) as u64,
     );
     delay
 }
@@ -1792,6 +1839,9 @@ mod tests {
             .unwrap();
         assert!(response.status().is_success());
         assert_eq!(calls.load(Ordering::Relaxed), 2);
+        let metrics = crate::metrics::prometheus();
+        assert!(metrics.contains("autohand_router_retry_delay_ms_bucket"));
+        assert!(metrics.contains("outcome=\"retry_after\""));
     }
 
     #[tokio::test]

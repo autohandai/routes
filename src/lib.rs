@@ -10,6 +10,7 @@ mod file_state;
 pub mod health;
 pub mod judge;
 pub mod load;
+pub mod metrics;
 pub mod openapi;
 pub mod provider;
 pub mod router;

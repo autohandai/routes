@@ -72,6 +72,13 @@ where
         request: MultimodelRequest,
         estimated_input_tokens: Option<u32>,
     ) -> MultimodelResponse {
+        let _routing_timer = crate::metrics::timer(
+            "autohand_router_routing_duration_ms",
+            "multimodel",
+            "",
+            "",
+            "complete",
+        );
         let classifications = self.classify(&request.input).await;
         let token_budget = TokenBudget {
             estimated_input_tokens: estimated_input_tokens

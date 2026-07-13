@@ -8,6 +8,7 @@ use autohand_router::{
         EvalCoverageMinimums, calibrate_thresholds, configured_eval_gate, eval_gate_with_coverage,
         evaluate, load_jsonl, optimize_with_artifact, seeded_holdout,
     },
+    evidence::{ControlledEvidenceConfig, validate_evidence_bundle, write_controlled_evidence},
     judge::run_judge_smoke,
     load::{
         LoadSuiteConfig, LoadTestConfig, default_load_suite_scenarios, default_multimodel_body,
@@ -113,6 +114,28 @@ enum Command {
     RuntimeGate {
         #[arg(long)]
         output: Option<PathBuf>,
+    },
+    ControlledEvidence {
+        #[arg(long, env = "GITHUB_SHA", default_value = "working-tree")]
+        revision: String,
+        #[arg(long, default_value_t = 3)]
+        runs: usize,
+        #[arg(long, default_value_t = 20)]
+        requests_per_scenario: u64,
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
+        #[arg(long, default_value_t = 250)]
+        slo_p95_ms: u64,
+        #[arg(long, default_value_t = 0.0)]
+        slo_error_rate: f64,
+        #[arg(long, default_value = "artifacts/release-evidence")]
+        output_dir: PathBuf,
+    },
+    EvidenceValidate {
+        #[arg(default_value = "artifacts/release-evidence")]
+        directory: PathBuf,
+        #[arg(long)]
+        expected_revision: Option<String>,
     },
     Calibrate {
         dataset: PathBuf,
@@ -400,6 +423,36 @@ async fn main() -> Result<()> {
             if !report.pass {
                 anyhow::bail!("runtime-gate failed: {}", report.failures.join("; "));
             }
+            Ok(())
+        }
+        Command::ControlledEvidence {
+            revision,
+            runs,
+            requests_per_scenario,
+            concurrency,
+            slo_p95_ms,
+            slo_error_rate,
+            output_dir,
+        } => {
+            let manifest = write_controlled_evidence(ControlledEvidenceConfig {
+                revision,
+                output_dir,
+                runs,
+                requests_per_scenario,
+                concurrency,
+                slo_p95_ms,
+                slo_error_rate,
+            })
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+            Ok(())
+        }
+        Command::EvidenceValidate {
+            directory,
+            expected_revision,
+        } => {
+            validate_evidence_bundle(&directory, expected_revision.as_deref())?;
+            println!("valid evidence bundle: {}", directory.display());
             Ok(())
         }
         Command::Calibrate {

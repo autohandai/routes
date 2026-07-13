@@ -67,6 +67,31 @@ jobs:
       - name: Exercise the HTTP runtime gate
         run: cargo run --locked -- runtime-gate --output artifacts/router.runtime-gate.json
 
+      - name: Generate revision-linked controlled evidence
+        run: |
+          cargo run --locked -- controlled-evidence \
+            --revision "${GITHUB_SHA}" \
+            --runs 3 \
+            --requests-per-scenario 20 \
+            --concurrency 4 \
+            --slo-p95-ms 250 \
+            --slo-error-rate 0 \
+            --output-dir artifacts/release-evidence
+
+      - name: Validate controlled evidence schemas and hashes
+        run: |
+          cargo run --locked -- evidence-validate artifacts/release-evidence \
+            --expected-revision "${GITHUB_SHA}"
+
+      - name: Upload revision-linked release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: controlled-release-evidence-${{ github.sha }}
+          path: |
+            artifacts/router.runtime-gate.json
+            artifacts/release-evidence/
+          if-no-files-found: error
+
       - name: Test advisory exception policy
         run: ./scripts/test-advisory-exceptions.sh
 

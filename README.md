@@ -433,6 +433,8 @@ cargo run -- --config examples/router.yaml eval examples/eval.jsonl
 cargo run -- --config examples/router.yaml eval-gate examples/eval.production.jsonl
 cargo run -- --config router.production.yaml configured-eval-gate examples/eval.production.jsonl
 cargo run -- runtime-gate
+cargo run -- controlled-evidence --revision "$(git rev-parse HEAD)"
+cargo run -- evidence-validate artifacts/release-evidence
 cargo run -- --config examples/router.yaml provider-conformance-matrix
 ```
 

@@ -226,6 +226,10 @@ jobs:
             const notes = [
               generatedBody.trim(),
               "",
+              "## Validation evidence",
+              "",
+              "This release attaches revision-linked controlled benchmark, provider conformance, runtime-gate, and evidence-manifest JSON. The controlled benchmark measures router plus loopback mock overhead and explicitly excludes external-provider variability.",
+              "",
               "## Changelog",
               "",
               `A generated changelog is attached as \`${process.env.CHANGELOG_ASSET}\`.`,
@@ -248,3 +252,4 @@ jobs:
             dist/routes-*.zip
             dist/routes-*-CHANGELOG.md
             dist/routes-*-RELEASE_NOTES.md
+            dist/**/router.*.json

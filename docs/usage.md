@@ -424,3 +424,24 @@ cargo run -- --config examples/router.yaml optimize examples/eval.jsonl --write-
 ```
 
 The optimization artifact includes the dataset fingerprint, deterministic train/holdout split metadata, baseline report, optimized train report, holdout validation report, selected config patch, replay command, and rollback guidance.
+
+## Revision-linked release evidence
+
+Generate a reproducible controlled evidence bundle for the current revision:
+
+```bash
+cargo run --locked -- controlled-evidence \
+  --revision "$(git rev-parse HEAD)" \
+  --runs 3 \
+  --requests-per-scenario 20 \
+  --concurrency 4 \
+  --slo-p95-ms 250 \
+  --slo-error-rate 0 \
+  --output-dir artifacts/release-evidence
+cargo run --locked -- evidence-validate artifacts/release-evidence \
+  --expected-revision "$(git rev-parse HEAD)"
+```
+
+The command launches the real Axum router and a controlled loopback provider, warms all six load scenarios, performs repeated measured runs, and emits exact per-run p50/p90/p95/p99 data plus repeat-level p95, p99, and throughput confidence intervals. The same bundle contains the schema-v2 provider/model/endpoint support matrix, environment and resource-observation metadata, thresholds, config fingerprint, revision, replay command, and a manifest that hashes both artifacts.
+
+This bundle measures router plus loopback-mock overhead only. It sets `includes_external_provider_variability` to `false`; deployed/provider latency claims require the separate credentialed evidence gates and must not be inferred from the controlled baseline.

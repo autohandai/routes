@@ -633,6 +633,60 @@ pub struct ChatMessage {
     pub extra: serde_json::Map<String, Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForwardedStringKind {
+    Text,
+    JsonArguments,
+    Control,
+}
+
+pub(crate) fn forwarded_string_kind(
+    key: Option<&str>,
+    parent_key: Option<&str>,
+) -> ForwardedStringKind {
+    if key == Some("arguments") {
+        return ForwardedStringKind::JsonArguments;
+    }
+    let control = matches!(
+        key,
+        Some(
+            "role"
+                | "type"
+                | "$ref"
+                | "$schema"
+                | "format"
+                | "required"
+                | "tool_call_id"
+                | "call_id"
+                | "object"
+                | "recipient"
+                | "status"
+                | "finish_reason"
+                | "service_tier"
+                | "modalities"
+                | "encoding_format"
+                | "reasoning_effort"
+                | "effort"
+                | "verbosity"
+        )
+    ) || key == Some("tool_choice")
+        || (key == Some("name")
+            && matches!(
+                parent_key,
+                Some("message" | "function" | "tool" | "tools" | "tool_choice" | "input")
+            ))
+        || (key == Some("id")
+            && matches!(
+                parent_key,
+                Some("tool_calls" | "function_call" | "audio" | "input" | "tools")
+            ));
+    if control {
+        ForwardedStringKind::Control
+    } else {
+        ForwardedStringKind::Text
+    }
+}
+
 impl OpenAiChatRequest {
     pub fn prompt_text(&self) -> String {
         self.messages
@@ -649,6 +703,21 @@ impl OpenAiChatRequest {
             serde_json::to_string(&self.messages).unwrap_or_default(),
             serde_json::to_string(&self.extra).unwrap_or_default()
         )
+    }
+
+    pub fn security_text(&self) -> String {
+        let mut strings = Vec::new();
+        for message in &self.messages {
+            collect_security_strings(
+                &message.content,
+                Some("content"),
+                Some("message"),
+                &mut strings,
+            );
+            collect_security_map(&message.extra, Some("message"), &mut strings);
+        }
+        collect_security_map(&self.extra, Some("request"), &mut strings);
+        strings.join("\n")
     }
 
     pub fn semantic_cache_prompt(&self) -> Option<String> {
@@ -714,6 +783,13 @@ impl OpenAiResponsesRequest {
             serde_json::to_string(&self.input).unwrap_or_default(),
             serde_json::to_string(&self.extra).unwrap_or_default()
         )
+    }
+
+    pub fn security_text(&self) -> String {
+        let mut strings = Vec::new();
+        collect_security_strings(&self.input, Some("input"), Some("request"), &mut strings);
+        collect_security_map(&self.extra, Some("request"), &mut strings);
+        strings.join("\n")
     }
 
     pub fn semantic_cache_prompt(&self) -> Option<String> {
@@ -807,6 +883,50 @@ impl OpenAiAudioMultipartRequest {
     }
 }
 
+fn collect_security_map(
+    map: &serde_json::Map<String, Value>,
+    parent_key: Option<&str>,
+    strings: &mut Vec<String>,
+) {
+    for (key, value) in map {
+        if forwarded_string_kind(Some(key), parent_key) == ForwardedStringKind::Text {
+            strings.push(key.clone());
+        }
+        collect_security_strings(value, Some(key), parent_key, strings);
+    }
+}
+
+fn collect_security_strings(
+    value: &Value,
+    key: Option<&str>,
+    parent_key: Option<&str>,
+    strings: &mut Vec<String>,
+) {
+    match value {
+        Value::String(text) => match forwarded_string_kind(key, parent_key) {
+            ForwardedStringKind::Text => strings.push(text.clone()),
+            ForwardedStringKind::JsonArguments => {
+                if let Ok(arguments) = serde_json::from_str::<Value>(text) {
+                    collect_security_strings(&arguments, None, Some("arguments"), strings);
+                } else {
+                    strings.push(text.clone());
+                }
+            }
+            ForwardedStringKind::Control => {}
+        },
+        Value::Array(values) => {
+            for value in values {
+                collect_security_strings(value, key, parent_key, strings);
+            }
+        }
+        Value::Object(object) => {
+            let child_parent = key.or(parent_key);
+            collect_security_map(object, child_parent, strings);
+        }
+        _ => {}
+    }
+}
+
 fn content_to_text(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
@@ -878,10 +998,11 @@ fn push_unique(capabilities: &mut Vec<ModelCapability>, capability: ModelCapabil
 #[cfg(test)]
 mod tests {
     use super::{
-        AmbiguityLabel, CacheabilityLabel, Classification, ClassificationHead, Classifications,
-        DifficultyLabel, DomainLabel, LatencySensitivityLabel, LegacyRouterMode, ModalityLabel,
-        ModelCapability, OpenAiChatRequest, OpenAiEmbeddingsRequest, OpenAiResponsesRequest,
-        RawRouterResponse, ReasoningDepthLabel, RouterPolicy, SafetyLabel, SelectedClassifications,
+        AmbiguityLabel, CacheabilityLabel, ChatMessage, Classification, ClassificationHead,
+        Classifications, DifficultyLabel, DomainLabel, LatencySensitivityLabel, LegacyRouterMode,
+        ModalityLabel, ModelCapability, OpenAiChatRequest, OpenAiEmbeddingsRequest,
+        OpenAiResponsesRequest, RawRouterResponse, ReasoningDepthLabel, RouterPolicy, SafetyLabel,
+        SelectedClassifications,
     };
     use serde_json::Value;
 
@@ -1147,6 +1268,65 @@ mod tests {
             serde_json::from_value::<OpenAiEmbeddingsRequest>(serde_json::json!({"model":"auto"}))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn security_text_covers_chat_history_extensions_and_request_metadata() {
+        let request = OpenAiChatRequest {
+            model: "auto".to_string(),
+            messages: vec![ChatMessage {
+                role: "assistant".to_string(),
+                content: Value::String("assistant private output".to_string()),
+                extra: serde_json::Map::from_iter([(
+                    "tool_calls".to_string(),
+                    serde_json::json!([{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": "{\"api_key\":\"sk-tool-secret\"}"
+                        }
+                    }]),
+                )]),
+            }],
+            extra: serde_json::Map::from_iter([(
+                "metadata".to_string(),
+                serde_json::json!({"email": "person@example.com"}),
+            )]),
+        };
+
+        let security_text = request.security_text();
+
+        assert!(security_text.contains("assistant private output"));
+        assert!(security_text.contains("api_key"));
+        assert!(security_text.contains("sk-tool-secret"));
+        assert!(security_text.contains("person@example.com"));
+        assert!(!security_text.contains("call_1"));
+        assert!(!security_text.contains("lookup"));
+    }
+
+    #[test]
+    fn security_text_covers_responses_items_and_options() {
+        let request = OpenAiResponsesRequest {
+            model: "auto".to_string(),
+            input: serde_json::json!([{
+                "type": "function_call",
+                "name": "lookup",
+                "arguments": "{\"password\":\"hunter2\"}"
+            }]),
+            extra: serde_json::Map::from_iter([(
+                "metadata".to_string(),
+                serde_json::json!({"callback_url": "https://example.test?token=sk-url-secret"}),
+            )]),
+        };
+
+        let security_text = request.security_text();
+
+        assert!(security_text.contains("password"));
+        assert!(security_text.contains("hunter2"));
+        assert!(security_text.contains("sk-url-secret"));
+        assert!(!security_text.contains("function_call"));
+        assert!(!security_text.contains("lookup"));
     }
 
     #[test]

@@ -54,6 +54,13 @@ impl Default for HeuristicClassifier {
     }
 }
 
+pub fn classify_safety_deterministically(
+    input: &str,
+    confidence_threshold: f32,
+) -> Classification<SafetyLabel> {
+    classify_safety(&PromptFeatures::from(input), confidence_threshold)
+}
+
 #[derive(Clone)]
 pub struct SmartClassifier {
     heuristic: HeuristicClassifier,
@@ -642,7 +649,14 @@ fn classify_safety(features: &PromptFeatures, threshold: f32) -> Classification<
             "password",
             "secret",
             "api key",
+            "api_key",
+            "apikey",
+            "sk-",
+            "pk-",
             "token",
+            "authorization",
+            "bearer",
+            "email",
             "medical",
             "legal",
             "financial",
@@ -650,6 +664,11 @@ fn classify_safety(features: &PromptFeatures, threshold: f32) -> Classification<
             "auth",
             "security",
         ],
+    ) + usize::from(
+        features
+            .lower
+            .split_whitespace()
+            .any(|token| token.contains('@') && token.contains('.')),
     );
     let (label, class_id, confidence) = if unsafe_terms > 0 {
         (
@@ -1188,6 +1207,24 @@ mod tests {
             classifications.reasoning_depth.label,
             ReasoningDepthLabel::Deep
         );
+    }
+
+    #[tokio::test]
+    async fn heuristic_safety_detects_credential_shapes_without_descriptive_words() {
+        let classifier = HeuristicClassifier::new(0.5);
+
+        for input in [
+            r#"{"api_key":"sk-live-value"}"#,
+            "Authorization: Bearer opaque-value",
+            "contact owner@example.com",
+        ] {
+            let classifications = classifier.classify(input).await;
+            assert_eq!(
+                classifications.safety.label,
+                SafetyLabel::Sensitive,
+                "input was not classified as sensitive: {input}"
+            );
+        }
     }
 
     #[tokio::test]

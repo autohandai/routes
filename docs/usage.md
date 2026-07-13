@@ -180,6 +180,10 @@ safety:
 
 Actions are `allow`, `reject`, `redact`, or `force_route`. `force_route` requires `force_model` to reference a configured model id or alias.
 
+Safety routing applies to automatic `auto` and `router-*` Chat Completions and Responses requests; explicit model requests retain their strict model contract. The local safety preflight classifies a normalized view of every forwarded text field before an optional external classifier is called. With `redact`, it covers user/system/assistant/tool content, nested content arrays and objects, tool/function arguments, request metadata, user identifiers, and URLs. Structural values such as roles, item types, tool names and IDs, and JSON-schema control fields are preserved.
+
+Tool/function `arguments` strings are parsed as JSON, redacted recursively, and serialized back to valid JSON. If a sensitive request contains an ambiguous arguments shape that cannot be safely parsed, the router rejects it locally with `unsafe_redaction_shape` and does not dispatch upstream. Decision-trace and shadow-eval inputs use the redacted view. Sticky routing is skipped for redacted or force-routed sensitive requests so sensitive session identifiers are not persisted or collapsed onto the replacement value.
+
 ## Sticky Routing
 
 ```yaml

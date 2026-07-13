@@ -1,6 +1,6 @@
 use crate::{
     accounting::{BudgetAccounting, BudgetReservation},
-    classifier::{JudgeMetricsSnapshot, SmartClassifier},
+    classifier::{JudgeMetricsSnapshot, SmartClassifier, classify_safety_deterministically},
     config::{BudgetConfig, RouterConfig, SafetyRoutingAction, bind_is_loopback},
     openapi,
     provider::{
@@ -19,11 +19,11 @@ use crate::{
     telemetry::DecisionLogger,
     tokens::estimate_tokens,
     types::{
-        CacheabilityLabel, ChatMessage, ClassifyRequest, ClassifyResponse, ModelCapability,
-        ModelConfig, ModelEndpoint, MultimodelRequest, MultimodelResponse,
+        CacheabilityLabel, ChatMessage, ClassifyRequest, ClassifyResponse, ForwardedStringKind,
+        ModelCapability, ModelConfig, ModelEndpoint, MultimodelRequest, MultimodelResponse,
         OpenAiAudioMultipartRequest, OpenAiChatRequest, OpenAiEmbeddingsRequest,
         OpenAiImagesRequest, OpenAiMultipartPart, OpenAiResponsesRequest, OpenAiSpeechRequest,
-        ProviderConfig, ProviderKind, RouterPolicy, SafetyLabel,
+        ProviderConfig, ProviderKind, RouterPolicy, SafetyLabel, forwarded_string_kind,
     },
 };
 use anyhow::Result;
@@ -1633,14 +1633,27 @@ async fn chat_completions(
             "invalid_messages",
         );
     }
-    let prompt = request.prompt_text();
     let requested_model = request.model.clone();
     let config = state.engine.config();
     let automatic = requested_model.starts_with("router-") || requested_model == "auto";
     if requested_model.starts_with("router-") && !is_known_router_model(&requested_model) {
         return invalid_router_model_response(&requested_model);
     }
-    let sticky_key = automatic.then(|| chat_sticky_key(&request)).flatten();
+    let mut route_input = request.security_text();
+    let safety_preflight = if automatic {
+        match prepare_chat_safety(&state, &config, &mut request, &mut route_input) {
+            Ok(preflight) => preflight,
+            Err(response) => return *response,
+        }
+    } else {
+        None
+    };
+    let sticky_key = (automatic
+        && safety_preflight
+            .as_ref()
+            .is_none_or(|preflight| preflight.action == SafetyRoutingAction::Allow))
+    .then(|| chat_sticky_key(&request))
+    .flatten();
     let (
         models,
         estimated_input_tokens,
@@ -1649,7 +1662,6 @@ async fn chat_completions(
         shadow_eval_dispatch,
     ) = if automatic {
         let policy = parse_router_model_policy(&requested_model);
-        let mut route_input = prompt.clone();
         let required_capabilities = request.required_capabilities();
         let estimated_context_tokens = estimate_tokens(&request.context_text());
         let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Chat);
@@ -1679,9 +1691,19 @@ async fn chat_completions(
                 .fallback_routes
                 .fetch_add(1, Ordering::Relaxed);
         }
-        if let Some(response) =
-            enforce_safety_for_chat(&state, &config, &mut route, &mut request, &mut route_input)
-        {
+        let eligibility = ModelEligibilityRequest {
+            endpoint: RoutingEndpoint::Chat,
+            required_capabilities: request.required_capabilities(),
+            estimated_input_tokens: estimate_tokens(&request.context_text()),
+            requested_output_tokens: request.max_output_tokens().unwrap_or(1024),
+        };
+        if let Some(response) = apply_safety_preflight(
+            &state,
+            &config,
+            &mut route,
+            safety_preflight.as_ref(),
+            &eligibility,
+        ) {
             state
                 .telemetry
                 .record_route("chat.auto", &route_input, &route)
@@ -1775,14 +1797,27 @@ async fn responses(
     if request.input.is_null() {
         return invalid_request_response("input must not be null", Some("input"), "invalid_input");
     }
-    let prompt = request.prompt_text();
     let requested_model = request.model.clone();
     let config = state.engine.config();
     let automatic = requested_model.starts_with("router-") || requested_model == "auto";
     if requested_model.starts_with("router-") && !is_known_router_model(&requested_model) {
         return invalid_router_model_response(&requested_model);
     }
-    let sticky_key = automatic.then(|| responses_sticky_key(&request)).flatten();
+    let mut route_input = request.security_text();
+    let safety_preflight = if automatic {
+        match prepare_responses_safety(&state, &config, &mut request, &mut route_input) {
+            Ok(preflight) => preflight,
+            Err(response) => return *response,
+        }
+    } else {
+        None
+    };
+    let sticky_key = (automatic
+        && safety_preflight
+            .as_ref()
+            .is_none_or(|preflight| preflight.action == SafetyRoutingAction::Allow))
+    .then(|| responses_sticky_key(&request))
+    .flatten();
     let (
         models,
         estimated_input_tokens,
@@ -1791,7 +1826,6 @@ async fn responses(
         shadow_eval_dispatch,
     ) = if automatic {
         let policy = parse_router_model_policy(&requested_model);
-        let mut route_input = prompt.clone();
         let required_capabilities = request.required_capabilities();
         let estimated_context_tokens = estimate_tokens(&request.context_text());
         let allowed_providers = supported_provider_names(&config, RoutingEndpoint::Responses);
@@ -1821,12 +1855,18 @@ async fn responses(
                 .fallback_routes
                 .fetch_add(1, Ordering::Relaxed);
         }
-        if let Some(response) = enforce_safety_for_responses(
+        let eligibility = ModelEligibilityRequest {
+            endpoint: RoutingEndpoint::Responses,
+            required_capabilities: request.required_capabilities(),
+            estimated_input_tokens: estimate_tokens(&request.context_text()),
+            requested_output_tokens: request.max_output_tokens().unwrap_or(1024),
+        };
+        if let Some(response) = apply_safety_preflight(
             &state,
             &config,
             &mut route,
-            &mut request,
-            &mut route_input,
+            safety_preflight.as_ref(),
+            &eligibility,
         ) {
             state
                 .telemetry
@@ -1912,85 +1952,124 @@ async fn responses(
     .await
 }
 
-fn enforce_safety_for_chat(
+#[derive(Debug, Clone, Copy)]
+struct SafetyPreflight {
+    label: SafetyLabel,
+    confidence: f32,
+    action: SafetyRoutingAction,
+}
+
+fn prepare_chat_safety(
     state: &Arc<AppState>,
     config: &RouterConfig,
-    route: &mut MultimodelResponse,
     request: &mut OpenAiChatRequest,
     route_input: &mut String,
-) -> Option<Response> {
-    let eligibility = ModelEligibilityRequest {
-        endpoint: RoutingEndpoint::Chat,
-        required_capabilities: request.required_capabilities(),
-        estimated_input_tokens: estimate_tokens(&request.context_text()),
-        requested_output_tokens: request.max_output_tokens().unwrap_or(1024),
+) -> std::result::Result<Option<SafetyPreflight>, Box<Response>> {
+    let Some(preflight) = classify_safety_preflight(state, config, route_input)? else {
+        return Ok(None);
     };
-    enforce_safety_route(state, config, route, &eligibility, || {
-        redact_chat_request(request, &config.safety.redaction_replacement);
-        *route_input = request.prompt_text();
-    })
-}
-
-fn enforce_safety_for_responses(
-    state: &Arc<AppState>,
-    config: &RouterConfig,
-    route: &mut MultimodelResponse,
-    request: &mut OpenAiResponsesRequest,
-    route_input: &mut String,
-) -> Option<Response> {
-    let eligibility = ModelEligibilityRequest {
-        endpoint: RoutingEndpoint::Responses,
-        required_capabilities: request.required_capabilities(),
-        estimated_input_tokens: estimate_tokens(&request.context_text()),
-        requested_output_tokens: request.max_output_tokens().unwrap_or(1024),
-    };
-    enforce_safety_route(state, config, route, &eligibility, || {
-        redact_value_strings(&mut request.input, &config.safety.redaction_replacement);
-        *route_input = request.prompt_text();
-    })
-}
-
-fn enforce_safety_route(
-    state: &Arc<AppState>,
-    config: &RouterConfig,
-    route: &mut MultimodelResponse,
-    eligibility: &ModelEligibilityRequest,
-    redact: impl FnOnce(),
-) -> Option<Response> {
-    if !config.safety.enabled {
-        return None;
-    }
-    let safety = route.safety?;
-    let action = match safety {
-        SafetyLabel::Safe => SafetyRoutingAction::Allow,
-        SafetyLabel::Sensitive => config.safety.sensitive_action,
-        SafetyLabel::Unsafe => config.safety.unsafe_action,
-    };
-    match action {
-        SafetyRoutingAction::Allow => None,
-        SafetyRoutingAction::Reject => {
-            state
-                .metrics
-                .safety_rejections
-                .fetch_add(1, Ordering::Relaxed);
-            Some(
-                (
-                    StatusCode::FORBIDDEN,
-                    Json(ProviderClient::error_json(format!(
-                        "request rejected by safety routing policy: {safety:?}"
-                    ))),
-                )
-                    .into_response(),
-            )
-        }
+    match preflight.action {
         SafetyRoutingAction::Redact => {
-            redact();
+            redact_chat_request(request, &config.safety.redaction_replacement)
+                .map_err(|message| Box::new(redaction_failure_response(state, message)))?;
+            *route_input = request.security_text();
             state
                 .metrics
                 .safety_redactions
                 .fetch_add(1, Ordering::Relaxed);
-            None
         }
+        SafetyRoutingAction::ForceRoute => {
+            let mut classifier_view = request.clone();
+            redact_chat_request(&mut classifier_view, &config.safety.redaction_replacement)
+                .map_err(|message| Box::new(redaction_failure_response(state, message)))?;
+            *route_input = classifier_view.security_text();
+        }
+        SafetyRoutingAction::Allow | SafetyRoutingAction::Reject => {}
+    }
+    Ok(Some(preflight))
+}
+
+fn prepare_responses_safety(
+    state: &Arc<AppState>,
+    config: &RouterConfig,
+    request: &mut OpenAiResponsesRequest,
+    route_input: &mut String,
+) -> std::result::Result<Option<SafetyPreflight>, Box<Response>> {
+    let Some(preflight) = classify_safety_preflight(state, config, route_input)? else {
+        return Ok(None);
+    };
+    match preflight.action {
+        SafetyRoutingAction::Redact => {
+            redact_responses_request(request, &config.safety.redaction_replacement)
+                .map_err(|message| Box::new(redaction_failure_response(state, message)))?;
+            *route_input = request.security_text();
+            state
+                .metrics
+                .safety_redactions
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        SafetyRoutingAction::ForceRoute => {
+            let mut classifier_view = request.clone();
+            redact_responses_request(&mut classifier_view, &config.safety.redaction_replacement)
+                .map_err(|message| Box::new(redaction_failure_response(state, message)))?;
+            *route_input = classifier_view.security_text();
+        }
+        SafetyRoutingAction::Allow | SafetyRoutingAction::Reject => {}
+    }
+    Ok(Some(preflight))
+}
+
+fn classify_safety_preflight(
+    state: &Arc<AppState>,
+    config: &RouterConfig,
+    route_input: &str,
+) -> std::result::Result<Option<SafetyPreflight>, Box<Response>> {
+    if !config.safety.enabled {
+        return Ok(None);
+    }
+    let classification =
+        classify_safety_deterministically(route_input, config.classifier.confidence_threshold);
+    let action = match classification.label {
+        SafetyLabel::Safe => SafetyRoutingAction::Allow,
+        SafetyLabel::Sensitive => config.safety.sensitive_action,
+        SafetyLabel::Unsafe => config.safety.unsafe_action,
+    };
+    if action == SafetyRoutingAction::Reject {
+        state
+            .metrics
+            .safety_rejections
+            .fetch_add(1, Ordering::Relaxed);
+        return Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                Json(ProviderClient::error_json(format!(
+                    "request rejected by safety routing policy: {:?}",
+                    classification.label
+                ))),
+            )
+                .into_response(),
+        ));
+    }
+    Ok(Some(SafetyPreflight {
+        label: classification.label,
+        confidence: classification.confidence,
+        action,
+    }))
+}
+
+fn apply_safety_preflight(
+    state: &Arc<AppState>,
+    config: &RouterConfig,
+    route: &mut MultimodelResponse,
+    preflight: Option<&SafetyPreflight>,
+    eligibility: &ModelEligibilityRequest,
+) -> Option<Response> {
+    let preflight = preflight?;
+    route.safety = Some(preflight.label);
+    route.safety_confidence = Some(preflight.confidence);
+    match preflight.action {
+        SafetyRoutingAction::Allow | SafetyRoutingAction::Redact => None,
+        SafetyRoutingAction::Reject => unreachable!("reject safety action returns in preflight"),
         SafetyRoutingAction::ForceRoute => {
             let Some(force_model) = config
                 .safety
@@ -2041,7 +2120,7 @@ fn enforce_safety_route(
             route.reason = format!(
                 "{}; safety routing forced {} prompt to {}",
                 route.reason,
-                safety_label_name(safety),
+                safety_label_name(preflight.label),
                 force_model.id
             );
             state
@@ -2053,51 +2132,163 @@ fn enforce_safety_route(
     }
 }
 
-fn redact_chat_request(request: &mut OpenAiChatRequest, replacement: &str) {
-    for message in &mut request.messages {
-        redact_value_strings(&mut message.content, replacement);
-    }
+fn redaction_failure_response(state: &Arc<AppState>, message: String) -> Response {
+    state
+        .metrics
+        .safety_rejections
+        .fetch_add(1, Ordering::Relaxed);
+    invalid_request_response(
+        &format!("request cannot be safely redacted: {message}"),
+        None,
+        "unsafe_redaction_shape",
+    )
 }
 
-fn redact_value_strings(value: &mut Value, replacement: &str) {
+fn redact_chat_request(
+    request: &mut OpenAiChatRequest,
+    replacement: &str,
+) -> std::result::Result<(), String> {
+    for message in &mut request.messages {
+        redact_forwarded_value(
+            &mut message.content,
+            Some("content"),
+            Some("message"),
+            replacement,
+        )?;
+        redact_forwarded_map(&mut message.extra, Some("message"), replacement)?;
+    }
+    redact_forwarded_map(&mut request.extra, Some("request"), replacement)
+}
+
+fn redact_responses_request(
+    request: &mut OpenAiResponsesRequest,
+    replacement: &str,
+) -> std::result::Result<(), String> {
+    redact_forwarded_value(
+        &mut request.input,
+        Some("input"),
+        Some("request"),
+        replacement,
+    )?;
+    redact_forwarded_map(&mut request.extra, Some("request"), replacement)
+}
+
+fn redact_forwarded_map(
+    map: &mut serde_json::Map<String, Value>,
+    parent_key: Option<&str>,
+    replacement: &str,
+) -> std::result::Result<(), String> {
+    for (key, value) in map {
+        redact_forwarded_value(value, Some(key), parent_key, replacement)?;
+    }
+    Ok(())
+}
+
+fn redact_forwarded_value(
+    value: &mut Value,
+    key: Option<&str>,
+    parent_key: Option<&str>,
+    replacement: &str,
+) -> std::result::Result<(), String> {
+    match forwarded_string_kind(key, parent_key) {
+        ForwardedStringKind::Control => return Ok(()),
+        ForwardedStringKind::JsonArguments => {
+            let Value::String(raw) = value else {
+                return Err(format!(
+                    "{} must be a JSON-encoded string",
+                    key.unwrap_or("arguments")
+                ));
+            };
+            let mut arguments = serde_json::from_str::<Value>(raw)
+                .map_err(|_| "tool/function arguments must contain valid JSON".to_string())?;
+            redact_forwarded_value(&mut arguments, None, Some("arguments"), replacement)?;
+            *raw = serde_json::to_string(&arguments)
+                .map_err(|_| "redacted tool/function arguments did not serialize".to_string())?;
+            return Ok(());
+        }
+        ForwardedStringKind::Text => {}
+    }
     match value {
-        Value::String(text) => *text = redact_sensitive_text(text, replacement),
+        Value::String(text) => {
+            if key.is_some_and(is_sensitive_field_name) {
+                *text = replacement.to_string();
+            } else {
+                *text = redact_sensitive_text(text, replacement);
+            }
+        }
         Value::Array(values) => {
             for value in values {
-                redact_value_strings(value, replacement);
+                redact_forwarded_value(value, key, parent_key, replacement)?;
             }
         }
         Value::Object(object) => {
-            for value in object.values_mut() {
-                redact_value_strings(value, replacement);
-            }
+            redact_forwarded_map(object, key.or(parent_key), replacement)?;
         }
         _ => {}
     }
+    Ok(())
+}
+
+fn is_sensitive_field_name(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase();
+    normalized.contains("api_key")
+        || normalized.contains("apikey")
+        || normalized.contains("password")
+        || normalized.contains("secret")
+        || normalized.contains("token")
+        || normalized.contains("authorization")
+        || normalized == "email"
+        || normalized == "ssn"
+        || normalized.contains("credit_card")
 }
 
 fn redact_sensitive_text(input: &str, replacement: &str) -> String {
-    input
-        .split_whitespace()
-        .map(|token| {
-            let normalized = token
-                .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '@' && ch != '-')
-                .to_ascii_lowercase();
-            if normalized.contains('@')
-                || normalized.starts_with("sk-")
-                || normalized.starts_with("pk-")
-                || normalized.starts_with("api_key")
-                || normalized.starts_with("token")
-                || normalized.starts_with("password")
-                || looks_like_credit_card(&normalized)
-            {
-                replacement.to_string()
-            } else {
-                token.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut output = String::with_capacity(input.len());
+    let mut segment = String::new();
+    let mut redact_next = false;
+    for character in input.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '@' | '.' | '_' | '+' | '-') {
+            segment.push(character);
+            continue;
+        }
+        push_redacted_segment(&mut output, &mut segment, replacement, &mut redact_next);
+        output.push(character);
+    }
+    push_redacted_segment(&mut output, &mut segment, replacement, &mut redact_next);
+    output
+}
+
+fn push_redacted_segment(
+    output: &mut String,
+    segment: &mut String,
+    replacement: &str,
+    redact_next: &mut bool,
+) {
+    if segment.is_empty() {
+        return;
+    }
+    let normalized = segment.to_ascii_lowercase();
+    let marker = normalized.starts_with("api_key")
+        || normalized.starts_with("apikey")
+        || normalized.starts_with("token")
+        || normalized.starts_with("password")
+        || normalized.starts_with("secret")
+        || normalized.starts_with("authorization")
+        || normalized == "bearer";
+    let direct_secret = normalized.starts_with("sk-")
+        || normalized.starts_with("pk-")
+        || (normalized.contains('@') && !normalized.starts_with('@') && !normalized.ends_with('@'))
+        || looks_like_credit_card(&normalized);
+    let connector = matches!(normalized.as_str(), "is" | "value" | "equals" | "the");
+    if *redact_next && connector {
+        output.push_str(segment);
+    } else if *redact_next || marker || direct_secret {
+        output.push_str(replacement);
+    } else {
+        output.push_str(segment);
+    }
+    *redact_next = marker || (*redact_next && connector);
+    segment.clear();
 }
 
 fn looks_like_credit_card(token: &str) -> bool {
@@ -5052,15 +5243,16 @@ mod tests {
         AppState, RequestAuthenticator, RouterMetrics, RoutingEndpoint, StreamingUsageParser,
         UsageAccounting, app, budget_violation, constant_time_eq, is_known_router_model,
         legacy_raw_difficulty, model_ineligibility_reason, parse_router_model_policy,
-        prometheus_escape, semantic_cache_identity_for_chat, semantic_cache_identity_for_responses,
-        semantic_cache_plan_for_route, semantic_cache_safe_for_request, supported_model_ids,
-        supported_provider_names, usage_from_value,
+        prometheus_escape, redact_sensitive_text, semantic_cache_identity_for_chat,
+        semantic_cache_identity_for_responses, semantic_cache_plan_for_route,
+        semantic_cache_safe_for_request, supported_model_ids, supported_provider_names,
+        usage_from_value,
     };
     use crate::{
         classifier::SmartClassifier,
         config::{
             AuthConfig, BudgetAccountingBackend, BudgetAccountingConfig, BudgetConfig,
-            ClassifierConfig, RouterConfig, RuntimeConfig, SafetyRoutingAction,
+            ClassifierBackend, ClassifierConfig, RouterConfig, RuntimeConfig, SafetyRoutingAction,
             SafetyRoutingConfig, ScoringConfig, SemanticCacheBackend, SemanticCacheConfig,
             ShadowEvalConfig, StickyRoutingBackend, StickyRoutingConfig, TelemetryConfig,
         },
@@ -6914,6 +7106,276 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn safety_redacts_every_forwarded_chat_string_and_decision_trace() {
+        let (upstream_url, captured) = spawn_capturing_chat_upstream().await;
+        let trace_path = std::env::temp_dir().join(format!(
+            "autohand-router-safety-trace-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let mut config = safety_config(
+            upstream_url,
+            SafetyRoutingAction::Reject,
+            SafetyRoutingAction::Redact,
+            None,
+        );
+        for model in &mut config.models {
+            model.capabilities.supports_tools = true;
+        }
+        config.telemetry = TelemetryConfig {
+            decision_log_path: Some(trace_path.to_string_lossy().to_string()),
+            include_inputs: true,
+        };
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+        let request = serde_json::json!({
+            "model": "auto",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Summarize the tool results"}]
+                },
+                {
+                    "role": "assistant",
+                    "content": "assistant email assistant@example.com",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "token_lookup",
+                            "arguments": "{\"api_key\":\"sk-tool-secret\",\"url\":\"https://example.test/callback?token=sk-url-secret\"}"
+                        }
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": {"password": "tool-password-secret"}
+                }
+            ],
+            "metadata": {
+                "email": "owner@example.com",
+                "nested": [{"secret": "metadata-secret"}]
+            },
+            "user": "requester@example.com",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "token_lookup",
+                    "description": "Fetch a record",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"api_key": {"type": "string"}},
+                        "required": ["api_key"]
+                    }
+                }
+            }]
+        });
+
+        let response = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+
+        assert!(response.status().is_success());
+        let captured = captured.lock().unwrap().clone().unwrap();
+        let serialized = serde_json::to_string(&captured).unwrap();
+        for secret in [
+            "assistant@example.com",
+            "sk-tool-secret",
+            "sk-url-secret",
+            "tool-password-secret",
+            "owner@example.com",
+            "metadata-secret",
+            "requester@example.com",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "leaked {secret}: {serialized}"
+            );
+        }
+        assert_eq!(captured["messages"][1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(
+            captured["messages"][1]["tool_calls"][0]["function"]["name"],
+            "token_lookup"
+        );
+        let arguments: Value = serde_json::from_str(
+            captured["messages"][1]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(arguments["api_key"], "[redacted]");
+        assert!(arguments["url"].as_str().unwrap().contains("[redacted]"));
+        assert_eq!(
+            captured["tools"][0]["function"]["parameters"]["type"],
+            "object"
+        );
+        assert_eq!(
+            captured["tools"][0]["function"]["parameters"]["required"],
+            serde_json::json!(["api_key"])
+        );
+
+        let trace = std::fs::read_to_string(&trace_path).unwrap();
+        assert!(trace.contains("[redacted]"));
+        for secret in ["sk-tool-secret", "owner@example.com", "metadata-secret"] {
+            assert!(
+                !trace.contains(secret),
+                "decision trace leaked {secret}: {trace}"
+            );
+        }
+        let _ = std::fs::remove_file(trace_path);
+    }
+
+    #[tokio::test]
+    async fn safety_redacts_before_dispatching_to_an_external_classifier() {
+        let (upstream_url, captured) = spawn_capturing_classifier_upstream().await;
+        let mut config = safety_config(
+            upstream_url,
+            SafetyRoutingAction::Reject,
+            SafetyRoutingAction::Redact,
+            None,
+        );
+        config.classifier.backend = ClassifierBackend::LlmJudge;
+        config.classifier.llm_judge_model = Some("normal-model".to_string());
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "auto",
+                "messages": [{"role": "user", "content": "email classifier@example.com"}],
+                "metadata": {"api_key": "sk-classifier-secret"}
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert!(response.status().is_success());
+        let captured = captured.lock().unwrap().clone();
+        assert!(
+            captured.len() >= 2,
+            "expected classifier and inference calls"
+        );
+        let serialized = serde_json::to_string(&captured).unwrap();
+        assert!(!serialized.contains("classifier@example.com"));
+        assert!(!serialized.contains("sk-classifier-secret"));
+        assert!(serialized.contains("[redacted]"));
+    }
+
+    #[tokio::test]
+    async fn safety_redacts_responses_items_metadata_and_urls() {
+        let (upstream_url, captured) = spawn_capturing_responses_upstream().await;
+        let mut config = safety_config(
+            upstream_url,
+            SafetyRoutingAction::Reject,
+            SafetyRoutingAction::Redact,
+            None,
+        );
+        for model in &mut config.models {
+            model.capabilities.supports_tools = true;
+        }
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!("{router_url}/v1/responses"))
+            .json(&serde_json::json!({
+                "model": "auto",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "contact response@example.com"}]
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_2",
+                        "name": "password_lookup",
+                        "arguments": "{\"password\":\"responses-password\"}"
+                    }
+                ],
+                "metadata": {
+                    "callback_url": "https://example.test/path?token=sk-responses-url"
+                },
+                "tools": [{
+                    "type": "function",
+                    "name": "password_lookup",
+                    "parameters": {"type": "object"}
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert!(response.status().is_success());
+        let captured = captured.lock().unwrap().clone().unwrap();
+        let serialized = serde_json::to_string(&captured).unwrap();
+        for secret in [
+            "response@example.com",
+            "responses-password",
+            "sk-responses-url",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "leaked {secret}: {serialized}"
+            );
+        }
+        assert_eq!(captured["input"][1]["type"], "function_call");
+        assert_eq!(captured["input"][1]["name"], "password_lookup");
+        let arguments: Value =
+            serde_json::from_str(captured["input"][1]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments["password"], "[redacted]");
+        assert!(
+            captured["metadata"]["callback_url"]
+                .as_str()
+                .unwrap()
+                .contains("[redacted]")
+        );
+    }
+
+    #[tokio::test]
+    async fn safety_redaction_fails_closed_for_ambiguous_tool_arguments() {
+        let (upstream_url, captured) = spawn_capturing_chat_upstream().await;
+        let config = safety_config(
+            upstream_url,
+            SafetyRoutingAction::Reject,
+            SafetyRoutingAction::Redact,
+            None,
+        );
+        let router_url = spawn_router(config).await;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!("{router_url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "auto",
+                "messages": [{
+                    "role": "assistant",
+                    "content": "tool result",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": "{\"api_key\":\"sk-secret-truncated"
+                        }
+                    }]
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error = response.json::<Value>().await.unwrap();
+        assert_eq!(error["error"]["code"], "unsafe_redaction_shape");
+        assert!(captured.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn safety_routing_force_routes_sensitive_auto_chat() {
         let (upstream_url, _calls) = spawn_echo_chat_upstream().await;
         let config = safety_config(
@@ -7006,6 +7468,17 @@ mod tests {
         assert_eq!(
             prometheus_escape("model\"one\\two\nthree"),
             "model\\\"one\\\\two\\nthree"
+        );
+    }
+
+    #[test]
+    fn sensitive_text_redaction_preserves_layout_and_redacts_marker_values() {
+        assert_eq!(
+            redact_sensitive_text(
+                "password is hunter2; callback?token=opaque-value",
+                "[redacted]",
+            ),
+            "[redacted] is [redacted]; callback?[redacted]=[redacted]"
         );
     }
 
@@ -7698,6 +8171,115 @@ mod tests {
         }
 
         let captured = Arc::new(Mutex::new(None));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(chat))
+            .with_state(captured.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), captured)
+    }
+
+    async fn spawn_capturing_responses_upstream() -> (String, Arc<Mutex<Option<Value>>>) {
+        async fn responses(
+            axum::extract::State(captured): axum::extract::State<Arc<Mutex<Option<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> axum::response::Response {
+            let model = request["model"]
+                .as_str()
+                .unwrap_or("unknown-model")
+                .to_string();
+            *captured.lock().unwrap() = Some(request);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": "resp-safety-test",
+                    "object": "response",
+                    "model": model,
+                    "status": "completed",
+                    "output": [],
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 2,
+                        "total_tokens": 12
+                    }
+                })),
+            )
+                .into_response()
+        }
+
+        let captured = Arc::new(Mutex::new(None));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/responses", post(responses))
+            .with_state(captured.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), captured)
+    }
+
+    async fn spawn_capturing_classifier_upstream() -> (String, Arc<Mutex<Vec<Value>>>) {
+        async fn chat(
+            axum::extract::State(captured): axum::extract::State<Arc<Mutex<Vec<Value>>>>,
+            Json(request): Json<Value>,
+        ) -> axum::response::Response {
+            let model = request["model"]
+                .as_str()
+                .unwrap_or("unknown-model")
+                .to_string();
+            let is_classifier = request["messages"][0]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("Classify the user request"));
+            captured.lock().unwrap().push(request);
+            let content = if is_classifier {
+                serde_json::json!({
+                    "difficulty": "easy",
+                    "ambiguity": "low",
+                    "domain": "summary",
+                    "modality": "text",
+                    "safety": "sensitive",
+                    "cacheability": "low",
+                    "latency_sensitivity": "low",
+                    "reasoning_depth": "shallow",
+                    "confidence": 0.9,
+                    "ambiguity_confidence": 0.9,
+                    "domain_confidence": 0.9,
+                    "modality_confidence": 0.9,
+                    "safety_confidence": 0.9,
+                    "cacheability_confidence": 0.9,
+                    "latency_sensitivity_confidence": 0.9,
+                    "reasoning_depth_confidence": 0.9
+                })
+                .to_string()
+            } else {
+                "ok".to_string()
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": "chatcmpl-classifier-safety-test",
+                    "object": "chat.completion",
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 2,
+                        "total_tokens": 12
+                    }
+                })),
+            )
+                .into_response()
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app = Router::new()

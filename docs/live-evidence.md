@@ -17,3 +17,11 @@ Promotion fails when any of these conditions is true:
 Unadvertised endpoints/features remain explicit `skip` checks with reasons and do not block promotion. `--allow-unreported-versions` exists only for local diagnosis; the staging workflow intentionally does not use it. Both the raw matrix and promotion report are uploaded on every run, including failures. Provider failures therefore block promotion until the config removes that eligibility or a fresh run passes.
 
 Artifacts must contain no credentials. The conformance config fingerprint is calculated after bearer tokens, inline provider keys, and private header values are removed.
+
+## Classifier promotion gate
+
+The staging config must explicitly enable `llm_judge` or `route_llm`; a heuristic config fails because it is not live advanced-classifier evidence. `classifier-live-gate` runs five fixed benign smoke classifications through the credentialed adapter, then evaluates a reproducible 20% holdout from the redacted labeled dataset. It enforces adapter success/fallback rates, smoke p95, holdout size, and tier/domain accuracy.
+
+The same command replaces the configured classifier provider with a credential-free loopback fixture for three mandatory failure injections: timeout, invalid JSON, and HTTP 429. Each must produce exactly one adapter request, zero success, one fallback, and one heuristic route; invalid JSON must additionally increment the invalid-output counter. These tests prove fail-closed behavior without asking a real provider to malfunction.
+
+The uploaded artifact contains only aggregate counts, latencies, accuracies, the dataset filename/fingerprint, config fingerprint, and revision. Raw smoke prompts, holdout inputs/misses, bearer tokens, provider keys, and private headers are not serialized. A failed live adapter still writes and uploads this redacted artifact before the job exits non-zero.

@@ -392,6 +392,25 @@ cargo run --locked -- --config router.production.yaml \
 
 The command fails non-zero for stale or config-mismatched evidence, unreported provider/model versions, and every skipped or failed advertised endpoint/feature. See [Credentialed staging evidence](live-evidence.md) for the protected runner workflow.
 
+For a production config using `llm_judge` or `route_llm`, gate the credentialed adapter, labeled holdout, and fail-closed injections together:
+
+```bash
+cargo run --locked -- --config router.with-judge.yaml \
+  classifier-live-gate examples/eval.production.jsonl \
+  --revision "$(git rev-parse HEAD)" \
+  --smoke-runs 5 \
+  --min-adapter-success-rate 0.95 \
+  --max-fallback-rate 0.05 \
+  --max-smoke-p95-ms 5000 \
+  --holdout-ratio 0.20 \
+  --min-holdout-examples 10 \
+  --min-tier-accuracy 0.90 \
+  --min-domain-accuracy 0.90 \
+  --output artifacts/live/classifier-promotion.json
+```
+
+The artifact is aggregate-only and redacted. Timeout, invalid-JSON, and 429 injections run locally with credentials removed and must each fall back exactly once to deterministic routing.
+
 ## Evaluation and Calibration
 
 Evaluation datasets are JSONL files with prompt, expected tier, optional domain, optional exact model/provider expectations, policy, filters, and required capabilities:

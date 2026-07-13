@@ -13,6 +13,11 @@ on:
         required: true
         default: "3600"
         type: string
+      classifier_dataset:
+        description: Redacted labeled dataset for the configured classifier gate
+        required: true
+        default: examples/eval.production.jsonl
+        type: string
 
 permissions:
   contents: read
@@ -64,4 +69,50 @@ jobs:
 
       - name: Preserve conformance failure
         if: steps.conformance.outcome != 'success'
+        run: exit 1
+
+  classifier-promotion:
+    name: Live classifier promotion gate
+    runs-on:
+      - self-hosted
+      - router-staging
+    environment: router-staging
+    timeout-minutes: 30
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+    steps:
+      - name: Checkout candidate revision
+        uses: actions/checkout@v4
+
+      - name: Run credentialed classifier and failure-injection gate
+        id: classifier
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts/live
+          cargo run --locked -- --config "${{ inputs.config_path }}" \
+            classifier-live-gate "${{ inputs.classifier_dataset }}" \
+            --revision "${GITHUB_SHA}" \
+            --smoke-runs 5 \
+            --min-adapter-success-rate 0.95 \
+            --max-fallback-rate 0.05 \
+            --max-smoke-p95-ms 5000 \
+            --holdout-ratio 0.20 \
+            --holdout-seed 2709397542 \
+            --min-holdout-examples 10 \
+            --min-tier-accuracy 0.90 \
+            --min-domain-accuracy 0.90 \
+            --output artifacts/live/classifier-promotion.json
+
+      - name: Upload sanitized classifier evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-classifier-evidence-${{ github.sha }}
+          path: artifacts/live/classifier-promotion.json
+          if-no-files-found: error
+
+      - name: Preserve classifier gate failure
+        if: steps.classifier.outcome != 'success'
         run: exit 1

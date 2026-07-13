@@ -2,6 +2,7 @@
 
 pub mod accounting;
 pub mod classifier;
+pub mod classifier_gate;
 pub mod config;
 pub mod config_schema;
 pub mod conformance;

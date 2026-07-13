@@ -436,6 +436,7 @@ cargo run -- runtime-gate
 cargo run -- controlled-evidence --revision "$(git rev-parse HEAD)"
 cargo run -- evidence-validate artifacts/release-evidence
 cargo run -- --config examples/router.yaml provider-conformance-matrix
+cargo run -- --config router.with-judge.yaml classifier-live-gate examples/eval.production.jsonl
 ```
 
 Routes is designed to be composable. New routing ideas should usually land behind the classifier boundary, scoring-policy boundary, provider adapter boundary, or eval tooling rather than inside HTTP handlers. Start with [CONTRIBUTING.md](CONTRIBUTING.md), then choose a small change with a clear validation path.

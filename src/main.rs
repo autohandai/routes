@@ -2,6 +2,7 @@ use anyhow::Result;
 use autohand_router::{
     RouterConfig,
     classifier::SmartClassifier,
+    classifier_gate::{ClassifierLiveGateConfig, run_classifier_live_gate},
     config_schema,
     conformance::{run_provider_conformance, run_provider_conformance_matrix},
     eval::{
@@ -209,6 +210,35 @@ enum Command {
         max_age_seconds: u64,
         #[arg(long)]
         allow_unreported_versions: bool,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    ClassifierLiveGate {
+        dataset: PathBuf,
+        #[arg(long, env = "GITHUB_SHA", default_value = "working-tree")]
+        revision: String,
+        #[arg(long, default_value_t = 5)]
+        smoke_runs: usize,
+        #[arg(long, default_value_t = 0.95)]
+        min_adapter_success_rate: f64,
+        #[arg(long, default_value_t = 0.05)]
+        max_fallback_rate: f64,
+        #[arg(long, default_value_t = 5_000)]
+        max_smoke_p95_ms: u64,
+        #[arg(long, default_value_t = 0.20)]
+        holdout_ratio: f32,
+        #[arg(long, default_value_t = 0xA17E_2026)]
+        holdout_seed: u64,
+        #[arg(long, default_value_t = 10)]
+        min_holdout_examples: usize,
+        #[arg(long, default_value_t = 0.90)]
+        min_tier_accuracy: f32,
+        #[arg(long, default_value_t = 0.90)]
+        min_domain_accuracy: f32,
+        #[arg(long, default_value_t = 0.0)]
+        min_model_accuracy: f32,
+        #[arg(long, default_value_t = 0.0)]
+        min_provider_accuracy: f32,
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -685,6 +715,55 @@ async fn main() -> Result<()> {
             if !report.pass {
                 anyhow::bail!(
                     "provider promotion gate failed: {}",
+                    report.failures.join("; ")
+                );
+            }
+            Ok(())
+        }
+        Command::ClassifierLiveGate {
+            dataset,
+            revision,
+            smoke_runs,
+            min_adapter_success_rate,
+            max_fallback_rate,
+            max_smoke_p95_ms,
+            holdout_ratio,
+            holdout_seed,
+            min_holdout_examples,
+            min_tier_accuracy,
+            min_domain_accuracy,
+            min_model_accuracy,
+            min_provider_accuracy,
+            output,
+        } => {
+            let config = RouterConfig::from_path(&cli.config)?;
+            let report = run_classifier_live_gate(
+                &config,
+                &dataset,
+                ClassifierLiveGateConfig {
+                    revision,
+                    smoke_runs,
+                    min_adapter_success_rate,
+                    max_fallback_rate,
+                    max_smoke_p95_ms,
+                    holdout_ratio,
+                    holdout_seed,
+                    min_holdout_examples,
+                    min_tier_accuracy,
+                    min_domain_accuracy,
+                    min_model_accuracy,
+                    min_provider_accuracy,
+                },
+            )
+            .await?;
+            if let Some(path) = output {
+                fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+                println!("wrote classifier live-gate report {}", path.display());
+            }
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.pass {
+                anyhow::bail!(
+                    "classifier live gate failed: {}",
                     report.failures.join("; ")
                 );
             }

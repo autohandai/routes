@@ -9,6 +9,7 @@ use std::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RouterConfig {
     #[serde(default = "default_bind")]
     pub bind: String,
@@ -42,6 +43,7 @@ pub struct RouterConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClassifierConfig {
     #[serde(default)]
     pub backend: ClassifierBackend,
@@ -69,6 +71,7 @@ pub enum ClassifierBackend {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClassifierAdaptersConfig {
     #[serde(default)]
     pub llm_judge: ClassifierModelAdapterConfig,
@@ -77,6 +80,7 @@ pub struct ClassifierAdaptersConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClassifierModelAdapterConfig {
     #[serde(default)]
     pub model: Option<String>,
@@ -87,6 +91,7 @@ pub struct ClassifierModelAdapterConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthConfig {
     #[serde(default)]
     pub bearer_tokens: Vec<String>,
@@ -97,6 +102,7 @@ pub struct AuthConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BudgetConfig {
     #[serde(default)]
     pub max_chat_requests: Option<u64>,
@@ -109,6 +115,7 @@ pub struct BudgetConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BudgetAccountingConfig {
     #[serde(default)]
     pub backend: BudgetAccountingBackend,
@@ -126,6 +133,7 @@ pub enum BudgetAccountingBackend {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TelemetryConfig {
     #[serde(default)]
     pub decision_log_path: Option<String>,
@@ -134,12 +142,14 @@ pub struct TelemetryConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CacheConfig {
     #[serde(default)]
     pub semantic: SemanticCacheConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShadowEvalConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -156,6 +166,7 @@ pub struct ShadowEvalConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShadowEvalJudgeConfig {
     #[serde(default = "default_shadow_eval_judge_enabled")]
     pub enabled: bool,
@@ -168,6 +179,7 @@ pub struct ShadowEvalJudgeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SafetyRoutingConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -182,6 +194,7 @@ pub struct SafetyRoutingConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StickyRoutingConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -215,6 +228,7 @@ pub enum SafetyRoutingAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SemanticCacheConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -242,6 +256,7 @@ pub enum SemanticCacheBackend {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     #[serde(default = "default_graceful_shutdown_timeout_ms")]
     pub graceful_shutdown_timeout_ms: u64,
@@ -250,6 +265,7 @@ pub struct RuntimeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderHealthSamplerConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -260,6 +276,7 @@ pub struct ProviderHealthSamplerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScoringConfig {
     #[serde(default = "default_balanced_weights")]
     pub balanced: PolicyWeights,
@@ -306,6 +323,7 @@ pub struct ScoringConfig {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyWeights {
     pub capability_fit: f32,
     pub domain_bonus: f32,
@@ -326,6 +344,7 @@ pub struct PolicyWeights {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LearnedScoringConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -1622,6 +1641,105 @@ mod tests {
             safety: Default::default(),
             sticky_routing: Default::default(),
         }
+    }
+
+    #[test]
+    fn rejects_unknown_fields_for_every_config_object_type() {
+        let base = serde_json::to_value(valid_config()).unwrap();
+        let object_paths = [
+            "",
+            "classifier",
+            "classifier.adapters",
+            "classifier.adapters.llm_judge",
+            "auth",
+            "budget",
+            "budget.accounting",
+            "telemetry",
+            "cache",
+            "cache.semantic",
+            "shadow_eval",
+            "shadow_eval.judge",
+            "safety",
+            "sticky_routing",
+            "runtime",
+            "runtime.provider_health_sampler",
+            "scoring",
+            "scoring.balanced",
+            "scoring.learned",
+            "providers.0",
+            "models.0",
+            "models.0.capabilities",
+        ];
+
+        for path in object_paths {
+            let mut value = base.clone();
+            object_at_path_mut(&mut value, path)
+                .insert("unknown_router_field".to_string(), serde_json::json!(true));
+            let yaml = serde_yaml::to_string(&value).unwrap();
+            let error = serde_yaml::from_str::<RouterConfig>(&yaml)
+                .expect_err(path)
+                .to_string();
+            assert!(
+                error.contains("unknown field `unknown_router_field`"),
+                "path={path}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_deliberately_open_config_maps_extensible() {
+        let mut value = serde_json::to_value(valid_config()).unwrap();
+        object_at_path_mut(&mut value, "providers.0.extra_headers")
+            .insert("x-custom-header".to_string(), serde_json::json!("value"));
+        object_at_path_mut(&mut value, "scoring.model_priorities")
+            .insert("future-model".to_string(), serde_json::json!(0.5));
+        object_at_path_mut(&mut value, "scoring.provider_latency_p95_ms")
+            .insert("future-provider".to_string(), serde_json::json!(250));
+        object_at_path_mut(&mut value, "scoring.learned.feature_weights")
+            .insert("future_feature".to_string(), serde_json::json!(0.25));
+
+        let yaml = serde_yaml::to_string(&value).unwrap();
+        let parsed = serde_yaml::from_str::<RouterConfig>(&yaml).unwrap();
+        assert_eq!(
+            parsed.providers[0].extra_headers["x-custom-header"],
+            "value"
+        );
+        assert_eq!(parsed.scoring.model_priorities["future-model"], 0.5);
+        assert_eq!(
+            parsed.scoring.provider_latency_p95_ms["future-provider"],
+            250
+        );
+        assert_eq!(
+            parsed.scoring.learned.feature_weights["future_feature"],
+            0.25
+        );
+    }
+
+    fn object_at_path_mut<'a>(
+        value: &'a mut serde_json::Value,
+        path: &str,
+    ) -> &'a mut serde_json::Map<String, serde_json::Value> {
+        let mut current = value;
+        if !path.is_empty() {
+            for segment in path.split('.') {
+                current = if let Ok(index) = segment.parse::<usize>() {
+                    current
+                        .as_array_mut()
+                        .and_then(|items| items.get_mut(index))
+                        .unwrap_or_else(|| panic!("missing array path segment {segment} in {path}"))
+                } else {
+                    current
+                        .as_object_mut()
+                        .and_then(|object| object.get_mut(segment))
+                        .unwrap_or_else(|| {
+                            panic!("missing object path segment {segment} in {path}")
+                        })
+                };
+            }
+        }
+        current
+            .as_object_mut()
+            .unwrap_or_else(|| panic!("path {path} is not an object"))
     }
 
     #[test]

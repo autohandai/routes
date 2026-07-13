@@ -113,6 +113,7 @@ impl Default for RouterPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     pub name: String,
     #[serde(default)]
@@ -208,6 +209,7 @@ fn default_retries() -> u8 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelConfig {
     pub id: String,
     pub provider: String,
@@ -242,6 +244,7 @@ pub enum ModelEndpoint {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelCapabilities {
     #[serde(default)]
     pub supports_vision: bool,

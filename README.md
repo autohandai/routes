@@ -431,6 +431,8 @@ cargo run -- --config examples/router.yaml openapi
 cargo run -- --config examples/router.yaml config-schema
 cargo run -- --config examples/router.yaml eval examples/eval.jsonl
 cargo run -- --config examples/router.yaml eval-gate examples/eval.production.jsonl
+cargo run -- --config router.production.yaml configured-eval-gate examples/eval.production.jsonl
+cargo run -- runtime-gate
 cargo run -- --config examples/router.yaml provider-conformance-matrix
 ```
 

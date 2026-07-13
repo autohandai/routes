@@ -15,6 +15,7 @@ pub mod metrics;
 pub mod openapi;
 pub mod provider;
 pub mod router;
+pub mod runtime_gate;
 pub mod semantic_cache;
 pub mod server;
 pub mod shadow_eval;

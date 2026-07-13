@@ -381,6 +381,28 @@ pub struct AppState {
     pub background_tasks: BackgroundTasks,
 }
 
+impl AppState {
+    pub fn from_config(config: &RouterConfig) -> Result<Self> {
+        let classifier = SmartClassifier::new(config.clone())?;
+        Ok(Self {
+            engine: RoutingEngine::new(config.clone(), classifier),
+            auth: RequestAuthenticator::from_config(config)?,
+            providers: ProviderClient::new(config)?,
+            metrics: Default::default(),
+            accounting: BudgetAccounting::from_budget_config(&config.budget)?,
+            telemetry: DecisionLogger::new(&config.telemetry),
+            semantic_cache: SemanticCache::from_config(&config.cache.semantic)?,
+            shadow_eval: ShadowEvalLogger::new(&config.shadow_eval),
+            sticky_routing: StickyRoutingStore::from_config(&config.sticky_routing)?,
+            ingress: IngressController::new(&config.runtime.ingress),
+            background_tasks: BackgroundTasks::new(
+                config.shadow_eval.max_pending_tasks,
+                config.shadow_eval.max_concurrent_tasks,
+            ),
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct RequestAuthenticator {
     tokens: Arc<Vec<String>>,

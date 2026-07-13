@@ -387,7 +387,7 @@ Evaluation datasets are JSONL files with prompt, expected tier, optional domain,
 {"input":"Build a small web app","expected_tier":"balanced","expected_domain":"coding","expected_model":"gemma","expected_provider":"ollama","policy":"balanced","required_capabilities":["web_apps"]}
 ```
 
-`eval` reports tier, domain, model, and provider accuracy, average selected cost, average capability, and miss details. `eval-gate` fails non-zero unless the dataset is large enough and meets configured thresholds. `calibrate` grid-searches heuristic difficulty cutoffs. `optimize` searches scoring-policy weights and uses lower average cost as a tiebreaker when accuracy is equal.
+`eval` reports tier, domain, model, and provider accuracy, average selected cost, average capability, and miss details. `eval-gate` is the deterministic heuristic gate. `configured-eval-gate` independently exercises the configured classifier on a reproducible seeded holdout and fails when its observed fallback rate exceeds the configured maximum. Both artifacts identify the classifier/runtime and make domain/model/provider sample minimums explicit. `runtime-gate` runs auth, capability, context, failover, outcome-metric, and streaming scenarios through the real Axum stack against controlled mock providers. `calibrate` grid-searches heuristic difficulty cutoffs. `optimize` searches scoring-policy weights and uses lower average cost as a tiebreaker when accuracy is equal.
 
 Run the production eval gate before promoting routing changes:
 
@@ -398,7 +398,20 @@ cargo run -- --config examples/router.yaml eval-gate examples/eval.production.js
   --min-domain-accuracy 0.90 \
   --min-model-accuracy 0.95 \
   --min-provider-accuracy 0.95 \
+  --min-domain-examples 50 \
+  --min-model-examples 11 \
+  --min-provider-examples 22 \
   --output router.eval-gate.json
+```
+
+For a configuration that enables `llm_judge` or `route_llm`, run the independent credentialed gate and the deterministic HTTP-runtime suite:
+
+```bash
+cargo run -- --config router.production.yaml configured-eval-gate examples/eval.production.jsonl \
+  --holdout-ratio 0.20 --holdout-seed 2709397542 \
+  --min-examples 10 --max-fallback-rate 0.05 \
+  --output router.configured-eval-gate.json
+cargo run -- runtime-gate --output router.runtime-gate.json
 ```
 
 For production tuning:

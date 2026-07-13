@@ -1,5 +1,5 @@
 use crate::{
-    classifier::{HeuristicClassifier, PromptClassifier},
+    classifier::{HeuristicClassifier, PromptClassifier, SmartClassifier},
     config::{PolicyWeights, RouterConfig},
     router::RoutingEngine,
     types::{DifficultyLabel, DomainLabel, ModelCapability, MultimodelRequest, RouterPolicy},
@@ -72,6 +72,9 @@ pub struct EvalReport {
 pub struct EvalGateReport {
     pub schema_version: u32,
     pub dataset: DatasetArtifact,
+    pub execution: EvalExecutionArtifact,
+    pub selection: EvalSelectionArtifact,
+    pub coverage: EvalCoverageArtifact,
     pub min_examples: usize,
     pub min_accuracy: f32,
     pub min_domain_accuracy: f32,
@@ -80,6 +83,49 @@ pub struct EvalGateReport {
     pub pass: bool,
     pub failures: Vec<String>,
     pub eval: EvalReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvalSelectionArtifact {
+    pub strategy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    pub source_examples: usize,
+    pub evaluated_examples: usize,
+    pub evaluated_fnv1a_64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvalExecutionArtifact {
+    /// Classifier implementation exercised by this report.
+    pub classifier: String,
+    /// Boundary exercised by this report. Eval gates are intentionally kept
+    /// separate from HTTP runtime scenario gates.
+    pub runtime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configured_model: Option<String>,
+    pub adapter_requests: u64,
+    pub adapter_successes: u64,
+    pub adapter_fallbacks: u64,
+    pub adapter_invalid_outputs: u64,
+    pub heuristic_routes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvalCoverageArtifact {
+    pub min_domain_examples: usize,
+    pub min_model_examples: usize,
+    pub min_provider_examples: usize,
+    pub domain_examples: usize,
+    pub model_examples: usize,
+    pub provider_examples: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EvalCoverageMinimums {
+    pub domain: usize,
+    pub model: usize,
+    pub provider: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,6 +424,134 @@ pub async fn eval_gate(
     min_model_accuracy: f32,
     min_provider_accuracy: f32,
 ) -> Result<EvalGateReport> {
+    eval_gate_with_coverage(
+        config,
+        dataset_path,
+        examples,
+        min_examples,
+        min_accuracy,
+        min_domain_accuracy,
+        min_model_accuracy,
+        min_provider_accuracy,
+        EvalCoverageMinimums::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn eval_gate_with_coverage(
+    config: &RouterConfig,
+    dataset_path: impl AsRef<Path>,
+    examples: &[EvalExample],
+    min_examples: usize,
+    min_accuracy: f32,
+    min_domain_accuracy: f32,
+    min_model_accuracy: f32,
+    min_provider_accuracy: f32,
+    coverage_minimums: EvalCoverageMinimums,
+) -> Result<EvalGateReport> {
+    let report = evaluate_with_heuristic(config, examples).await;
+    finish_eval_gate(
+        dataset_path.as_ref(),
+        examples,
+        report,
+        EvalExecutionArtifact {
+            classifier: "heuristic".to_string(),
+            runtime: "in_memory_routing_engine".to_string(),
+            configured_model: None,
+            adapter_requests: 0,
+            adapter_successes: 0,
+            adapter_fallbacks: 0,
+            adapter_invalid_outputs: 0,
+            heuristic_routes: examples.len() as u64,
+        },
+        min_examples,
+        min_accuracy,
+        min_domain_accuracy,
+        min_model_accuracy,
+        min_provider_accuracy,
+        coverage_minimums,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn configured_eval_gate(
+    config: &RouterConfig,
+    dataset_path: impl AsRef<Path>,
+    examples: &[EvalExample],
+    min_examples: usize,
+    min_accuracy: f32,
+    min_domain_accuracy: f32,
+    min_model_accuracy: f32,
+    min_provider_accuracy: f32,
+    coverage_minimums: EvalCoverageMinimums,
+    max_fallback_rate: f32,
+) -> Result<EvalGateReport> {
+    anyhow::ensure!(
+        (0.0..=1.0).contains(&max_fallback_rate),
+        "configured eval-gate max_fallback_rate must be between 0.0 and 1.0"
+    );
+    let classifier = SmartClassifier::new(config.clone())?;
+    let metrics_handle = classifier.clone();
+    let engine = RoutingEngine::new(config.clone(), classifier);
+    let report = evaluate(&engine, examples).await;
+    let metrics = metrics_handle.judge_metrics();
+    let backend = config.classifier.active_backend();
+    let execution = EvalExecutionArtifact {
+        classifier: backend.config_key().to_string(),
+        runtime: "in_memory_routing_engine".to_string(),
+        configured_model: config.classifier.active_adapter().model,
+        adapter_requests: metrics.requests,
+        adapter_successes: metrics.successes,
+        adapter_fallbacks: metrics.fallbacks,
+        adapter_invalid_outputs: metrics.invalid_outputs,
+        heuristic_routes: metrics.heuristic_routes,
+    };
+    let mut gate = finish_eval_gate(
+        dataset_path.as_ref(),
+        examples,
+        report,
+        execution,
+        min_examples,
+        min_accuracy,
+        min_domain_accuracy,
+        min_model_accuracy,
+        min_provider_accuracy,
+        coverage_minimums,
+    )?;
+    let fallback_rate =
+        gate.execution.adapter_fallbacks as f32 / gate.execution.adapter_requests.max(1) as f32;
+    if fallback_rate > max_fallback_rate {
+        gate.failures.push(format!(
+            "classifier fallback rate {fallback_rate} is above maximum {max_fallback_rate}"
+        ));
+    }
+    if config.classifier.active_backend() != crate::config::ClassifierBackend::Heuristic
+        && gate.execution.adapter_requests != examples.len() as u64
+    {
+        gate.failures.push(format!(
+            "configured classifier made {} adapter request(s) for {} example(s)",
+            gate.execution.adapter_requests,
+            examples.len()
+        ));
+    }
+    gate.pass = gate.failures.is_empty();
+    Ok(gate)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_eval_gate(
+    dataset_path: &Path,
+    examples: &[EvalExample],
+    report: EvalReport,
+    execution: EvalExecutionArtifact,
+    min_examples: usize,
+    min_accuracy: f32,
+    min_domain_accuracy: f32,
+    min_model_accuracy: f32,
+    min_provider_accuracy: f32,
+    coverage_minimums: EvalCoverageMinimums,
+) -> Result<EvalGateReport> {
     anyhow::ensure!(
         (0.0..=1.0).contains(&min_accuracy),
         "eval-gate min_accuracy must be between 0.0 and 1.0"
@@ -394,7 +568,6 @@ pub async fn eval_gate(
         (0.0..=1.0).contains(&min_provider_accuracy),
         "eval-gate min_provider_accuracy must be between 0.0 and 1.0"
     );
-    let report = evaluate_with_heuristic(config, examples).await;
     let mut failures = Vec::new();
     if examples.len() < min_examples {
         failures.push(format!(
@@ -426,12 +599,43 @@ pub async fn eval_gate(
             report.provider_accuracy
         ));
     }
+    for (name, actual, minimum) in [
+        ("domain", report.domain_examples, coverage_minimums.domain),
+        ("model", report.model_examples, coverage_minimums.model),
+        (
+            "provider",
+            report.provider_examples,
+            coverage_minimums.provider,
+        ),
+    ] {
+        if actual < minimum {
+            failures.push(format!(
+                "{name} coverage has {actual} example(s), below minimum {minimum}"
+            ));
+        }
+    }
     Ok(EvalGateReport {
-        schema_version: 1,
+        schema_version: 2,
         dataset: DatasetArtifact {
-            path: dataset_path.as_ref().to_path_buf(),
+            path: dataset_path.to_path_buf(),
             examples: examples.len(),
-            fnv1a_64: eval_gate_fingerprint(dataset_path.as_ref(), examples)?,
+            fnv1a_64: eval_gate_fingerprint(dataset_path, examples)?,
+        },
+        execution,
+        selection: EvalSelectionArtifact {
+            strategy: "full_dataset".to_string(),
+            seed: None,
+            source_examples: examples.len(),
+            evaluated_examples: examples.len(),
+            evaluated_fnv1a_64: format!("{:016x}", fnv1a_64(&serde_json::to_vec(examples)?)),
+        },
+        coverage: EvalCoverageArtifact {
+            min_domain_examples: coverage_minimums.domain,
+            min_model_examples: coverage_minimums.model,
+            min_provider_examples: coverage_minimums.provider,
+            domain_examples: report.domain_examples,
+            model_examples: report.model_examples,
+            provider_examples: report.provider_examples,
         },
         min_examples,
         min_accuracy,
@@ -450,6 +654,42 @@ fn eval_gate_fingerprint(path: &Path, examples: &[EvalExample]) -> Result<String
         Err(_) => serde_json::to_vec(examples)?,
     };
     Ok(format!("{:016x}", fnv1a_64(&bytes)))
+}
+
+pub fn seeded_holdout(
+    examples: &[EvalExample],
+    holdout_ratio: f32,
+    seed: u64,
+) -> Result<Vec<EvalExample>> {
+    anyhow::ensure!(
+        holdout_ratio.is_finite() && holdout_ratio > 0.0 && holdout_ratio <= 1.0,
+        "holdout_ratio must be greater than 0.0 and at most 1.0"
+    );
+    if examples.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut ranked = examples
+        .iter()
+        .cloned()
+        .map(|example| {
+            let mut bytes = seed.to_le_bytes().to_vec();
+            bytes.extend(serde_json::to_vec(&example)?);
+            Ok((fnv1a_64(&bytes), example))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ranked.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.input.cmp(&right.1.input))
+    });
+    let count = ((examples.len() as f32 * holdout_ratio).ceil() as usize)
+        .max(1)
+        .min(examples.len());
+    Ok(ranked
+        .into_iter()
+        .take(count)
+        .map(|(_, example)| example)
+        .collect())
 }
 
 pub async fn calibrate_thresholds(
@@ -802,11 +1042,13 @@ mod tests {
     use super::*;
     use crate::{
         config::{
-            AuthConfig, BudgetConfig, ClassifierConfig, RuntimeConfig, ScoringConfig,
-            TelemetryConfig,
+            AuthConfig, BudgetConfig, ClassifierBackend, ClassifierConfig, RuntimeConfig,
+            ScoringConfig, TelemetryConfig,
         },
         types::{ModelConfig, ProviderConfig, ProviderKind},
     };
+    use axum::{Json, Router, routing::post};
+    use tokio::net::TcpListener;
 
     #[test]
     fn loads_jsonl_examples() {
@@ -938,6 +1180,121 @@ mod tests {
 
         assert!(report.pass);
         assert!(report.failures.is_empty());
+        assert_eq!(report.schema_version, 2);
+        assert_eq!(report.execution.classifier, "heuristic");
+        assert_eq!(report.execution.runtime, "in_memory_routing_engine");
+    }
+
+    #[tokio::test]
+    async fn eval_gate_enforces_explicit_subgroup_sample_minimums() {
+        let config = test_config();
+        let examples = vec![cheap_example()];
+        let report = eval_gate_with_coverage(
+            &config,
+            Path::new("coverage.jsonl"),
+            &examples,
+            1,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            EvalCoverageMinimums {
+                domain: 2,
+                model: 1,
+                provider: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.pass);
+        assert_eq!(report.coverage.min_domain_examples, 2);
+        assert!(
+            report
+                .failures
+                .iter()
+                .any(|failure| { failure == "domain coverage has 1 example(s), below minimum 2" })
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_eval_gate_records_successful_adapter_execution() {
+        let base_url = spawn_classifier_server(
+            r#"{"difficulty":"easy","ambiguity":"low","domain":"coding","modality":"text","safety":"safe","cacheability":"high","latency_sensitivity":"low","reasoning_depth":"shallow","confidence":0.99,"ambiguity_confidence":0.99,"domain_confidence":0.99,"modality_confidence":0.99,"safety_confidence":0.99,"cacheability_confidence":0.99,"latency_sensitivity_confidence":0.99,"reasoning_depth_confidence":0.99}"#,
+        )
+        .await;
+        let mut config = test_config();
+        config.providers[0].base_url = base_url;
+        config.classifier.backend = ClassifierBackend::LlmJudge;
+        config.classifier.adapters.llm_judge.model = Some("cheap".to_string());
+        let examples = vec![cheap_example()];
+
+        let report = configured_eval_gate(
+            &config,
+            Path::new("configured.jsonl"),
+            &examples,
+            1,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            EvalCoverageMinimums {
+                domain: 1,
+                model: 1,
+                provider: 1,
+            },
+            0.0,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            report.pass,
+            "failures={:?} execution={:?}",
+            report.failures, report.execution
+        );
+        assert_eq!(report.execution.classifier, "llm_judge");
+        assert_eq!(report.execution.configured_model.as_deref(), Some("cheap"));
+        assert_eq!(report.execution.adapter_requests, 1);
+        assert_eq!(report.execution.adapter_successes, 1);
+        assert_eq!(report.execution.adapter_fallbacks, 0);
+        assert_eq!(report.execution.heuristic_routes, 0);
+    }
+
+    #[tokio::test]
+    async fn configured_eval_gate_fails_when_adapter_falls_back() {
+        let base_url = spawn_classifier_server("not-json").await;
+        let mut config = test_config();
+        config.providers[0].base_url = base_url;
+        config.classifier.backend = ClassifierBackend::LlmJudge;
+        config.classifier.adapters.llm_judge.model = Some("cheap".to_string());
+
+        let report = configured_eval_gate(
+            &config,
+            Path::new("configured.jsonl"),
+            &[cheap_example()],
+            1,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            EvalCoverageMinimums::default(),
+            0.0,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.pass);
+        assert_eq!(report.execution.adapter_requests, 1);
+        assert_eq!(report.execution.adapter_fallbacks, 1);
+        assert_eq!(report.execution.adapter_invalid_outputs, 1);
+        assert_eq!(report.execution.heuristic_routes, 1);
+        assert!(
+            report
+                .failures
+                .iter()
+                .any(|failure| failure.contains("fallback rate"))
+        );
     }
 
     #[tokio::test]
@@ -1023,6 +1380,72 @@ mod tests {
                 .map(|example| &example.input)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn seeded_holdout_is_reproducible_and_seed_sensitive() {
+        let examples = (0..20)
+            .map(|index| EvalExample {
+                input: format!("example-{index}"),
+                expected_tier: ExpectedTier::Balanced,
+                expected_domain: None,
+                expected_model: None,
+                expected_provider: None,
+                policy: RouterPolicy::Balanced,
+                allowed_models: vec![],
+                allowed_providers: vec![],
+                required_capabilities: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+
+        let first = seeded_holdout(&examples, 0.2, 7).unwrap();
+        let repeat = seeded_holdout(&examples, 0.2, 7).unwrap();
+        let another_seed = seeded_holdout(&examples, 0.2, 8).unwrap();
+
+        assert_eq!(first.len(), 4);
+        assert_eq!(
+            first.iter().map(|item| &item.input).collect::<Vec<_>>(),
+            repeat.iter().map(|item| &item.input).collect::<Vec<_>>()
+        );
+        assert_ne!(
+            first.iter().map(|item| &item.input).collect::<Vec<_>>(),
+            another_seed
+                .iter()
+                .map(|item| &item.input)
+                .collect::<Vec<_>>()
+        );
+        assert!(seeded_holdout(&examples, 0.0, 7).is_err());
+    }
+
+    fn cheap_example() -> EvalExample {
+        EvalExample {
+            input: "Fix typo in Rust docs".to_string(),
+            expected_tier: ExpectedTier::Cheap,
+            expected_domain: Some(DomainLabel::Coding),
+            expected_model: Some("cheap".to_string()),
+            expected_provider: Some("local".to_string()),
+            policy: RouterPolicy::CostEfficient,
+            allowed_models: vec![],
+            allowed_providers: vec![],
+            required_capabilities: Vec::new(),
+        }
+    }
+
+    async fn spawn_classifier_server(content: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || async move {
+                Json(serde_json::json!({
+                    "choices": [{"message": {"content": content}}]
+                }))
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{address}")
     }
 
     fn test_config() -> RouterConfig {

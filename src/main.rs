@@ -1,24 +1,22 @@
 use anyhow::Result;
 use autohand_router::{
     RouterConfig,
-    accounting::BudgetAccounting,
     classifier::SmartClassifier,
     config_schema,
     conformance::{run_provider_conformance, run_provider_conformance_matrix},
-    eval::{calibrate_thresholds, eval_gate, evaluate, load_jsonl, optimize_with_artifact},
+    eval::{
+        EvalCoverageMinimums, calibrate_thresholds, configured_eval_gate, eval_gate_with_coverage,
+        evaluate, load_jsonl, optimize_with_artifact, seeded_holdout,
+    },
     judge::run_judge_smoke,
     load::{
         LoadSuiteConfig, LoadTestConfig, default_load_suite_scenarios, default_multimodel_body,
         run_load_suite, run_load_test,
     },
     openapi,
-    provider::ProviderClient,
     router::RoutingEngine,
-    semantic_cache::SemanticCache,
-    server::{self, AppState, BackgroundTasks, IngressController, RequestAuthenticator},
-    shadow_eval::ShadowEvalLogger,
-    sticky::StickyRoutingStore,
-    telemetry::DecisionLogger,
+    runtime_gate::run_runtime_gate,
+    server::{self, AppState},
     types::{ClassifyResponse, MultimodelRequest, RouterPolicy, SelectedClassifications},
 };
 use clap::{Parser, Subcommand};
@@ -76,6 +74,43 @@ enum Command {
         min_model_accuracy: f32,
         #[arg(long, default_value_t = 0.0)]
         min_provider_accuracy: f32,
+        #[arg(long, default_value_t = 1)]
+        min_domain_examples: usize,
+        #[arg(long, default_value_t = 1)]
+        min_model_examples: usize,
+        #[arg(long, default_value_t = 1)]
+        min_provider_examples: usize,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    ConfiguredEvalGate {
+        dataset: PathBuf,
+        #[arg(long, default_value_t = 10)]
+        min_examples: usize,
+        #[arg(long, default_value_t = 0.90)]
+        min_accuracy: f32,
+        #[arg(long, default_value_t = 0.90)]
+        min_domain_accuracy: f32,
+        #[arg(long, default_value_t = 0.0)]
+        min_model_accuracy: f32,
+        #[arg(long, default_value_t = 0.0)]
+        min_provider_accuracy: f32,
+        #[arg(long, default_value_t = 1)]
+        min_domain_examples: usize,
+        #[arg(long, default_value_t = 1)]
+        min_model_examples: usize,
+        #[arg(long, default_value_t = 1)]
+        min_provider_examples: usize,
+        #[arg(long, default_value_t = 0.0)]
+        max_fallback_rate: f32,
+        #[arg(long, default_value_t = 0.20)]
+        holdout_ratio: f32,
+        #[arg(long, default_value_t = 0xA17E_2026)]
+        holdout_seed: u64,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    RuntimeGate {
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -215,25 +250,8 @@ async fn main() -> Result<()> {
         }
         Command::Serve => {
             let config = RouterConfig::from_path(&cli.config)?;
-            let classifier = SmartClassifier::new(config.clone())?;
-            let engine = RoutingEngine::new(config.clone(), classifier);
             let bind = config.bind.clone();
-            let state = AppState {
-                engine,
-                auth: RequestAuthenticator::from_config(&config)?,
-                providers: ProviderClient::new(&config)?,
-                metrics: Default::default(),
-                accounting: BudgetAccounting::from_budget_config(&config.budget)?,
-                telemetry: DecisionLogger::new(&config.telemetry),
-                semantic_cache: SemanticCache::from_config(&config.cache.semantic)?,
-                shadow_eval: ShadowEvalLogger::new(&config.shadow_eval),
-                sticky_routing: StickyRoutingStore::from_config(&config.sticky_routing)?,
-                ingress: IngressController::new(&config.runtime.ingress),
-                background_tasks: BackgroundTasks::new(
-                    config.shadow_eval.max_pending_tasks,
-                    config.shadow_eval.max_concurrent_tasks,
-                ),
-            };
+            let state = AppState::from_config(&config)?;
             server::serve(state, &bind).await
         }
         Command::Classify { input } => {
@@ -288,11 +306,14 @@ async fn main() -> Result<()> {
             min_domain_accuracy,
             min_model_accuracy,
             min_provider_accuracy,
+            min_domain_examples,
+            min_model_examples,
+            min_provider_examples,
             output,
         } => {
             let config = RouterConfig::from_path(&cli.config)?;
             let examples = load_jsonl(&dataset)?;
-            let report = eval_gate(
+            let report = eval_gate_with_coverage(
                 &config,
                 &dataset,
                 &examples,
@@ -301,6 +322,11 @@ async fn main() -> Result<()> {
                 min_domain_accuracy,
                 min_model_accuracy,
                 min_provider_accuracy,
+                EvalCoverageMinimums {
+                    domain: min_domain_examples,
+                    model: min_model_examples,
+                    provider: min_provider_examples,
+                },
             )
             .await?;
             if let Some(path) = output {
@@ -310,6 +336,69 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             if !report.pass {
                 anyhow::bail!("eval-gate failed: {}", report.failures.join("; "));
+            }
+            Ok(())
+        }
+        Command::ConfiguredEvalGate {
+            dataset,
+            min_examples,
+            min_accuracy,
+            min_domain_accuracy,
+            min_model_accuracy,
+            min_provider_accuracy,
+            min_domain_examples,
+            min_model_examples,
+            min_provider_examples,
+            max_fallback_rate,
+            holdout_ratio,
+            holdout_seed,
+            output,
+        } => {
+            let config = RouterConfig::from_path(&cli.config)?;
+            let examples = load_jsonl(&dataset)?;
+            let holdout = seeded_holdout(&examples, holdout_ratio, holdout_seed)?;
+            let mut report = configured_eval_gate(
+                &config,
+                &dataset,
+                &holdout,
+                min_examples,
+                min_accuracy,
+                min_domain_accuracy,
+                min_model_accuracy,
+                min_provider_accuracy,
+                EvalCoverageMinimums {
+                    domain: min_domain_examples,
+                    model: min_model_examples,
+                    provider: min_provider_examples,
+                },
+                max_fallback_rate,
+            )
+            .await?;
+            report.selection.strategy = format!("seeded_holdout_{holdout_ratio:.4}");
+            report.selection.seed = Some(holdout_seed);
+            report.selection.source_examples = examples.len();
+            if let Some(path) = output {
+                fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+                println!("wrote configured eval-gate report {}", path.display());
+            }
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.pass {
+                anyhow::bail!(
+                    "configured eval-gate failed: {}",
+                    report.failures.join("; ")
+                );
+            }
+            Ok(())
+        }
+        Command::RuntimeGate { output } => {
+            let report = run_runtime_gate().await?;
+            if let Some(path) = output {
+                fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+                println!("wrote runtime-gate report {}", path.display());
+            }
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.pass {
+                anyhow::bail!("runtime-gate failed: {}", report.failures.join("; "));
             }
             Ok(())
         }

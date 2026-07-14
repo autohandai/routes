@@ -69,6 +69,9 @@ tokio::task_local! {
     static REQUEST_BUDGET_SCOPE: String;
 }
 
+const REJECTED_BODY_DRAIN_OVERAGE_BYTES: usize = 64 * 1024;
+const REJECTED_BODY_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+
 #[derive(Clone)]
 enum ShadowEvalDispatch {
     Chat {
@@ -1451,7 +1454,7 @@ async fn openapi_json() -> Json<Value> {
 
 async fn request_context(
     State(state): State<Arc<AppState>>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
     let started = Instant::now();
@@ -1484,13 +1487,17 @@ async fn request_context(
 
     if !public {
         let limit = request_body_limit(&state.ingress.config, request.uri().path());
-        if request
+        let content_length = request
             .headers()
             .get(header::CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<usize>().ok())
-            .is_some_and(|length| length > limit)
-        {
+            .and_then(|value| value.parse::<usize>().ok());
+        if content_length.is_some_and(|length| length > limit) {
+            if content_length.is_some_and(|length| {
+                length <= limit.saturating_add(REJECTED_BODY_DRAIN_OVERAGE_BYTES)
+            }) {
+                drain_rejected_request_body(&mut request).await;
+            }
             let mut response = invalid_request_status_response(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 &format!("request body exceeds configured {limit}-byte limit"),
@@ -1600,6 +1607,19 @@ fn request_body_limit(config: &IngressConfig, path: &str) -> usize {
     } else {
         config.max_json_body_bytes
     }
+}
+
+async fn drain_rejected_request_body(request: &mut Request<Body>) {
+    let body = std::mem::replace(request.body_mut(), Body::empty());
+    let mut stream = body.into_data_stream();
+    let drain = async move {
+        while let Some(chunk) = stream.next().await {
+            if chunk.is_err() {
+                break;
+            }
+        }
+    };
+    let _ = timeout(REJECTED_BODY_DRAIN_TIMEOUT, drain).await;
 }
 
 fn with_body_idle_timeout(request: Request<Body>, idle_timeout: Duration) -> Request<Body> {

@@ -447,7 +447,9 @@ mod tests {
     async fn file_accounting_serializes_multithreaded_contention() {
         let path = temp_path("contention");
         let mut budget = file_budget(&path, 16);
-        budget.accounting.lock_timeout_ms = 5_000;
+        // This test proves serialization, not timeout behavior. Give heavily loaded
+        // hosted runners enough time for every fsync-backed writer to take the lock.
+        budget.accounting.lock_timeout_ms = 30_000;
         let reservation = BudgetReservation::new(&test_model(), 10, 0);
         let handles = (0..16)
             .map(|_| {

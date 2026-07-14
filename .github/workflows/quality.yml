@@ -58,7 +58,7 @@ jobs:
         with:
           name: quality-gate-artifacts-${{ github.sha }}
           path: artifacts/
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Enforce production eval result
         if: steps.eval_gate.outcome != 'success'

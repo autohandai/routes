@@ -196,10 +196,19 @@ fn parent_dir(path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
+#[cfg(not(windows))]
 fn sync_parent_dir(parent: &Path, purpose: &str) -> Result<()> {
     File::open(parent)
         .and_then(|directory| directory.sync_all())
         .with_context(|| format!("failed to sync {purpose} dir {}", parent.display()))
+}
+
+#[cfg(windows)]
+fn sync_parent_dir(_parent: &Path, _purpose: &str) -> Result<()> {
+    // `std::fs::File::open` cannot open directories on Windows. The temporary
+    // file is already flushed before the atomic rename, and std has no portable
+    // Windows API for flushing the parent directory's metadata.
+    Ok(())
 }
 
 fn unix_millis() -> u64 {
@@ -278,6 +287,17 @@ mod tests {
                 .flatten()
                 .all(|entry| !entry.file_name().to_string_lossy().starts_with(&prefix))
         );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_state() {
+        let path = temp_path("replace-existing");
+        fs::write(&path, b"previous-state").unwrap();
+
+        atomic_write(&path, b"replacement-state", "test").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"replacement-state");
         let _ = fs::remove_file(path);
     }
 

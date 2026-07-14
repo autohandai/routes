@@ -14,7 +14,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.0
 
       - name: Install Rust quality components
         run: rustup component add rustfmt clippy
@@ -54,7 +54,7 @@ jobs:
 
       - name: Upload eval and contract artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: quality-gate-artifacts-${{ github.sha }}
           path: artifacts/
@@ -84,7 +84,7 @@ jobs:
             --expected-revision "${GITHUB_SHA}"
 
       - name: Upload revision-linked release evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: controlled-release-evidence-${{ github.sha }}
           path: |

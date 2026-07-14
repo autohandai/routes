@@ -21,7 +21,7 @@ jq -e '
   and (.paths["/v1/router/multimodel"].post != null)
   and (.paths["/v1/chat/completions"].post != null)
   and (.paths["/v1/responses"].post != null)
-  and (.components.schemas.OpenAiErrorResponse != null)
+  and (.components.schemas.RouterError != null)
 ' "$output_dir/openapi.json" >/dev/null
 
 jq -e '

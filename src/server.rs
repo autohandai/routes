@@ -2036,7 +2036,7 @@ fn process_memory_bytes() -> (Option<u64>, Option<u64>) {
                 Some(kib.saturating_mul(1024))
             })
         };
-        return (parse("VmRSS:"), parse("VmHWM:"));
+        (parse("VmRSS:"), parse("VmHWM:"))
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -4072,10 +4072,11 @@ async fn parse_audio_multipart(
             if let Ok(value) = std::str::from_utf8(&data) {
                 route_text = value.to_string();
             }
-        } else if name == "file" && route_text.is_empty() {
-            if let Some(file_name) = &file_name {
-                route_text = file_name.clone();
-            }
+        } else if name == "file"
+            && route_text.is_empty()
+            && let Some(file_name) = &file_name
+        {
+            route_text = file_name.clone();
         }
 
         parts.push(OpenAiMultipartPart {
@@ -4427,10 +4428,10 @@ fn eligible_route_models(
         {
             continue;
         }
-        if let Some(model) = config.find_model(&candidate.model).cloned() {
-            if model_supports_endpoint(config, &model, endpoint) {
-                models.push(model);
-            }
+        if let Some(model) = config.find_model(&candidate.model).cloned()
+            && model_supports_endpoint(config, &model, endpoint)
+        {
+            models.push(model);
         }
     }
     Some(models)
@@ -5794,10 +5795,10 @@ async fn upstream_response(
             Ok(bytes) => {
                 record_final_http_outcome(&state, endpoint, model, status);
                 if status.is_success() {
-                    if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-                        if let Some(usage) = usage_from_value(&value) {
-                            state.metrics.record_usage(model, usage);
-                        }
+                    if let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+                        && let Some(usage) = usage_from_value(&value)
+                    {
+                        state.metrics.record_usage(model, usage);
                     }
                     if let Some(write) = semantic_cache_write {
                         state

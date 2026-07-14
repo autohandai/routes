@@ -1072,10 +1072,10 @@ fn authorized_provider_request(
             .as_ref()
             .and_then(|key| std::env::var(key).ok())
     });
-    if let Some(api_key) = api_key {
-        if !api_key.is_empty() {
-            builder = builder.bearer_auth(api_key);
-        }
+    if let Some(api_key) = api_key
+        && !api_key.is_empty()
+    {
+        builder = builder.bearer_auth(api_key);
     }
     for (key, value) in default_headers {
         builder = builder.header(*key, *value);

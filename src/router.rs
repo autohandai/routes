@@ -234,10 +234,10 @@ where
             .filter(|model| model_allowed_by_request(model, request))
             .collect::<Vec<_>>();
 
-        if candidates.is_empty() {
-            if let Some(default) = self.allowed_fallback_model(request, default_model) {
-                candidates.push(default);
-            }
+        if candidates.is_empty()
+            && let Some(default) = self.allowed_fallback_model(request, default_model)
+        {
+            candidates.push(default);
         }
         candidates
     }

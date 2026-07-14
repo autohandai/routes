@@ -108,9 +108,10 @@ impl ModelCapability {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RouterPolicy {
+    #[default]
     Balanced,
     LowestCostAcceptable,
     #[serde(alias = "fast")]
@@ -128,12 +129,6 @@ pub enum RouterPolicy {
     CapabilityHeavy,
     #[serde(alias = "domain")]
     DomainSkills,
-}
-
-impl Default for RouterPolicy {
-    fn default() -> Self {
-        Self::Balanced
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,9 +176,10 @@ pub struct ProviderConfig {
     pub extra_headers: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
+    #[default]
     OpenAiCompatible,
     Ollama,
     OllamaNative,
@@ -194,12 +190,6 @@ pub enum ProviderKind {
     #[serde(rename = "openrouter", alias = "open_router")]
     OpenRouter,
     CloudflareAiGateway,
-}
-
-impl Default for ProviderKind {
-    fn default() -> Self {
-        Self::OpenAiCompatible
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -480,17 +470,12 @@ pub struct ProviderRouterResponse {
     pub confidence: f32,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LegacyRouterMode {
+    #[default]
     Balanced,
     Aggressive,
-}
-
-impl Default for LegacyRouterMode {
-    fn default() -> Self {
-        Self::Balanced
-    }
 }
 
 impl LegacyRouterMode {

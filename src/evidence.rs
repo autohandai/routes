@@ -492,10 +492,10 @@ fn peak_rss_observation() -> ResourceObservation {
                     Some(kib.saturating_mul(1024))
                 })
             });
-        return ResourceObservation {
+        ResourceObservation {
             peak_rss_bytes: peak,
             method: "linux_proc_self_status_vmhwm".to_string(),
-        };
+        }
     }
     #[cfg(not(target_os = "linux"))]
     ResourceObservation {

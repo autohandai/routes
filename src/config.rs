@@ -129,9 +129,10 @@ pub struct BudgetAccountingConfig {
     pub scope: BudgetAccountingScope,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetAccountingBackend {
+    #[default]
     Process,
     File,
 }
@@ -245,9 +246,10 @@ pub struct StickyRoutingConfig {
     pub lock_timeout_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StickyRoutingBackend {
+    #[default]
     Memory,
     File,
 }
@@ -283,9 +285,10 @@ pub struct SemanticCacheConfig {
     pub lock_timeout_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticCacheBackend {
+    #[default]
     Memory,
     File,
 }
@@ -703,12 +706,6 @@ impl Default for SemanticCacheConfig {
     }
 }
 
-impl Default for SemanticCacheBackend {
-    fn default() -> Self {
-        Self::Memory
-    }
-}
-
 impl Default for ShadowEvalConfig {
     fn default() -> Self {
         Self {
@@ -772,12 +769,6 @@ impl Default for StickyRoutingConfig {
             file_path: None,
             lock_timeout_ms: default_sticky_routing_lock_timeout_ms(),
         }
-    }
-}
-
-impl Default for StickyRoutingBackend {
-    fn default() -> Self {
-        Self::Memory
     }
 }
 
@@ -949,12 +940,6 @@ impl Default for BudgetAccountingConfig {
             semantics: BudgetAccountingSemantics::LogicalRequest,
             scope: BudgetAccountingScope::Global,
         }
-    }
-}
-
-impl Default for BudgetAccountingBackend {
-    fn default() -> Self {
-        Self::Process
     }
 }
 

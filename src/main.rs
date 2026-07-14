@@ -352,8 +352,34 @@ impl From<RouterPolicyArg> for RouterPolicy {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+const ROUTES_MAIN_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+fn main() -> Result<()> {
+    // Debug builds of the async command dispatcher exceed Windows' 1 MiB
+    // default main-thread stack, so run it on an explicitly sized stack.
+    std::thread::Builder::new()
+        .name("routes-main".to_string())
+        .stack_size(ROUTES_MAIN_STACK_BYTES)
+        .spawn(runtime_main)?
+        .join()
+        .map_err(|panic| {
+            let message = panic
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown panic");
+            anyhow::anyhow!("routes runtime thread panicked: {message}")
+        })?
+}
+
+fn runtime_main() -> Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<()> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .with(tracing_subscriber::fmt::layer())

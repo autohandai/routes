@@ -71,23 +71,30 @@ Use `router-local` for local-first coding work, `router-privacy` for sensitive r
 
 ## Install Routes
 
-The executable is named `routes`. It can be installed from crates.io, downloaded from a GitHub release archive, or built with Cargo from source.
+The executable is named `routes`. The quickest installation is the current crates.io canary:
+
+```bash
+cargo install autohandai-router --version 0.1.0-canary.3 --locked
+routes --help
+```
+
+The crate is published as [`autohandai-router`](https://crates.io/crates/autohandai-router). Cargo installs its `routes` executable. If you do not have Rust and Cargo, download a ready-to-run archive from [GitHub Releases](https://github.com/autohandai/routes/releases).
 
 ### Prebuilt executables
 
 Release tags publish archives for Linux, macOS, and Windows:
 
-| Platform            | Release asset                            |
-| ------------------- | ---------------------------------------- |
-| Linux x86_64        | `routes-x86_64-unknown-linux-gnu.tar.gz` |
-| macOS Apple Silicon | `routes-aarch64-apple-darwin.tar.gz`     |
-| macOS Intel         | `routes-x86_64-apple-darwin.tar.gz`      |
-| Windows x86_64      | `routes-x86_64-pc-windows-msvc.zip`      |
+| Platform            | Current canary download                                                                                                                               |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linux x86_64        | [`routes-x86_64-unknown-linux-gnu.tar.gz`](https://github.com/autohandai/routes/releases/download/v0.1.0-canary.3/routes-x86_64-unknown-linux-gnu.tar.gz) |
+| macOS Apple Silicon | [`routes-aarch64-apple-darwin.tar.gz`](https://github.com/autohandai/routes/releases/download/v0.1.0-canary.3/routes-aarch64-apple-darwin.tar.gz)         |
+| macOS Intel         | [`routes-x86_64-apple-darwin.tar.gz`](https://github.com/autohandai/routes/releases/download/v0.1.0-canary.3/routes-x86_64-apple-darwin.tar.gz)           |
+| Windows x86_64      | [`routes-x86_64-pc-windows-msvc.zip`](https://github.com/autohandai/routes/releases/download/v0.1.0-canary.3/routes-x86_64-pc-windows-msvc.zip)           |
 
 Install on Linux:
 
 ```bash
-curl -L https://github.com/autohandai/routes/releases/latest/download/routes-x86_64-unknown-linux-gnu.tar.gz -o routes.tar.gz
+curl -L https://github.com/autohandai/routes/releases/download/v0.1.0-canary.3/routes-x86_64-unknown-linux-gnu.tar.gz -o routes.tar.gz
 tar -xzf routes.tar.gz
 sudo install -m 755 routes-x86_64-unknown-linux-gnu/routes /usr/local/bin/routes
 routes --help
@@ -96,7 +103,7 @@ routes --help
 Install on macOS Apple Silicon:
 
 ```bash
-curl -L https://github.com/autohandai/routes/releases/latest/download/routes-aarch64-apple-darwin.tar.gz -o routes.tar.gz
+curl -L https://github.com/autohandai/routes/releases/download/v0.1.0-canary.3/routes-aarch64-apple-darwin.tar.gz -o routes.tar.gz
 tar -xzf routes.tar.gz
 sudo install -m 755 routes-aarch64-apple-darwin/routes /usr/local/bin/routes
 routes --help
@@ -107,26 +114,20 @@ Install on macOS Intel by replacing `aarch64-apple-darwin` with `x86_64-apple-da
 Install on Windows PowerShell:
 
 ```powershell
-Invoke-WebRequest https://github.com/autohandai/routes/releases/latest/download/routes-x86_64-pc-windows-msvc.zip -OutFile routes.zip
+Invoke-WebRequest https://github.com/autohandai/routes/releases/download/v0.1.0-canary.3/routes-x86_64-pc-windows-msvc.zip -OutFile routes.zip
 Expand-Archive .\routes.zip -DestinationPath .
 .\routes-x86_64-pc-windows-msvc\routes.exe --help
 ```
 
 Move `routes.exe` into a directory on your `PATH` when you want it available from any terminal.
 
-### Cargo install
+### Other Cargo installation options
 
 Cargo users can install the latest stable release from crates.io:
 
 ```bash
-cargo install autohand-router --locked
+cargo install autohandai-router --locked
 routes --help
-```
-
-Install a specific canary when testing an upcoming release:
-
-```bash
-cargo install autohand-router --version 0.1.0-canary.2 --locked
 ```
 
 The exact `.crate` source package published to crates.io is also attached to the matching GitHub Release. To build directly from the repository instead:
@@ -151,7 +152,7 @@ Once `routes serve` is running, any coding agent that supports an OpenAI-compati
 
 The version in `Cargo.toml` and the release tag must match exactly. Stable tags such as `v0.2.0` publish a normal crates.io version and become the latest GitHub Release. Canary tags such as `v0.2.0-canary.1` publish a crates.io prerelease and a GitHub prerelease without replacing the latest stable release.
 
-Every release publishes the `autohand-router` crate to crates.io, generates GitHub release notes, and attaches the matching `.crate` source package, `routes-<tag>-CHANGELOG.md`, `routes-<tag>-RELEASE_NOTES.md`, and platform archives for Linux, macOS, and Windows.
+Every release publishes the `autohandai-router` crate to crates.io, generates GitHub release notes, and attaches the matching `.crate` source package, `routes-<tag>-CHANGELOG.md`, `routes-<tag>-RELEASE_NOTES.md`, and platform archives for Linux, macOS, and Windows.
 
 ## Get started in 10 minutes
 

@@ -1,6 +1,6 @@
 [package]
 name = "autohandai-router"
-version = "0.1.0-canary.4"
+version = "0.1.0-canary.5"
 edition = "2024"
 rust-version = "1.96"
 description = "OpenAI-compatible routing layer for multi-model, multi-provider inference"

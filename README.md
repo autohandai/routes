@@ -74,7 +74,7 @@ Use `router-local` for local-first coding work, `router-privacy` for sensitive r
 The executable is named `routes`. The quickest installation is the current crates.io canary:
 
 ```bash
-cargo install autohandai-router --version 0.1.0-canary.4 --locked
+cargo install autohandai-router --version 0.1.0-canary.5 --locked
 routes --help
 ```
 
@@ -86,15 +86,15 @@ Release tags publish archives for Linux, macOS, and Windows:
 
 | Platform            | Current canary download                                                                                                                               |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Linux x86_64        | [`routes-x86_64-unknown-linux-gnu.tar.gz`](https://github.com/autohandai/routes/releases/download/v0.1.0-canary.4/routes-x86_64-unknown-linux-gnu.tar.gz) |
-| macOS Apple Silicon | [`routes-aarch64-apple-darwin.tar.gz`](https://github.com/autohandai/routes/releases/download/v0.1.0-canary.4/routes-aarch64-apple-darwin.tar.gz)         |
-| macOS Intel         | [`routes-x86_64-apple-darwin.tar.gz`](https://github.com/autohandai/routes/releases/download/v0.1.0-canary.4/routes-x86_64-apple-darwin.tar.gz)           |
-| Windows x86_64      | [`routes-x86_64-pc-windows-msvc.zip`](https://github.com/autohandai/routes/releases/download/v0.1.0-canary.4/routes-x86_64-pc-windows-msvc.zip)           |
+| Linux x86_64        | [`routes-x86_64-unknown-linux-gnu.tar.gz`](https://github.com/autohandai/routes/releases/download/v0.1.0-canary.5/routes-x86_64-unknown-linux-gnu.tar.gz) |
+| macOS Apple Silicon | [`routes-aarch64-apple-darwin.tar.gz`](https://github.com/autohandai/routes/releases/download/v0.1.0-canary.5/routes-aarch64-apple-darwin.tar.gz)         |
+| macOS Intel         | [`routes-x86_64-apple-darwin.tar.gz`](https://github.com/autohandai/routes/releases/download/v0.1.0-canary.5/routes-x86_64-apple-darwin.tar.gz)           |
+| Windows x86_64      | [`routes-x86_64-pc-windows-msvc.zip`](https://github.com/autohandai/routes/releases/download/v0.1.0-canary.5/routes-x86_64-pc-windows-msvc.zip)           |
 
 Install on Linux:
 
 ```bash
-curl -L https://github.com/autohandai/routes/releases/download/v0.1.0-canary.4/routes-x86_64-unknown-linux-gnu.tar.gz -o routes.tar.gz
+curl -L https://github.com/autohandai/routes/releases/download/v0.1.0-canary.5/routes-x86_64-unknown-linux-gnu.tar.gz -o routes.tar.gz
 tar -xzf routes.tar.gz
 sudo install -m 755 routes-x86_64-unknown-linux-gnu/routes /usr/local/bin/routes
 routes --help
@@ -103,7 +103,7 @@ routes --help
 Install on macOS Apple Silicon:
 
 ```bash
-curl -L https://github.com/autohandai/routes/releases/download/v0.1.0-canary.4/routes-aarch64-apple-darwin.tar.gz -o routes.tar.gz
+curl -L https://github.com/autohandai/routes/releases/download/v0.1.0-canary.5/routes-aarch64-apple-darwin.tar.gz -o routes.tar.gz
 tar -xzf routes.tar.gz
 sudo install -m 755 routes-aarch64-apple-darwin/routes /usr/local/bin/routes
 routes --help
@@ -114,7 +114,7 @@ Install on macOS Intel by replacing `aarch64-apple-darwin` with `x86_64-apple-da
 Install on Windows PowerShell:
 
 ```powershell
-Invoke-WebRequest https://github.com/autohandai/routes/releases/download/v0.1.0-canary.4/routes-x86_64-pc-windows-msvc.zip -OutFile routes.zip
+Invoke-WebRequest https://github.com/autohandai/routes/releases/download/v0.1.0-canary.5/routes-x86_64-pc-windows-msvc.zip -OutFile routes.zip
 Expand-Archive .\routes.zip -DestinationPath .
 .\routes-x86_64-pc-windows-msvc\routes.exe --help
 ```

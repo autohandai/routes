@@ -71,7 +71,7 @@ Use `router-local` for local-first coding work, `router-privacy` for sensitive r
 
 ## Install Routes
 
-The executable is named `routes`. It can be installed from GitHub release archives or built with Cargo from source.
+The executable is named `routes`. It can be installed from crates.io, downloaded from a GitHub release archive, or built with Cargo from source.
 
 ### Prebuilt executables
 
@@ -116,7 +116,20 @@ Move `routes.exe` into a directory on your `PATH` when you want it available fro
 
 ### Cargo install
 
-Cargo users can install the same executable directly from the repository:
+Cargo users can install the latest stable release from crates.io:
+
+```bash
+cargo install autohand-router --locked
+routes --help
+```
+
+Install a specific canary when testing an upcoming release:
+
+```bash
+cargo install autohand-router --version 0.1.0-canary.1 --locked
+```
+
+The exact `.crate` source package published to crates.io is also attached to the matching GitHub Release. To build directly from the repository instead:
 
 ```bash
 cargo install --git https://github.com/autohandai/routes --bin routes --locked
@@ -136,7 +149,9 @@ Once `routes serve` is running, any coding agent that supports an OpenAI-compati
 
 ### Release channels
 
-GitHub Actions publishes stable releases by default for tags such as `v0.2.0`. Alpha releases use tags such as `v0.2.0-alpha.1` or the manual release workflow's `alpha` channel. Every release generates GitHub release notes and attaches `routes-<tag>-CHANGELOG.md` plus `routes-<tag>-RELEASE_NOTES.md` alongside the platform archives.
+The version in `Cargo.toml` and the release tag must match exactly. Stable tags such as `v0.2.0` publish a normal crates.io version and become the latest GitHub Release. Canary tags such as `v0.2.0-canary.1` publish a crates.io prerelease and a GitHub prerelease without replacing the latest stable release.
+
+Every release publishes the `autohand-router` crate to crates.io, generates GitHub release notes, and attaches the matching `.crate` source package, `routes-<tag>-CHANGELOG.md`, `routes-<tag>-RELEASE_NOTES.md`, and platform archives for Linux, macOS, and Windows.
 
 ## Get started in 10 minutes
 

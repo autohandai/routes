@@ -1,10 +1,10 @@
-name: Release binaries
+name: Release
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to publish, for example v0.2.0 or v0.2.0-alpha.1"
+        description: "Version-matched release tag, for example v0.2.0 or v0.2.0-canary.1"
         required: true
         type: string
       release_channel:
@@ -14,22 +14,63 @@ on:
         type: choice
         options:
           - stable
-          - alpha
+          - canary
   push:
     tags:
       - "v*"
 
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  cancel-in-progress: false
+
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   quality:
     name: Release-blocking quality gates
     uses: ./.github/workflows/quality.yml
 
+  metadata:
+    name: Resolve release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+      channel: ${{ steps.metadata.outputs.channel }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
+      make_latest: ${{ steps.metadata.outputs.make_latest }}
+      crate_name: ${{ steps.metadata.outputs.crate_name }}
+      crate_version: ${{ steps.metadata.outputs.crate_version }}
+      crate_file: ${{ steps.metadata.outputs.crate_file }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Validate tag, channel, and crate version
+        id: metadata
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_CHANNEL: ${{ inputs.release_channel }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
+            requested_channel="$INPUT_CHANNEL"
+          else
+            tag="$REF_NAME"
+            requested_channel=""
+          fi
+
+          ./scripts/release-metadata.sh "$tag" "$requested_channel" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.target }}
-    needs: quality
+    needs:
+      - quality
+      - metadata
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -85,13 +126,93 @@ jobs:
           path: dist/routes-${{ matrix.target }}.*
           if-no-files-found: error
 
+  crate:
+    name: Publish crates.io package and source artifact
+    needs:
+      - quality
+      - metadata
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Package and verify crate
+        env:
+          CRATE_FILE: ${{ needs.metadata.outputs.crate_file }}
+        run: |
+          set -euo pipefail
+          cargo package --locked
+          mkdir -p dist
+          cp "target/package/$CRATE_FILE" "dist/$CRATE_FILE"
+
+      - name: Publish crate to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CRATE_NAME: ${{ needs.metadata.outputs.crate_name }}
+          CRATE_VERSION: ${{ needs.metadata.outputs.crate_version }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "CARGO_REGISTRY_TOKEN is not configured" >&2
+            exit 1
+          fi
+
+          status="$(
+            curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+              --user-agent "autohand-routes-release/${CRATE_VERSION} (https://github.com/autohandai/routes)" \
+              "https://crates.io/api/v1/crates/${CRATE_NAME}/${CRATE_VERSION}"
+          )"
+
+          case "$status" in
+            200)
+              echo "${CRATE_NAME} ${CRATE_VERSION} is already published; continuing"
+              ;;
+            404)
+              cargo publish --locked
+              ;;
+            *)
+              echo "crates.io version check returned HTTP ${status}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Download canonical crates.io package
+        env:
+          CRATE_NAME: ${{ needs.metadata.outputs.crate_name }}
+          CRATE_VERSION: ${{ needs.metadata.outputs.crate_version }}
+          CRATE_FILE: ${{ needs.metadata.outputs.crate_file }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            --retry 12 --retry-all-errors --retry-delay 5 \
+            --user-agent "autohand-routes-release/${CRATE_VERSION} (https://github.com/autohandai/routes)" \
+            --output "dist/$CRATE_FILE" \
+            "https://static.crates.io/crates/${CRATE_NAME}/${CRATE_FILE}"
+          sha256sum "dist/$CRATE_FILE"
+
+      - name: Upload crate artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ${{ needs.metadata.outputs.crate_file }}
+          path: dist/${{ needs.metadata.outputs.crate_file }}
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub release
     needs:
       - quality
+      - metadata
       - build
+      - crate
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
 
     steps:
       - name: Checkout release source
@@ -105,47 +226,19 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Resolve release metadata
-        id: metadata
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag="${{ inputs.tag }}"
-            channel="${{ inputs.release_channel }}"
-          else
-            tag="${GITHUB_REF_NAME}"
-            channel="stable"
-          fi
-
-          if [[ "$tag" == *"-alpha"* ]]; then
-            channel="alpha"
-          fi
-
-          if [ "$channel" = "alpha" ]; then
-            prerelease="true"
-            make_latest="false"
-          else
-            prerelease="false"
-            make_latest="true"
-          fi
-
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
-          echo "make_latest=$make_latest" >> "$GITHUB_OUTPUT"
-
       - name: Generate changelog
         id: changelog
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          RELEASE_CHANNEL: ${{ needs.metadata.outputs.channel }}
         run: |
           set -euo pipefail
 
           git fetch --tags --force
 
-          tag="${{ steps.metadata.outputs.tag }}"
-          channel="${{ steps.metadata.outputs.channel }}"
+          tag="$RELEASE_TAG"
+          channel="$RELEASE_CHANNEL"
           changelog_path="dist/routes-${tag}-CHANGELOG.md"
           release_notes_path="dist/routes-${tag}-RELEASE_NOTES.md"
 
@@ -194,7 +287,11 @@ jobs:
       - name: Generate release notes
         uses: actions/github-script@v9.0.0
         env:
-          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          RELEASE_CHANNEL: ${{ needs.metadata.outputs.channel }}
+          CRATE_NAME: ${{ needs.metadata.outputs.crate_name }}
+          CRATE_VERSION: ${{ needs.metadata.outputs.crate_version }}
+          CRATE_FILE: ${{ needs.metadata.outputs.crate_file }}
           PREVIOUS_TAG: ${{ steps.changelog.outputs.previous_tag }}
           CHANGELOG_PATH: ${{ steps.changelog.outputs.changelog_path }}
           CHANGELOG_ASSET: ${{ steps.changelog.outputs.changelog_asset }}
@@ -226,6 +323,14 @@ jobs:
             const notes = [
               generatedBody.trim(),
               "",
+              "## Install with Cargo",
+              "",
+              "```bash",
+              `cargo install ${process.env.CRATE_NAME} --version ${process.env.CRATE_VERSION} --locked`,
+              "```",
+              "",
+              `The same source package published to crates.io is attached as \`${process.env.CRATE_FILE}\`.`,
+              "",
               "## Validation evidence",
               "",
               "This release attaches revision-linked controlled benchmark, provider conformance, runtime-gate, and evidence-manifest JSON. The controlled benchmark measures router plus loopback mock overhead and explicitly excludes external-provider variability.",
@@ -241,15 +346,16 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v3.0.2
         with:
-          tag_name: ${{ steps.metadata.outputs.tag }}
-          name: Routes ${{ steps.metadata.outputs.tag }}
+          tag_name: ${{ needs.metadata.outputs.tag }}
+          name: Routes ${{ needs.metadata.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          prerelease: ${{ steps.metadata.outputs.prerelease }}
-          make_latest: ${{ steps.metadata.outputs.make_latest }}
+          prerelease: ${{ needs.metadata.outputs.prerelease }}
+          make_latest: ${{ needs.metadata.outputs.make_latest }}
           body_path: ${{ steps.changelog.outputs.release_notes_path }}
           files: |
             dist/routes-*.tar.gz
             dist/routes-*.zip
+            dist/*.crate
             dist/routes-*-CHANGELOG.md
             dist/routes-*-RELEASE_NOTES.md
             dist/**/router.*.json

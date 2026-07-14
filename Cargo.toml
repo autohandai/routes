@@ -1,13 +1,17 @@
 [package]
 name = "autohand-router"
-version = "0.1.0"
+version = "0.1.0-canary.1"
 edition = "2024"
+rust-version = "1.96"
 description = "OpenAI-compatible routing layer for multi-model, multi-provider inference"
 readme = "README.md"
 repository = "https://github.com/autohandai/routes"
+homepage = "https://github.com/autohandai/routes"
+documentation = "https://docs.rs/autohand-router"
 license-file = "LICENSE"
 keywords = ["llm", "router", "openai", "inference", "agent"]
 categories = ["web-programming", "network-programming", "command-line-utilities"]
+publish = ["crates-io"]
 
 [[bin]]
 name = "routes"

@@ -307,6 +307,13 @@ jobs:
           script: |
             const fs = require("fs");
 
+            const localChangelog = fs.readFileSync(process.env.CHANGELOG_PATH, "utf8").trim();
+            const commitHeading = "## Commits";
+            const commitHeadingIndex = localChangelog.indexOf(commitHeading);
+            const commitChangelog = commitHeadingIndex >= 0
+              ? localChangelog.slice(commitHeadingIndex + commitHeading.length).trim()
+              : localChangelog;
+
             let generatedBody;
             try {
               const request = {
@@ -324,10 +331,14 @@ jobs:
               generatedBody = response.data.body;
             } catch (error) {
               core.warning(`Falling back to local changelog for release notes: ${error.message}`);
-              generatedBody = fs.readFileSync(process.env.CHANGELOG_PATH, "utf8");
+              generatedBody = "";
             }
 
             const notes = [
+              "## What's changed",
+              "",
+              commitChangelog,
+              "",
               generatedBody.trim(),
               "",
               "## Install with Cargo",

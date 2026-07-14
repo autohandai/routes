@@ -1,6 +1,6 @@
 [package]
 name = "autohand-router"
-version = "0.1.0-canary.1"
+version = "0.1.0-canary.2"
 edition = "2024"
 rust-version = "1.96"
 description = "OpenAI-compatible routing layer for multi-model, multi-provider inference"

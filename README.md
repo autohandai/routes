@@ -126,7 +126,7 @@ routes --help
 Install a specific canary when testing an upcoming release:
 
 ```bash
-cargo install autohand-router --version 0.1.0-canary.1 --locked
+cargo install autohand-router --version 0.1.0-canary.2 --locked
 ```
 
 The exact `.crate` source package published to crates.io is also attached to the matching GitHub Release. To build directly from the repository instead:

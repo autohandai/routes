@@ -145,8 +145,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo package --locked
-          mkdir -p dist
-          cp "target/package/$CRATE_FILE" "dist/$CRATE_FILE"
+          test -f "target/package/$CRATE_FILE"
 
       - name: Publish crate to crates.io
         env:
@@ -187,6 +186,7 @@ jobs:
           CRATE_FILE: ${{ needs.metadata.outputs.crate_file }}
         run: |
           set -euo pipefail
+          mkdir -p dist
           curl --fail --location --silent --show-error \
             --retry 12 --retry-all-errors --retry-delay 5 \
             --user-agent "autohand-routes-release/${CRATE_VERSION} (https://github.com/autohandai/routes)" \
@@ -230,6 +230,7 @@ jobs:
         id: changelog
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
           RELEASE_CHANNEL: ${{ needs.metadata.outputs.channel }}
         run: |
@@ -249,10 +250,16 @@ jobs:
           fi
 
           previous_tag="$(
-            git tag --sort=-v:refname --merged "$end_ref" \
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq '.[] | select(.draft == false) | .tag_name' \
               | grep -Fvx "$tag" \
               | head -n 1 || true
           )"
+
+          if [ -n "$previous_tag" ] && ! git rev-parse -q --verify "refs/tags/$previous_tag" >/dev/null; then
+            echo "previous published release tag $previous_tag is not available locally" >&2
+            exit 1
+          fi
 
           if [ -n "$previous_tag" ]; then
             range="$previous_tag..$end_ref"

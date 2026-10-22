@@ -98,7 +98,7 @@ models:
     context_window: 32768
     local: true
 
-  - id: openrouter/anthropic/claude-sonnet-4.5
+  - id: anthropic/claude-sonnet-4.5
     provider: openrouter
     aliases: [sonnet, default-strong]
     capability: 0.88

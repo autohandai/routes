@@ -249,7 +249,7 @@ models:
       supported_endpoints: [chat, responses]
     local: true
 
-  - id: openrouter/anthropic/claude-sonnet-4.5
+  - id: anthropic/claude-sonnet-4.5
     provider: openrouter
     aliases: [sonnet, default-strong]
     capability: 0.88

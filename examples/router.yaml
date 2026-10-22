@@ -470,7 +470,7 @@ models:
       supports_long_context: true
     local: true
 
-  - id: openrouter/anthropic/claude-sonnet-4.5
+  - id: anthropic/claude-sonnet-4.5
     provider: openrouter
     aliases: [sonnet, default-strong]
     capability: 0.88
@@ -488,7 +488,7 @@ models:
       supports_web_apps: true
       supports_long_context: true
 
-  - id: openrouter/anthropic/claude-opus-4.1
+  - id: anthropic/claude-opus-4.1
     provider: openrouter
     aliases: [opus, strongest]
     capability: 0.98
